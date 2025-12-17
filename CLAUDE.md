@@ -5,45 +5,129 @@ Durable notebook orchestration for local-first data pipelines.
 ## Current Implementation Status
 
 **What's Built:**
-- Basic Tauri app scaffolding (Rust backend, React frontend)
-- React 19 + Vite build setup
+
+### Core Infrastructure
+- Tauri app scaffolding (Rust backend, React 19 frontend)
+- Vite build system with hot reload
+- Application state management (current project tracking)
+
+### Backend (Rust)
 - **Python/UV Integration (`src-tauri/src/python.rs`)**:
   - Automatic uv installation if not present
-  - Virtual environment creation
-  - Package installation (jupyter, nbformat, cloudpickle)
-  - Python code execution in venv
-- **Project Initialization (`src-tauri/src/project.rs`)**:
+  - Virtual environment creation and management
+  - Package installation (jupyter, nbformat, cloudpickle, ipykernel)
+  - Python code execution in isolated venv
+  - Dependency syncing with `uv sync`
+
+- **Project Management (`src-tauri/src/project.rs`)**:
   - `create_project()` - Initialize new Tether project with uv
+  - `open_folder()` - Open any folder with pyproject.toml
   - `load_project()` - Load existing project or .tether shortcut
-  - Creates full directory structure (.tether/, notebooks/, pyproject.toml)
+  - Creates directory structure (.tether/, notebooks/, pyproject.toml)
   - Generates .tether shortcut file
-- **Tauri Commands Available**:
-  - `check_uv_installed`, `install_uv`, `ensure_uv` - UV management
-  - `create_project`, `load_project`, `get_current_project` - Project management
-  - `init_python_env`, `ensure_python_venv` - Environment setup
-  - `install_python_package`, `install_python_packages` - Package management
-  - `run_python_code` - Execute Python in venv
-- File structure:
-  - `src/App.jsx` - Basic React app component
-  - `src/main.jsx` - React entry point
-  - `src-tauri/src/lib.rs` - Tauri commands
-  - `src-tauri/src/python.rs` - Python/uv integration
-  - `src-tauri/src/project.rs` - Project initialization
-  - `package.json` - Node dependencies (React, Tauri, React Flow, Monaco)
-  - `src-tauri/Cargo.toml` - Rust dependencies
+
+- **File System Operations (`src-tauri/src/fs.rs`)**:
+  - `list_files()` - Directory listing with file metadata
+  - `create_notebook()` - Create new .ipynb files with proper structure
+  - `read_notebook()` - Load notebook JSON
+  - `save_notebook()` - Save notebook with validation
+
+- **Jupyter Kernel Integration**:
+  - **HTTP Kernel Server (`src-tauri/src/kernel_http.rs` + `kernel_server.py`)**:
+    - FastAPI server for kernel lifecycle management
+    - Per-notebook kernel isolation
+    - Health check endpoint
+    - `start_kernel()` - Start kernel in project venv
+    - `execute_cell()` - Execute code and collect outputs
+    - `stop_kernel()` - Clean shutdown
+  - **Direct ZMQ Integration (`src-tauri/src/kernel.rs`)**:
+    - Low-level Jupyter protocol implementation (not currently used)
+    - ZMQ socket management
+    - Message serialization/deserialization
+    - Kernel spec discovery
+
+- **Tauri Commands**:
+  - UV: `check_uv_installed`, `install_uv`, `ensure_uv`
+  - Projects: `create_project`, `open_folder`, `load_project`, `get_current_project`, `set_project_root`, `get_project_root`
+  - Python: `init_python_env`, `ensure_python_venv`, `install_python_package`, `install_python_packages`, `run_python_code`
+  - Files: `list_files`, `create_notebook`, `read_notebook`, `save_notebook`
+  - Kernels: `ensure_kernel_server`, `start_kernel`, `execute_cell`, `stop_kernel`
+
+### Frontend (React + JSX)
+- **App Shell (`src/App.jsx`)**:
+  - Multi-view routing (welcome, create, project)
+  - Project state management
+  - Notebook viewer integration
+
+- **Components**:
+  - `Welcome.jsx` - Landing screen with "Open Folder" and "Create New Project"
+  - `CreateProject.jsx` - New project wizard
+  - `FileExplorer.jsx` - Collapsible tree view with file icons, notebook creation
+  - `NotebookViewer.jsx` - Full-featured notebook editor:
+    - Monaco editor for code cells
+    - Markdown cell editing
+    - Cell execution with Shift+Enter
+    - Output rendering (stdout, stderr, execute_result, errors)
+    - Cell manipulation (add, delete, move up/down, change type)
+    - Jupyter-style keyboard shortcuts (a/b for add, m/y for type change, arrows for navigation)
+    - Kernel lifecycle management
+    - Auto-save on blur
+    - ANSI color code stripping
+  - `Canvas.jsx` - Placeholder for React Flow (not implemented)
+  - `StatePanel.jsx` - Placeholder for state inspector (not implemented)
+  - `NotebookList.jsx` - Placeholder (not implemented)
+  - `RunLog.jsx` - Placeholder (not implemented)
+
+- **Hooks**:
+  - `useProject.js` - Project state hooks (exists but implementation TBD)
+  - `useTether.js` - Tauri command wrappers (exists but implementation TBD)
+
+### Python Runtime
+- **Kernel Server (`src-tauri/kernel_server.py`)**:
+  - FastAPI + uvicorn HTTP server
+  - AsyncKernelManager for each notebook
+  - Automatic kernel spec installation per project
+  - Connection to project venv Python
+  - IOPub message collection
+  - Graceful shutdown with cleanup
+
+- **Dependencies (`pyproject.toml`)**:
+  - fastapi, uvicorn - HTTP server
+  - jupyter-client - Kernel management
+
+### Package Dependencies
+- **Frontend (`package.json`)**:
+  - React 19
+  - Monaco Editor (@monaco-editor/react)
+  - React Flow (@xyflow/react) - installed but not used
+  - Tauri plugins (dialog, opener)
 
 **What's NOT Built (Yet):**
 - State management system (SQLite state.db, blob storage)
-- Notebook execution engine (cell-by-cell with checkpointing)
-- Notebook discovery and status tracking
-- React Flow canvas UI for visual connections
-- Monaco editor integration for code preview
-- Run logs and execution history
-- Python tether-core package (the package notebooks import)
+- Checkpointing and durability (cell-by-cell checkpoints)
+- Notebook dependency tracking and auto-discovery
+- React Flow canvas UI for visual pipeline connections
+- Run logs and execution history viewer
+- Python tether-core package (the `from tether import state` API)
 - Scheduler/cron functionality
+- State forking (Neon-style branches)
+- .tether file association and double-click to open
+
+**Architecture Notes:**
+The app currently uses an HTTP-based kernel architecture:
+1. Tauri starts a FastAPI server (kernel_server.py) on port 8765
+2. Each notebook gets its own Jupyter kernel managed by AsyncKernelManager
+3. Kernels run in the project's venv, with custom kernel specs installed
+4. Frontend communicates via Tauri commands → HTTP → Kernel server → Jupyter kernel
+5. This allows clean isolation and kernel lifecycle management
 
 **Next Steps:**
-The app is ready for implementation of core Tether features following the architecture below.
+Priority features to implement:
+1. State management system (tether-core Python package + SQLite backend)
+2. React Flow canvas for visualizing notebook connections
+3. Run logs and execution history
+4. Checkpointing and resume functionality
+5. Scheduler for automated runs
 
 ## Project Overview
 
@@ -158,30 +242,39 @@ tether logs [notebook]              # View execution logs
 tether resume [notebook]            # Resume interrupted run
 ```
 
-## Key Files to Build
+## Key Files Status
 
-### Rust (src-tauri/)
-- `src/main.rs` - Tauri app entry, command handlers
-- `src/python.rs` - uv integration, environment management
-- `src/state.rs` - State management, forking
-- `src/executor.rs` - Notebook execution orchestration
-- `src/scheduler.rs` - Cron-based scheduling
+### Rust (src-tauri/) - Built
+- ✅ `src/lib.rs` - Tauri app entry, command handlers (BUILT)
+- ✅ `src/python.rs` - uv integration, environment management (BUILT)
+- ✅ `src/project.rs` - Project initialization and loading (BUILT)
+- ✅ `src/fs.rs` - File system operations (BUILT)
+- ✅ `src/kernel.rs` - Direct ZMQ kernel integration (BUILT but not used)
+- ✅ `src/kernel_http.rs` - HTTP kernel server integration (BUILT and in use)
+- ❌ `src/state.rs` - State management, forking (NOT BUILT)
+- ❌ `src/executor.rs` - Notebook execution orchestration (NOT BUILT)
+- ❌ `src/scheduler.rs` - Cron-based scheduling (NOT BUILT)
 
-### React/JSX (src/)
-- `App.jsx` - Main app layout
-- `components/Canvas.jsx` - React Flow notebook visualization
-- `components/StatePanel.jsx` - State variable inspector
-- `components/NotebookList.jsx` - Sidebar notebook list
-- `components/RunLog.jsx` - Execution logs viewer
-- `hooks/useProject.js` - Project state management
-- `hooks/useTether.js` - Tauri command bindings
+### React/JSX (src/) - Partially Built
+- ✅ `App.jsx` - Main app layout with routing (BUILT)
+- ✅ `components/Welcome.jsx` - Landing screen (BUILT)
+- ✅ `components/CreateProject.jsx` - New project wizard (BUILT)
+- ✅ `components/FileExplorer.jsx` - File tree browser (BUILT)
+- ✅ `components/NotebookViewer.jsx` - Full notebook editor (BUILT)
+- ⚠️ `components/Canvas.jsx` - React Flow visualization (PLACEHOLDER)
+- ⚠️ `components/StatePanel.jsx` - State inspector (PLACEHOLDER)
+- ⚠️ `components/NotebookList.jsx` - Notebook list (PLACEHOLDER)
+- ⚠️ `components/RunLog.jsx` - Execution logs (PLACEHOLDER)
+- ⚠️ `hooks/useProject.js` - Project state hooks (EXISTS, needs implementation)
+- ⚠️ `hooks/useTether.js` - Tauri command wrappers (EXISTS, needs implementation)
 
-### Python (tether-core/)
-- `tether/__init__.py` - Public API (state)
-- `tether/state.py` - State get/set/list/delete
-- `tether/executor.py` - Cell-by-cell execution with checkpointing
-- `tether/checkpoint.py` - Namespace serialization
-- `tether/cli.py` - CLI entry point
+### Python (tether-core/) - Not Built
+- ✅ `kernel_server.py` - FastAPI kernel manager (BUILT, in src-tauri/)
+- ❌ `tether/__init__.py` - Public API (state) (NOT BUILT)
+- ❌ `tether/state.py` - State get/set/list/delete (NOT BUILT)
+- ❌ `tether/executor.py` - Cell-by-cell execution with checkpointing (NOT BUILT)
+- ❌ `tether/checkpoint.py` - Namespace serialization (NOT BUILT)
+- ❌ `tether/cli.py` - CLI entry point (NOT BUILT)
 
 ## State API (Python)
 
@@ -274,31 +367,38 @@ Register `.tether` extension on install. Double-click opens the Tauri app with t
 ## Development Setup
 
 ```bash
-# Install Rust
+# Install Rust (if not already installed)
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 
-# Install Node
-# (use your preferred method)
+# Install Node/npm (if not already installed)
+# Use your preferred method (nvm, homebrew, etc.)
 
-# Install Tauri CLI
-cargo install tauri-cli
+# Install uv (Python package manager)
+curl -LsSf https://astral.sh/uv/install.sh | sh
 
 # Clone and setup
-git clone <repo>
 cd tether
 
-# Install frontend deps
+# Install frontend dependencies
 npm install
 
-# Fetch uv binaries for all platforms
-python scripts/fetch_uv.py
+# Create Python virtual environment and install dependencies
+uv venv
+uv sync
 
-# Run in dev mode
-cargo tauri dev
+# Run in dev mode (starts Tauri app with Vite dev server)
+npm run tauri dev
 
 # Build for production
-cargo tauri build
+npm run tauri build
 ```
+
+**Current Development Workflow:**
+1. The app uses uv for Python dependency management (not bundled yet)
+2. Frontend is React 19 with Vite for hot reload
+3. The kernel server (kernel_server.py) is started automatically by Tauri
+4. Each project gets its own .venv with ipykernel installed
+5. Monaco editor provides the code editing experience
 
 ## Design Principles
 

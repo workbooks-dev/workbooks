@@ -225,6 +225,21 @@ async fn save_notebook(
 }
 
 #[tauri::command]
+async fn read_file(file_path: String) -> Result<String, String> {
+    let path = PathBuf::from(file_path);
+    fs::read_file(&path).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn save_file(
+    file_path: String,
+    content: String,
+) -> Result<(), String> {
+    let path = PathBuf::from(file_path);
+    fs::save_file(&path, &content).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 async fn ensure_kernel_server(state: State<'_, AppState>) -> Result<(), String> {
     // Use async mutex to hold lock across await - prevents race condition
     let mut server = state.kernel_server.lock().await;
@@ -326,6 +341,8 @@ pub fn run() {
             create_notebook,
             read_notebook,
             save_notebook,
+            read_file,
+            save_file,
             ensure_kernel_server,
             start_kernel,
             execute_cell,

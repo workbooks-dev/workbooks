@@ -107,9 +107,9 @@ export function FileExplorer({ projectRoot, projectName, onOpenNotebook }) {
 
   const handleFileClick = (file) => {
     if (file.extension === "ipynb") {
-      onOpenNotebook?.(file.path);
+      onOpenNotebook?.(file.path, "notebook");
     } else {
-      console.log("Open file:", file.path);
+      onOpenNotebook?.(file.path, "file");
     }
   };
 

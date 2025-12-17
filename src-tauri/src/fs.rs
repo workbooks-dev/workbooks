@@ -133,3 +133,19 @@ pub fn save_notebook(notebook_path: &Path, content: &str) -> Result<()> {
 
     Ok(())
 }
+
+/// Read a generic text file
+pub fn read_file(file_path: &Path) -> Result<String> {
+    let content = fs::read_to_string(file_path)
+        .context("Failed to read file")?;
+
+    Ok(content)
+}
+
+/// Save generic text file content
+pub fn save_file(file_path: &Path, content: &str) -> Result<()> {
+    fs::write(file_path, content)
+        .context("Failed to write file")?;
+
+    Ok(())
+}

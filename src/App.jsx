@@ -4,13 +4,16 @@ import { Welcome } from "./components/Welcome";
 import { CreateProject } from "./components/CreateProject";
 import { FileExplorer } from "./components/FileExplorer";
 import { NotebookViewer } from "./components/NotebookViewer";
+import { FileViewer } from "./components/FileViewer";
+import { TabBar } from "./components/TabBar";
 import "./App.css";
 
 function App() {
   const [currentProject, setCurrentProject] = useState(null);
   const [loading, setLoading] = useState(true);
   const [view, setView] = useState("loading"); // loading, welcome, create, project
-  const [openNotebook, setOpenNotebook] = useState(null);
+  const [tabs, setTabs] = useState([]);
+  const [activeTabId, setActiveTabId] = useState(null);
 
   useEffect(() => {
     checkCurrentProject();
@@ -47,12 +50,50 @@ function App() {
     setView("project");
   }
 
-  function handleOpenNotebook(notebookPath) {
-    setOpenNotebook(notebookPath);
+  function handleOpenFile(filePath, fileType) {
+    // Check if file is already open
+    const existingTab = tabs.find((tab) => tab.path === filePath);
+    if (existingTab) {
+      setActiveTabId(existingTab.id);
+      return;
+    }
+
+    // Create new tab
+    const newTab = {
+      id: Date.now().toString(),
+      path: filePath,
+      type: fileType,
+      hasUnsavedChanges: false,
+    };
+
+    setTabs([...tabs, newTab]);
+    setActiveTabId(newTab.id);
   }
 
-  function handleCloseNotebook() {
-    setOpenNotebook(null);
+  function handleTabSelect(tabId) {
+    setActiveTabId(tabId);
+  }
+
+  function handleTabClose(tabId) {
+    const newTabs = tabs.filter((tab) => tab.id !== tabId);
+    setTabs(newTabs);
+
+    // If closing active tab, switch to another tab
+    if (tabId === activeTabId) {
+      if (newTabs.length > 0) {
+        setActiveTabId(newTabs[newTabs.length - 1].id);
+      } else {
+        setActiveTabId(null);
+      }
+    }
+  }
+
+  function updateTabUnsavedState(tabId, hasUnsavedChanges) {
+    setTabs((prevTabs) =>
+      prevTabs.map((tab) =>
+        tab.id === tabId ? { ...tab, hasUnsavedChanges } : tab
+      )
+    );
   }
 
   if (loading || view === "loading") {
@@ -85,6 +126,8 @@ function App() {
     );
   }
 
+  const activeTab = tabs.find((tab) => tab.id === activeTabId);
+
   return (
     <div className="app">
       <div className="app-body">
@@ -92,20 +135,35 @@ function App() {
           <FileExplorer
             projectRoot={currentProject.root}
             projectName={currentProject.name}
-            onOpenNotebook={handleOpenNotebook}
+            onOpenNotebook={handleOpenFile}
           />
         </aside>
         <main className="app-main">
+          <TabBar
+            tabs={tabs}
+            activeTabId={activeTabId}
+            onTabSelect={handleTabSelect}
+            onTabClose={handleTabClose}
+          />
           <div className="project-view">
-            {openNotebook ? (
-              <NotebookViewer
-                notebookPath={openNotebook}
-                projectRoot={currentProject.root}
-                onClose={handleCloseNotebook}
-              />
+            {activeTab ? (
+              activeTab.type === "notebook" ? (
+                <NotebookViewer
+                  key={activeTab.id}
+                  notebookPath={activeTab.path}
+                  projectRoot={currentProject.root}
+                  onClose={() => handleTabClose(activeTab.id)}
+                />
+              ) : (
+                <FileViewer
+                  key={activeTab.id}
+                  filePath={activeTab.path}
+                  onClose={() => handleTabClose(activeTab.id)}
+                />
+              )
             ) : (
               <div className="placeholder">
-                <p>Select a notebook to open</p>
+                <p>Select a file to open</p>
               </div>
             )}
           </div>
