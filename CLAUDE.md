@@ -2,6 +2,49 @@
 
 Durable notebook orchestration for local-first data pipelines.
 
+## Current Implementation Status
+
+**What's Built:**
+- Basic Tauri app scaffolding (Rust backend, React frontend)
+- React 19 + Vite build setup
+- **Python/UV Integration (`src-tauri/src/python.rs`)**:
+  - Automatic uv installation if not present
+  - Virtual environment creation
+  - Package installation (jupyter, nbformat, cloudpickle)
+  - Python code execution in venv
+- **Project Initialization (`src-tauri/src/project.rs`)**:
+  - `create_project()` - Initialize new Tether project with uv
+  - `load_project()` - Load existing project or .tether shortcut
+  - Creates full directory structure (.tether/, notebooks/, pyproject.toml)
+  - Generates .tether shortcut file
+- **Tauri Commands Available**:
+  - `check_uv_installed`, `install_uv`, `ensure_uv` - UV management
+  - `create_project`, `load_project`, `get_current_project` - Project management
+  - `init_python_env`, `ensure_python_venv` - Environment setup
+  - `install_python_package`, `install_python_packages` - Package management
+  - `run_python_code` - Execute Python in venv
+- File structure:
+  - `src/App.jsx` - Basic React app component
+  - `src/main.jsx` - React entry point
+  - `src-tauri/src/lib.rs` - Tauri commands
+  - `src-tauri/src/python.rs` - Python/uv integration
+  - `src-tauri/src/project.rs` - Project initialization
+  - `package.json` - Node dependencies (React, Tauri, React Flow, Monaco)
+  - `src-tauri/Cargo.toml` - Rust dependencies
+
+**What's NOT Built (Yet):**
+- State management system (SQLite state.db, blob storage)
+- Notebook execution engine (cell-by-cell with checkpointing)
+- Notebook discovery and status tracking
+- React Flow canvas UI for visual connections
+- Monaco editor integration for code preview
+- Run logs and execution history
+- Python tether-core package (the package notebooks import)
+- Scheduler/cron functionality
+
+**Next Steps:**
+The app is ready for implementation of core Tether features following the architecture below.
+
 ## Project Overview
 
 Tether is a desktop application that makes Jupyter notebooks durable, resumable, and connectable. Users can run notebooks locally with automatic checkpointing, connect notebooks through shared state, and schedule/orchestrate pipelines visually.
@@ -55,7 +98,7 @@ state.set("customers_clean", df_clean)
 
 ### Desktop App
 - **Tauri** (Rust + webview) - lightweight native app
-- **React** + **TypeScript** - frontend
+- **React** + **JSX** (NOT TypeScript unless absolutely necessary) - frontend
 - **React Flow / Xyflow** - drag-and-drop canvas for connecting notebooks
 - **Monaco** - code preview
 - **SQLite** - local state and run history
@@ -124,14 +167,14 @@ tether resume [notebook]            # Resume interrupted run
 - `src/executor.rs` - Notebook execution orchestration
 - `src/scheduler.rs` - Cron-based scheduling
 
-### TypeScript (src/)
-- `App.tsx` - Main app layout
-- `components/Canvas.tsx` - React Flow notebook visualization
-- `components/StatePanel.tsx` - State variable inspector
-- `components/NotebookList.tsx` - Sidebar notebook list
-- `components/RunLog.tsx` - Execution logs viewer
-- `hooks/useProject.ts` - Project state management
-- `hooks/useTether.ts` - Tauri command bindings
+### React/JSX (src/)
+- `App.jsx` - Main app layout
+- `components/Canvas.jsx` - React Flow notebook visualization
+- `components/StatePanel.jsx` - State variable inspector
+- `components/NotebookList.jsx` - Sidebar notebook list
+- `components/RunLog.jsx` - Execution logs viewer
+- `hooks/useProject.js` - Project state management
+- `hooks/useTether.js` - Tauri command bindings
 
 ### Python (tether-core/)
 - `tether/__init__.py` - Public API (state)
@@ -268,6 +311,8 @@ cargo tauri build
 4. **Durable by default** - Every cell checkpoints. Resume from anywhere.
 
 5. **uv handles Python** - No "install Python first" for users. uv bootstraps everything.
+
+6. **Keep it simple** - Use JSX, not TypeScript, unless absolutely necessary. Minimize complexity.
 
 ## Future Considerations
 

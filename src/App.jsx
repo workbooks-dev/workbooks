@@ -1,50 +1,117 @@
-import { useState } from "react";
-import reactLogo from "./assets/react.svg";
+import { useState, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { Welcome } from "./components/Welcome";
+import { CreateProject } from "./components/CreateProject";
+import { FileExplorer } from "./components/FileExplorer";
+import { NotebookViewer } from "./components/NotebookViewer";
 import "./App.css";
 
 function App() {
-  const [greetMsg, setGreetMsg] = useState("");
-  const [name, setName] = useState("");
+  const [currentProject, setCurrentProject] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [view, setView] = useState("loading"); // loading, welcome, create, project
+  const [openNotebook, setOpenNotebook] = useState(null);
 
-  async function greet() {
-    // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
-    setGreetMsg(await invoke("greet", { name }));
+  useEffect(() => {
+    checkCurrentProject();
+  }, []);
+
+  async function checkCurrentProject() {
+    try {
+      const project = await invoke("get_current_project");
+      if (project) {
+        setCurrentProject(project);
+        setView("project");
+      } else {
+        setView("welcome");
+      }
+    } catch (error) {
+      console.error("Failed to get current project:", error);
+      setView("welcome");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  function handleProjectOpened(project, mode) {
+    if (mode === "create") {
+      setView("create");
+    } else if (project) {
+      setCurrentProject(project);
+      setView("project");
+    }
+  }
+
+  function handleProjectCreated(project) {
+    setCurrentProject(project);
+    setView("project");
+  }
+
+  function handleOpenNotebook(notebookPath) {
+    setOpenNotebook(notebookPath);
+  }
+
+  function handleCloseNotebook() {
+    setOpenNotebook(null);
+  }
+
+  if (loading || view === "loading") {
+    return (
+      <div className="app loading">
+        <p>Loading...</p>
+      </div>
+    );
+  }
+
+  if (view === "welcome") {
+    return (
+      <div className="app welcome-view">
+        <Welcome onProjectOpened={handleProjectOpened} />
+      </div>
+    );
+  }
+
+  if (view === "create") {
+    return (
+      <div className="app">
+        <header className="app-header">
+          <h1>Tether</h1>
+          <button onClick={() => setView("welcome")}>Back</button>
+        </header>
+        <main className="app-main">
+          <CreateProject onProjectCreated={handleProjectCreated} />
+        </main>
+      </div>
+    );
   }
 
   return (
-    <main className="container">
-      <h1>Welcome to Tauri + React</h1>
-
-      <div className="row">
-        <a href="https://vite.dev" target="_blank">
-          <img src="/vite.svg" className="logo vite" alt="Vite logo" />
-        </a>
-        <a href="https://tauri.app" target="_blank">
-          <img src="/tauri.svg" className="logo tauri" alt="Tauri logo" />
-        </a>
-        <a href="https://react.dev" target="_blank">
-          <img src={reactLogo} className="logo react" alt="React logo" />
-        </a>
+    <div className="app">
+      <div className="app-body">
+        <aside className="app-sidebar">
+          <FileExplorer
+            projectRoot={currentProject.root}
+            projectName={currentProject.name}
+            onOpenNotebook={handleOpenNotebook}
+          />
+        </aside>
+        <main className="app-main">
+          <div className="project-view">
+            {openNotebook ? (
+              <NotebookViewer
+                notebookPath={openNotebook}
+                projectRoot={currentProject.root}
+                onClose={handleCloseNotebook}
+              />
+            ) : (
+              <div className="placeholder">
+                <p>Select a notebook to open</p>
+              </div>
+            )}
+          </div>
+        </main>
       </div>
-      <p>Click on the Tauri, Vite, and React logos to learn more.</p>
-
-      <form
-        className="row"
-        onSubmit={(e) => {
-          e.preventDefault();
-          greet();
-        }}
-      >
-        <input
-          id="greet-input"
-          onChange={(e) => setName(e.currentTarget.value)}
-          placeholder="Enter a name..."
-        />
-        <button type="submit">Greet</button>
-      </form>
-      <p>{greetMsg}</p>
-    </main>
+    </div>
   );
 }
 
