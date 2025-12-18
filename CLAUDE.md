@@ -2,210 +2,71 @@
 
 Durable workbook orchestration for local-first data pipelines.
 
-## Current Implementation Status
+## Feature Documentation
 
-**What's Built:**
+**All feature documentation, implementation status, and todos are tracked in the `features/` directory.**
 
-### Core Infrastructure
-- Tauri app scaffolding (Rust backend, React 19 frontend)
-- Vite build system with hot reload
-- Application state management (current project tracking)
+Each feature area has three files:
+- **`docs.md`** - What the feature is, how it works, design decisions
+- **`todo.md`** - What needs to be implemented
+- **`done.md`** - What has been completed
 
-### Backend (Rust)
-- **Python/UV Integration (`src-tauri/src/python.rs`)**:
-  - Automatic uv installation if not present
-  - Virtual environment creation and management
-  - Package installation (jupyter, nbformat, cloudpickle, ipykernel)
-  - Python code execution in isolated venv
-  - Dependency syncing with `uv sync`
+### Feature Areas
 
-- **Project Management (`src-tauri/src/project.rs`)**:
-  - `create_project()` - Initialize new Tether project with uv
-  - `open_folder()` - Open any folder with pyproject.toml
-  - `load_project()` - Load existing project or .tether shortcut
-  - Creates directory structure (.tether/, notebooks/, pyproject.toml)
-  - Generates .tether shortcut file
+#### Core UI
+- **`features/navigation/`** - Tab-based navigation system, multi-file support
+- **`features/sidebar/`** - Sidebar structure and sections (Workbooks, Secrets, Schedule, Files)
 
-- **File System Operations (`src-tauri/src/fs.rs`)**:
-  - `list_files()` - Directory listing with file metadata
-  - `create_workbook()` - Create new .ipynb files with proper structure
-  - `read_workbook()` - Load workbook JSON
-  - `save_workbook()` - Save workbook with validation
-  - `read_file()` - Read any file (text)
-  - `save_file()` - Save any file
-  - `rename_file()` - Rename files
-  - `delete_file()` - Delete files
-  - `duplicate_workbook()` - Duplicate a workbook with new name
+#### Workbook System
+- **`features/workbooks/`** - Workbook viewer, execution engine, keyboard shortcuts, streaming output
+- **`features/files/`** - File management, environment variables (TETHER_PROJECT_FOLDER), file drop handling
 
-- **Jupyter Engine Integration**:
-  - **HTTP Engine Server (`src-tauri/src/engine_http.rs` + `engine_server.py`)**:
-    - FastAPI server for engine lifecycle management
-    - Per-workbook engine isolation
-    - Health check endpoint
-    - `start_engine()` - Start engine in project venv
-    - `execute_cell()` - Execute code and collect outputs
-    - `execute_cell_stream()` - Execute code with streaming output
-    - `stop_engine()` - Clean shutdown
-    - `interrupt_engine()` - Interrupt running execution
-    - `restart_engine()` - Restart engine and clear state
-  - **Direct ZMQ Integration (`src-tauri/src/kernel.rs`)**:
-    - Low-level Jupyter protocol implementation (not currently used)
-    - ZMQ socket management
-    - Message serialization/deserialization
-    - Kernel spec discovery
+#### Data & Security
+- **`features/secrets/`** - Secrets management, encryption, keychain integration
+- **`features/state/`** - State management system (SQLite, blob storage, tether-core API)
 
-- **Tauri Commands**:
-  - UV: `check_uv_installed`, `install_uv`, `ensure_uv`
-  - Projects: `create_project`, `open_folder`, `load_project`, `get_current_project`, `set_project_root`, `get_project_root`
-  - Python: `init_python_env`, `ensure_python_venv`, `install_python_package`, `install_python_packages`, `run_python_code`
-  - Files: `list_files`, `create_workbook`, `read_workbook`, `save_workbook`, `read_file`, `save_file`, `rename_file`, `delete_file`, `duplicate_workbook`
-  - Engines: `ensure_engine_server`, `start_engine`, `execute_cell`, `execute_cell_stream`, `stop_engine`, `interrupt_engine`, `restart_engine`
+#### Automation
+- **`features/schedule/`** - Cron scheduling, run history, automated execution
 
-### Frontend (React + JSX)
-- **App Shell (`src/App.jsx`)**:
-  - Multi-view routing (welcome, create, project)
-  - Project state management
-  - Tab system for multiple open files
-  - Workbook and file viewer integration
-  - Autosave toggle
+#### Configuration
+- **`features/project-settings/`** - Project settings, package management, export
+- **`features/network/`** - Network requirements, offline behavior, status indicators
 
-- **Components**:
-  - `Welcome.jsx` - Landing screen with "Open Folder" and "Create New Project"
-  - `CreateProject.jsx` - New project wizard
-  - `FileExplorer.jsx` - Collapsible tree view with file icons, workbook creation, context menu support
-  - `TabBar.jsx` - Tab management for open files:
-    - Multiple file type support (workbooks, Python, Markdown, JSON, etc.)
-    - Tab close functionality
-    - Autosave toggle control
-    - Active tab highlighting
-  - `WorkbookViewer.jsx` - Full-featured workbook editor (85% MVP complete):
-    - Monaco editor for code cells with syntax highlighting
-    - Markdown cell editing and rendering with code syntax highlighting
-    - Cell execution with Shift+Enter, Ctrl/Cmd+Enter, Alt+Enter
-    - **Streaming output** - Real-time stdout/stderr via Server-Sent Events
-    - **Rich output rendering** - PNG, JPEG, SVG, HTML (DataFrames, plots, etc.)
-    - Output rendering (stdout, stderr, execute_result, errors, images, HTML, tables)
-    - Cell manipulation (add, delete, move up/down, change type, clear output)
-    - **Jupyter-style keyboard shortcuts** - DD double-tap delete, A/B for add, M/Y for type change, arrows for navigation
-    - **Engine lifecycle management** - start, stop, interrupt, restart
-    - **Kernel status indicator** - Real-time status (starting/idle/busy/error/restarting)
-    - Auto-save support with toggle (3s interval + on-blur + on-run)
-    - ANSI color code stripping
-    - Output truncation for large outputs with expand/collapse
-  - `FileViewer.jsx` - General file editor (BUILT):
-    - Monaco editor for code files
-    - Markdown preview for .md files
-    - Syntax highlighting for multiple languages
-    - Save functionality (Cmd/Ctrl+S)
-    - Unsaved changes detection
-  - `ContextMenu.jsx` - Right-click context menu (BUILT):
-    - File operations (rename, delete, duplicate)
-    - Positioned near cursor
-    - Click-outside and Escape to close
-  - `InputDialog.jsx` - Modal input dialog (BUILT):
-    - Used for rename/duplicate operations
-    - Keyboard shortcuts (Enter to confirm, Escape to cancel)
-    - Auto-focus and text selection
-  - `Canvas.jsx` - Placeholder for React Flow (not implemented)
-  - `StatePanel.jsx` - Placeholder for state inspector (not implemented)
-  - `WorkbookList.jsx` - Placeholder (not implemented)
-  - `RunLog.jsx` - Placeholder (not implemented)
+### Top-Level Feature Files
 
-- **Planned Sidebar Components** (see app-features.md for full details):
-  - **Workbooks Section**:
-    - Shows list of `.ipynb` files ordered by recent use
-    - Click header for full table view with filtering (Last Run, Status, Scheduled, Actions)
-    - Shows only workbooks in `/notebooks` folder
-  - **Secrets Section** (NOT BUILT):
-    - Table of encrypted key/value pairs
-    - See encryption.md for full implementation details
-    - Uses system keychain (Touch ID on macOS)
-  - **Schedule Section** (NOT BUILT):
-    - Tab 1: Scheduled Workbooks (list with next run time)
-    - Tab 2: Recent Runs (last 30 runs with reports)
-  - **Files Section**:
-    - Shows all project files except `.ipynb` (those appear in Workbooks)
-    - Reflects actual folder structure
-    - Opening a notebook from Files also displays it in Workbooks
-  - **Project Settings** (gear icon at bottom):
-    - Project name editing
-    - Python package management
-    - Export project as ZIP
+- **`features/todo.md`** - High-level roadmap and cross-cutting todos
+- **`features/changelog.md`** - Chronological list of completed work
+- **`features/README.md`** - Feature documentation structure and workflow
 
-- **File Drop Behavior** (TO BE IMPLEMENTED):
-  - `.ipynb` files → Saved to `/notebooks` folder, appear in Workbooks sidebar
-  - All other files → Saved to project root, appear in Files sidebar
+**When working on Tether:**
+1. Read `features/<area>/docs.md` to understand the design
+2. Check `features/<area>/todo.md` for what needs to be done
+3. Check `features/<area>/done.md` to see what's already implemented
+4. Implement the feature
+5. Move completed items from `todo.md` → `done.md`
+6. Add entry to `features/changelog.md` with date and description
 
-- **Environment Variables** (✅ IMPLEMENTED):
-  - `TETHER_PROJECT_FOLDER` - Absolute path to project root
-  - Automatically injected into all workbook kernel environments
-  - Implementation: Modified `engine_server.py` to accept `env_vars` parameter, modified `engine_http.rs` to pass TETHER_PROJECT_FOLDER
-  - Usage: `os.path.join(os.environ["TETHER_PROJECT_FOLDER"], "data.csv")`
-  - See `TETHER_PROJECT_FOLDER.md` for examples and best practices
+## Tech Stack Summary
 
-- **Hooks**:
-  - `useProject.js` - Project state hooks (exists but implementation TBD)
-  - `useTether.js` - Tauri command wrappers (exists but implementation TBD)
+- **Tauri** (Rust + webview) - Native desktop app
+- **React 19 + JSX** (NOT TypeScript) - Frontend UI
+- **Vite** - Build system with hot reload
+- **Monaco Editor** - Code editing
+- **React Flow** - Visual pipeline canvas (installed, not yet used)
+- **FastAPI + uvicorn** - Python engine server
+- **Jupyter Client** - Workbook execution via AsyncKernelManager
+- **UV** - Python environment and package management
+- **SQLite** - Local state and metadata (planned)
 
-### Python Runtime
-- **Engine Server (`src-tauri/engine_server.py`)**:
-  - FastAPI + uvicorn HTTP server
-  - AsyncKernelManager for each workbook
-  - Automatic kernel spec installation per project
-  - Connection to project venv Python
-  - IOPub message collection
-  - Streaming output support
-  - Interrupt and restart capabilities
-  - Graceful shutdown with cleanup
+## Current Architecture
 
-- **Dependencies (`pyproject.toml`)**:
-  - fastapi, uvicorn - HTTP server
-  - jupyter-client - Engine/kernel management
-
-### Package Dependencies
-- **Frontend (`package.json`)**:
-  - React 19 (react, react-dom)
-  - Monaco Editor (@monaco-editor/react) - code editing
-  - React Flow (@xyflow/react) - installed but not used yet
-  - Markdown support (marked, react-markdown, rehype-raw)
-  - Syntax highlighting (react-syntax-highlighter)
-  - Tauri plugins (dialog, opener, window-state)
-
-**What's NOT Built (Yet):**
-- **Sidebar UI redesign** (see app-features.md for planned structure):
-  - Workbooks section with recent-use ordering and table view
-  - Secrets manager component with encryption
-  - Schedule section with two tabs (Scheduled + Recent Runs)
-  - Files section showing all non-notebook files
-  - Project Settings modal
-- **File drop handling** - Drop .ipynb to /notebooks, other files to root
-- **Environment variable injection** - TETHER_PROJECT_FOLDER into workbook runtime
-- State management system (SQLite state.db, blob storage)
-- Checkpointing and durability (cell-by-cell checkpoints)
-- Workbook dependency tracking and auto-discovery
-- React Flow canvas UI for visual pipeline connections
-- Run logs and execution history (30-run limit with auto-deletion)
-- Python tether-core package (the `from tether import state` API)
-- Scheduler/cron functionality
-- State forking (Neon-style branches)
-- .tether file association and double-click to open
-
-**Architecture Notes:**
-The app currently uses an HTTP-based engine architecture:
+The app uses an HTTP-based engine architecture:
 1. Tauri starts a FastAPI server (engine_server.py) on port 8765
 2. Each workbook gets its own Jupyter engine managed by AsyncKernelManager
 3. Engines run in the project's venv, with custom kernel specs installed
 4. Frontend communicates via Tauri commands → HTTP → Engine server → Jupyter kernel
 5. This allows clean isolation and engine lifecycle management
 6. Streaming output is supported through event emission from Rust to frontend
-
-**Next Steps:**
-Priority features to implement:
-1. State management system (tether-core Python package + SQLite backend)
-2. React Flow canvas for visualizing workbook connections
-3. Run logs and execution history
-4. Checkpointing and resume functionality
-5. Scheduler for automated runs
 
 ## Project Overview
 
@@ -256,26 +117,7 @@ state.set("customers_clean", df_clean)
 └── My Pipeline.tether        # Shortcut file (double-click opens app)
 ```
 
-## Tech Stack
-
-### Desktop App
-- **Tauri** (Rust + webview) - lightweight native app
-- **React** + **JSX** (NOT TypeScript unless absolutely necessary) - frontend
-- **React Flow / Xyflow** - drag-and-drop canvas for connecting workbooks
-- **Monaco** - code preview and editing
-- **SQLite** - local state and run history
-
-### Python Runtime
-- **uv** - bundled for environment management, package installation
-- **cloudpickle** - serialize workbook namespace between cells
-- **nbformat** - parse and execute workbooks
-
-### State Storage
-- **SQLite** - metadata, small values, run tracking
-- **Filesystem blobs** - large objects (DataFrames, models) as pickles
-- **Optional S3** - cloud backup/sync
-
-## Architecture
+## Architecture Diagram
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -320,49 +162,22 @@ tether logs [workbook]              # View execution logs
 tether resume [workbook]            # Resume interrupted run
 ```
 
-## Key Files Status
+## Key File Locations
 
-### Rust (src-tauri/) - Built
-- ✅ `src/lib.rs` - Tauri app entry, command handlers (BUILT)
-- ✅ `src/python.rs` - uv integration, environment management (BUILT)
-- ✅ `src/project.rs` - Project initialization and loading (BUILT)
-- ✅ `src/fs.rs` - File system operations, workbook and file management (BUILT)
-- ✅ `src/kernel.rs` - Direct ZMQ kernel integration (BUILT but not used)
-- ✅ `src/engine_http.rs` - HTTP engine server integration (BUILT and in use)
-- ❌ `src/state.rs` - State management, forking (NOT BUILT)
-- ❌ `src/executor.rs` - Workbook execution orchestration (NOT BUILT)
-- ❌ `src/scheduler.rs` - Cron-based scheduling (NOT BUILT)
+### Backend (Rust)
+- `src-tauri/src/lib.rs` - Main Tauri app, command registration
+- `src-tauri/src/python.rs` - UV integration, environment management
+- `src-tauri/src/project.rs` - Project creation and loading
+- `src-tauri/src/fs.rs` - File system operations
+- `src-tauri/src/engine_http.rs` - HTTP engine server integration
+- `src-tauri/engine_server.py` - FastAPI Jupyter engine manager
 
-### React/JSX (src/) - Well Built
-- ✅ `App.jsx` - Main app layout with routing, tab management (BUILT)
-- ✅ `components/Welcome.jsx` - Landing screen (BUILT)
-- ✅ `components/CreateProject.jsx` - New project wizard (BUILT)
-- ✅ `components/FileExplorer.jsx` - File tree browser with context menu (BUILT)
-- ✅ `components/TabBar.jsx` - Tab management with autosave toggle (BUILT)
-- ✅ `components/WorkbookViewer.jsx` - Full-featured workbook editor with:
-  - Rich output rendering (PNG, JPEG, SVG, HTML)
-  - Streaming execution with real-time output
-  - Interrupt execution button
-  - Kernel status indicator (starting/idle/busy/error/restarting)
-  - DD double-tap delete
-  - All Jupyter keyboard shortcuts
-- ✅ `components/FileViewer.jsx` - General file editor with Monaco (BUILT)
-- ✅ `components/ContextMenu.jsx` - Right-click context menu (BUILT)
-- ✅ `components/InputDialog.jsx` - Modal input dialog (BUILT)
-- ⚠️ `components/Canvas.jsx` - React Flow visualization (PLACEHOLDER)
-- ⚠️ `components/StatePanel.jsx` - State inspector (PLACEHOLDER)
-- ⚠️ `components/WorkbookList.jsx` - Workbook list (PLACEHOLDER)
-- ⚠️ `components/RunLog.jsx` - Execution logs (PLACEHOLDER)
-- ⚠️ `hooks/useProject.js` - Project state hooks (EXISTS, needs implementation)
-- ⚠️ `hooks/useTether.js` - Tauri command wrappers (EXISTS, needs implementation)
+### Frontend (React)
+- `src/App.jsx` - Main app shell, routing, tab management
+- `src/components/` - UI components (Welcome, WorkbookViewer, FileViewer, etc.)
+- `src/hooks/` - React hooks for project state and Tauri commands
 
-### Python (tether-core/) - Not Built
-- ✅ `engine_server.py` - FastAPI engine manager (BUILT, in src-tauri/)
-- ❌ `tether/__init__.py` - Public API (state) (NOT BUILT)
-- ❌ `tether/state.py` - State get/set/list/delete (NOT BUILT)
-- ❌ `tether/executor.py` - Cell-by-cell execution with checkpointing (NOT BUILT)
-- ❌ `tether/checkpoint.py` - Namespace serialization (NOT BUILT)
-- ❌ `tether/cli.py` - CLI entry point (NOT BUILT)
+**Implementation status for each component is tracked in the relevant `features/<area>/done.md` and `features/<area>/todo.md` files.**
 
 ## State API (Python)
 
@@ -480,15 +295,6 @@ npm run tauri dev
 # Build for production
 npm run tauri build
 ```
-
-**Current Development Workflow:**
-1. The app uses uv for Python dependency management (not bundled yet)
-2. Frontend is React 19 with Vite for hot reload
-3. The engine server (engine_server.py) is started automatically by Tauri
-4. Each project gets its own .venv with ipykernel installed
-5. Monaco editor provides the code editing experience
-6. Tab system allows opening multiple files (workbooks and regular files)
-7. Streaming output provides real-time feedback during cell execution
 
 ## Design Principles
 
