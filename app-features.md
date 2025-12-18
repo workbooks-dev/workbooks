@@ -67,7 +67,7 @@ The sidebar provides quick access to everything in your project, organized by wh
 
 **What it shows:**
 - List of all `.ipynb` files in your project
-- Ordered by **most recently used** (your active work floats to the top)
+- Ordered by **alphabetical of the last 5 recently used** (update required)
 - Click to open in the main editor
 
 **Full Workbooks View:**
@@ -192,6 +192,9 @@ See `CLAUDE.md` for detailed implementation status of each component.
 
 ## Checklist
 
+### Navigation
+- [ ] Instead of using modals, let's make everything tab based. When reviewing all Workbooks, it's a new tab. When managing secrets, new tab. When updating project defaults, new tab.
+
 ### Sidebar UI (MVP Skeleton)
 - [x] Created new multi-section Sidebar component
 - [x] Workbooks section with recent-use ordering
@@ -204,7 +207,7 @@ See `CLAUDE.md` for detailed implementation status of each component.
 
 ### Workbooks Section
 - [x] List of .ipynb files from /notebooks folder
-- [x] Recent-use ordering (tracks last 20 opened workbooks)
+- [] Update ordering
 - [x] Click to open workbook
 - [x] New Workbook button
 - [x] Table view modal with columns: Name, Last Run, Status, Scheduled, Actions
@@ -236,8 +239,8 @@ See `CLAUDE.md` for detailed implementation status of each component.
 ### File Management
 - [x] Files section shows non-.ipynb files
 - [x] TETHER_PROJECT_FOLDER environment variable injection
-- [ ] File drop behavior (.ipynb → /notebooks, others → root)
-- [ ] Drag-and-drop file upload
+- [x] File drop behavior (.ipynb → /notebooks, others → root)
+- [x] Drag-and-drop file upload
 
 ### Project Settings
 - [ ] Project Settings modal
