@@ -59,6 +59,7 @@ pub enum CellOutput {
 pub struct ExecutionResult {
     pub success: bool,
     pub outputs: Vec<CellOutput>,
+    pub execution_count: Option<i32>,
 }
 
 /// A single completion match

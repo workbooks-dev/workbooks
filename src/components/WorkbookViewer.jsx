@@ -33,7 +33,10 @@ function WorkbookCell({ cell, index, workbookPath, onUpdate, onDelete, onExecute
   }, [isEditMode, isSelected]);
 
   const handleEditorChange = (value) => {
-    setContent(value || "");
+    const newValue = value || "";
+    setContent(newValue);
+    // Immediately sync content back to parent to ensure "Run All" uses current editor state
+    onUpdate(index, newValue);
   };
 
   const handleExecute = (mode = 'shift-enter') => {
@@ -597,7 +600,6 @@ export function WorkbookViewer({ workbookPath, projectRoot, autosaveEnabled = tr
   const currentUnlistenRef = useRef(null);
   const executingCellRef = useRef(null);
   const lastDKeyPressRef = useRef(0); // Track last 'D' key press for double-tap delete
-  const loadedContentHashRef = useRef(null); // Track file content hash to detect external changes
   const executionTimerRef = useRef(null); // Timer for updating elapsed time
   const outputListenerRef = useRef(null); // Track active output listener to prevent duplicates
 
@@ -800,9 +802,6 @@ export function WorkbookViewer({ workbookPath, projectRoot, autosaveEnabled = tr
       const parsed = JSON.parse(content);
       setNotebook(parsed);
       setHasUnsavedChanges(false);
-
-      // Save hash of loaded content to detect external changes
-      loadedContentHashRef.current = hashNotebookContent(content);
     } catch (err) {
       console.error("Failed to load notebook:", err);
       setError(err.toString());
@@ -811,44 +810,10 @@ export function WorkbookViewer({ workbookPath, projectRoot, autosaveEnabled = tr
     }
   };
 
-  // Simple hash function for content comparison
-  const hashNotebookContent = (content) => {
-    let hash = 0;
-    for (let i = 0; i < content.length; i++) {
-      const char = content.charCodeAt(i);
-      hash = ((hash << 5) - hash) + char;
-      hash = hash & hash;
-    }
-    return hash;
-  };
-
   const saveWorkbook = async () => {
     if (!notebook) return;
 
     try {
-      // Check if file was modified externally
-      const currentFileContent = await invoke("read_workbook", {
-        workbookPath: workbookPath,
-      });
-      const currentHash = hashNotebookContent(currentFileContent);
-
-      if (currentHash !== loadedContentHashRef.current) {
-        // File was modified externally
-        const shouldOverwrite = await ask(
-          "The notebook file has been modified outside of Tether. Do you want to overwrite it with your current changes?",
-          {
-            title: "File Modified Externally",
-            kind: "warning",
-            okLabel: "Overwrite",
-            cancelLabel: "Cancel"
-          }
-        );
-
-        if (!shouldOverwrite) {
-          return;
-        }
-      }
-
       // Make a copy to ensure we have the latest state
       const notebookToSave = {
         ...notebook,
@@ -864,9 +829,6 @@ export function WorkbookViewer({ workbookPath, projectRoot, autosaveEnabled = tr
         workbookPath: workbookPath,
         content: content,
       });
-
-      // Update hash after successful save
-      loadedContentHashRef.current = hashNotebookContent(content);
 
       setHasUnsavedChanges(false);
     } catch (err) {
