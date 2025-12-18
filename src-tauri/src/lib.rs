@@ -321,6 +321,16 @@ async fn duplicate_workbook(
 }
 
 #[tauri::command]
+async fn save_dropped_file(
+    project_root: String,
+    file_name: String,
+    file_content: Vec<u8>,
+) -> Result<String, String> {
+    let path = PathBuf::from(project_root);
+    fs::save_dropped_file(&path, &file_name, &file_content).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 async fn ensure_engine_server(state: State<'_, AppState>) -> Result<(), String> {
     // Use async mutex to hold lock across await - prevents race condition
     let mut server = state.engine_server.lock().await;
@@ -543,6 +553,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_window_state::Builder::default().build())
+        .plugin(tauri_plugin_fs::init())
         .manage(AppState {
             current_project: Mutex::new(None),
             engine_server: Arc::new(Mutex::new(None)),
@@ -572,6 +583,7 @@ pub fn run() {
             rename_file,
             delete_file,
             duplicate_workbook,
+            save_dropped_file,
             ensure_engine_server,
             start_engine,
             execute_cell,

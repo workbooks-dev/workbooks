@@ -166,6 +166,17 @@ export function Sidebar({ projectRoot, projectName, onOpenFile, onFileDeleted, a
   useEffect(() => {
     loadProjectFiles();
     loadRecentWorkbooks();
+
+    // Listen for file changes (e.g., when files are dropped)
+    const handleFilesChanged = () => {
+      loadProjectFiles();
+    };
+
+    window.addEventListener("tether:files-changed", handleFilesChanged);
+
+    return () => {
+      window.removeEventListener("tether:files-changed", handleFilesChanged);
+    };
   }, [projectRoot]);
 
   const loadProjectFiles = async () => {

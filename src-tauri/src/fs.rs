@@ -354,3 +354,33 @@ pub fn duplicate_workbook(source_path: &Path, new_name: &str) -> Result<String> 
 
     Ok(target_path.to_string_lossy().to_string())
 }
+
+/// Save a dropped file to the appropriate location
+/// .ipynb files go to /notebooks, everything else goes to project root
+pub fn save_dropped_file(project_root: &Path, file_name: &str, file_content: &[u8]) -> Result<String> {
+    // Determine the target directory based on file extension
+    let target_dir = if file_name.ends_with(".ipynb") {
+        project_root.join("notebooks")
+    } else {
+        project_root.to_path_buf()
+    };
+
+    // Ensure target directory exists
+    if !target_dir.exists() {
+        fs::create_dir_all(&target_dir)
+            .context("Failed to create target directory")?;
+    }
+
+    let target_path = target_dir.join(file_name);
+
+    // Check if file already exists
+    if target_path.exists() {
+        anyhow::bail!("A file with that name already exists");
+    }
+
+    // Write the file
+    fs::write(&target_path, file_content)
+        .context("Failed to write dropped file")?;
+
+    Ok(target_path.to_string_lossy().to_string())
+}

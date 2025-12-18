@@ -622,7 +622,7 @@ export function WorkbookViewer({ workbookPath, projectRoot, autosaveEnabled = tr
     if (onUnsavedChangesUpdate) {
       onUnsavedChangesUpdate(hasUnsavedChanges);
     }
-  }, [hasUnsavedChanges, onUnsavedChangesUpdate]);
+  }, [hasUnsavedChanges]);
 
   // Autosave removed - user must explicitly save via Cmd+S or Save button
 

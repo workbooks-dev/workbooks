@@ -8,6 +8,11 @@ Go through available issues. When completed, mark checklist item with [x]. For c
 - [ ] If cell is selected, and "+ new workbook" is selected, the user starts typing to name the workbook but the data goes into the cell, it should go into the + new workbook section.
 
 
+
+## App Sidebar
+- [ ] Workbook ordering is a bit wonky, it resorts the workbooks every time one is open. Let's just keep them in alphabetical order
+
+
 ## Autocomplete
 
 

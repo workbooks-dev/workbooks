@@ -1,7 +1,9 @@
 import { useState, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { listen } from "@tauri-apps/api/event";
 import { ask } from "@tauri-apps/plugin-dialog";
+import { readFile } from "@tauri-apps/plugin-fs";
 import { Welcome } from "./components/Welcome";
 import { CreateProject } from "./components/CreateProject";
 import { Sidebar } from "./components/Sidebar";
@@ -17,10 +19,96 @@ function App() {
   const [tabs, setTabs] = useState([]);
   const [activeTabId, setActiveTabId] = useState(null);
   const [autosaveEnabled, setAutosaveEnabled] = useState(true);
+  const [isDragging, setIsDragging] = useState(false);
 
   useEffect(() => {
     checkCurrentProject();
   }, []);
+
+  // Listen for Tauri file drop events
+  useEffect(() => {
+    console.log("Setting up file drop listener, currentProject:", currentProject);
+
+    let unlistenDrop;
+    let unlistenHover;
+    let unlistenCancel;
+
+    const setupFileDropListener = async () => {
+      try {
+        console.log("Setting up file drop listeners...");
+
+        // Listen for file drop
+        unlistenDrop = await listen("tauri://drag-drop", async (event) => {
+          console.log("!!! FILE DROP EVENT RECEIVED !!!", event);
+          setIsDragging(false);
+
+          if (!currentProject) {
+            console.error("No current project");
+            return;
+          }
+
+          const paths = event.payload.paths || event.payload;
+
+          for (const filePath of paths) {
+            try {
+              // Extract filename from path
+              const fileName = filePath.split(/[/\\]/).pop();
+              console.log(`Reading file: ${fileName} from ${filePath}`);
+
+              // Read file using Tauri's fs plugin
+              const fileContent = await readFile(filePath);
+              console.log(`Read ${fileContent.length} bytes`);
+
+              // Save the file using Tauri command
+              const result = await invoke("save_dropped_file", {
+                projectRoot: currentProject.root,
+                fileName: fileName,
+                fileContent: Array.from(fileContent),
+              });
+
+              console.log(`Successfully saved ${fileName} at: ${result}`);
+            } catch (error) {
+              console.error(`Failed to save file:`, error);
+              alert(`Failed to save file: ${error}`);
+            }
+          }
+
+          // Refresh the file explorer
+          console.log("Dispatching files-changed event");
+          window.dispatchEvent(new CustomEvent("tether:files-changed"));
+        });
+
+        // Listen for file hover
+        unlistenHover = await listen("tauri://drag-over", () => {
+          console.log("Files hovering");
+          setIsDragging(true);
+        });
+
+        // Listen for file drop cancelled
+        unlistenCancel = await listen("tauri://drag-leave", () => {
+          console.log("File drop cancelled");
+          setIsDragging(false);
+        });
+
+        console.log("File drop listeners set up successfully");
+      } catch (error) {
+        console.error("Failed to set up file drop listeners:", error);
+      }
+    };
+
+    if (currentProject) {
+      setupFileDropListener();
+    } else {
+      console.log("No current project, skipping file drop listener setup");
+    }
+
+    return () => {
+      console.log("Cleaning up file drop listeners");
+      if (unlistenDrop) unlistenDrop();
+      if (unlistenHover) unlistenHover();
+      if (unlistenCancel) unlistenCancel();
+    };
+  }, [currentProject]);
 
   // Save tabs to localStorage whenever they change
   useEffect(() => {
@@ -173,6 +261,7 @@ function App() {
     }
   }
 
+
   if (loading || view === "loading") {
     return (
       <div className="app loading">
@@ -211,7 +300,15 @@ function App() {
   const activeTab = tabs.find((tab) => tab.id === activeTabId);
 
   return (
-    <div className="flex flex-col h-screen w-screen bg-white">
+    <div className="flex flex-col h-screen w-screen bg-white relative">
+      {isDragging && (
+        <div className="absolute inset-0 bg-blue-500 bg-opacity-10 border-4 border-blue-500 border-dashed z-50 flex items-center justify-center pointer-events-none">
+          <div className="bg-white px-6 py-4 rounded-lg shadow-lg">
+            <p className="text-lg font-medium text-gray-700">Drop files here</p>
+            <p className="text-sm text-gray-500 mt-1">.ipynb files → /notebooks, others → project root</p>
+          </div>
+        </div>
+      )}
       <div className="flex flex-1 overflow-hidden">
         <aside className="w-64 border-r border-gray-200 bg-gray-50 overflow-y-auto flex-shrink-0">
           <Sidebar
