@@ -1,6 +1,6 @@
 # Tether
 
-Durable notebook orchestration for local-first data pipelines.
+Durable workbook orchestration for local-first data pipelines.
 
 ## Current Implementation Status
 
@@ -28,18 +28,26 @@ Durable notebook orchestration for local-first data pipelines.
 
 - **File System Operations (`src-tauri/src/fs.rs`)**:
   - `list_files()` - Directory listing with file metadata
-  - `create_notebook()` - Create new .ipynb files with proper structure
-  - `read_notebook()` - Load notebook JSON
-  - `save_notebook()` - Save notebook with validation
+  - `create_workbook()` - Create new .ipynb files with proper structure
+  - `read_workbook()` - Load workbook JSON
+  - `save_workbook()` - Save workbook with validation
+  - `read_file()` - Read any file (text)
+  - `save_file()` - Save any file
+  - `rename_file()` - Rename files
+  - `delete_file()` - Delete files
+  - `duplicate_workbook()` - Duplicate a workbook with new name
 
-- **Jupyter Kernel Integration**:
-  - **HTTP Kernel Server (`src-tauri/src/kernel_http.rs` + `kernel_server.py`)**:
-    - FastAPI server for kernel lifecycle management
-    - Per-notebook kernel isolation
+- **Jupyter Engine Integration**:
+  - **HTTP Engine Server (`src-tauri/src/engine_http.rs` + `engine_server.py`)**:
+    - FastAPI server for engine lifecycle management
+    - Per-workbook engine isolation
     - Health check endpoint
-    - `start_kernel()` - Start kernel in project venv
+    - `start_engine()` - Start engine in project venv
     - `execute_cell()` - Execute code and collect outputs
-    - `stop_kernel()` - Clean shutdown
+    - `execute_cell_stream()` - Execute code with streaming output
+    - `stop_engine()` - Clean shutdown
+    - `interrupt_engine()` - Interrupt running execution
+    - `restart_engine()` - Restart engine and clear state
   - **Direct ZMQ Integration (`src-tauri/src/kernel.rs`)**:
     - Low-level Jupyter protocol implementation (not currently used)
     - ZMQ socket management
@@ -50,32 +58,53 @@ Durable notebook orchestration for local-first data pipelines.
   - UV: `check_uv_installed`, `install_uv`, `ensure_uv`
   - Projects: `create_project`, `open_folder`, `load_project`, `get_current_project`, `set_project_root`, `get_project_root`
   - Python: `init_python_env`, `ensure_python_venv`, `install_python_package`, `install_python_packages`, `run_python_code`
-  - Files: `list_files`, `create_notebook`, `read_notebook`, `save_notebook`
-  - Kernels: `ensure_kernel_server`, `start_kernel`, `execute_cell`, `stop_kernel`
+  - Files: `list_files`, `create_workbook`, `read_workbook`, `save_workbook`, `read_file`, `save_file`, `rename_file`, `delete_file`, `duplicate_workbook`
+  - Engines: `ensure_engine_server`, `start_engine`, `execute_cell`, `execute_cell_stream`, `stop_engine`, `interrupt_engine`, `restart_engine`
 
 ### Frontend (React + JSX)
 - **App Shell (`src/App.jsx`)**:
   - Multi-view routing (welcome, create, project)
   - Project state management
-  - Notebook viewer integration
+  - Tab system for multiple open files
+  - Workbook and file viewer integration
+  - Autosave toggle
 
 - **Components**:
   - `Welcome.jsx` - Landing screen with "Open Folder" and "Create New Project"
   - `CreateProject.jsx` - New project wizard
-  - `FileExplorer.jsx` - Collapsible tree view with file icons, notebook creation
-  - `NotebookViewer.jsx` - Full-featured notebook editor:
+  - `FileExplorer.jsx` - Collapsible tree view with file icons, workbook creation, context menu support
+  - `TabBar.jsx` - Tab management for open files:
+    - Multiple file type support (workbooks, Python, Markdown, JSON, etc.)
+    - Tab close functionality
+    - Autosave toggle control
+    - Active tab highlighting
+  - `WorkbookViewer.jsx` - Full-featured workbook editor:
     - Monaco editor for code cells
-    - Markdown cell editing
-    - Cell execution with Shift+Enter
-    - Output rendering (stdout, stderr, execute_result, errors)
-    - Cell manipulation (add, delete, move up/down, change type)
+    - Markdown cell editing and rendering
+    - Cell execution with Shift+Enter (and streaming output)
+    - Output rendering (stdout, stderr, execute_result, errors, images)
+    - Cell manipulation (add, delete, move up/down, change type, clear output)
     - Jupyter-style keyboard shortcuts (a/b for add, m/y for type change, arrows for navigation)
-    - Kernel lifecycle management
-    - Auto-save on blur
+    - Engine lifecycle management (start, stop, interrupt, restart)
+    - Auto-save support with toggle
     - ANSI color code stripping
+  - `FileViewer.jsx` - General file editor (BUILT):
+    - Monaco editor for code files
+    - Markdown preview for .md files
+    - Syntax highlighting for multiple languages
+    - Save functionality (Cmd/Ctrl+S)
+    - Unsaved changes detection
+  - `ContextMenu.jsx` - Right-click context menu (BUILT):
+    - File operations (rename, delete, duplicate)
+    - Positioned near cursor
+    - Click-outside and Escape to close
+  - `InputDialog.jsx` - Modal input dialog (BUILT):
+    - Used for rename/duplicate operations
+    - Keyboard shortcuts (Enter to confirm, Escape to cancel)
+    - Auto-focus and text selection
   - `Canvas.jsx` - Placeholder for React Flow (not implemented)
   - `StatePanel.jsx` - Placeholder for state inspector (not implemented)
-  - `NotebookList.jsx` - Placeholder (not implemented)
+  - `WorkbookList.jsx` - Placeholder (not implemented)
   - `RunLog.jsx` - Placeholder (not implemented)
 
 - **Hooks**:
@@ -83,17 +112,19 @@ Durable notebook orchestration for local-first data pipelines.
   - `useTether.js` - Tauri command wrappers (exists but implementation TBD)
 
 ### Python Runtime
-- **Kernel Server (`src-tauri/kernel_server.py`)**:
+- **Engine Server (`src-tauri/engine_server.py`)**:
   - FastAPI + uvicorn HTTP server
-  - AsyncKernelManager for each notebook
+  - AsyncKernelManager for each workbook
   - Automatic kernel spec installation per project
   - Connection to project venv Python
   - IOPub message collection
+  - Streaming output support
+  - Interrupt and restart capabilities
   - Graceful shutdown with cleanup
 
 - **Dependencies (`pyproject.toml`)**:
   - fastapi, uvicorn - HTTP server
-  - jupyter-client - Kernel management
+  - jupyter-client - Engine/kernel management
 
 ### Package Dependencies
 - **Frontend (`package.json`)**:

@@ -1,8 +1,23 @@
 import { useState, useEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { ask } from "@tauri-apps/plugin-dialog";
+import { listen } from "@tauri-apps/api/event";
 import Editor from "@monaco-editor/react";
+import ReactMarkdown from "react-markdown";
+import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
+import { vscDarkPlus } from "react-syntax-highlighter/dist/esm/styles/prism";
 
-function NotebookCell({ cell, index, onUpdate, onDelete, onExecute, onMoveUp, onMoveDown, isSelected, isEditMode, onSelect, onEnterEditMode }) {
+// Hash function to match Rust implementation in lib.rs
+function hashString(s) {
+  let hash = 0;
+  for (let i = 0; i < s.length; i++) {
+    hash = ((hash << 5) - hash) + s.charCodeAt(i);
+    hash = hash & hash; // Convert to 32-bit integer
+  }
+  return Math.abs(hash);
+}
+
+function NotebookCell({ cell, index, onUpdate, onDelete, onExecute, onMoveUp, onMoveDown, onClearOutput, isSelected, isEditMode, isRunning, onSelect, onEnterEditMode, onInsertBelow, autosaveEnabled }) {
   const [content, setContent] = useState(cell.source.join(""));
   const editorRef = useRef(null);
   const initialSourceRef = useRef(cell.source.join(""));
@@ -24,7 +39,7 @@ function NotebookCell({ cell, index, onUpdate, onDelete, onExecute, onMoveUp, on
     console.log(`[Cell ${index}] handleEditorChange - state should now be:`, value || "");
   };
 
-  const handleExecute = () => {
+  const handleExecute = (mode = 'shift-enter') => {
     // Get the current value directly from the editor to avoid stale state
     const currentValue = editorRef.current ? editorRef.current.getValue() : content;
     console.log(`[Cell ${index}] handleExecute - content state:`, content);
@@ -38,15 +53,15 @@ function NotebookCell({ cell, index, onUpdate, onDelete, onExecute, onMoveUp, on
 
     // Update the cell source before executing
     onUpdate(index, currentValue);
-    onExecute(index, currentValue);
+    onExecute(index, currentValue, mode);
   };
 
   const handleBlur = () => {
     // Get current value from editor to avoid stale state
     const currentValue = editorRef.current ? editorRef.current.getValue() : content;
 
-    // Save changes when cell loses focus
-    if (currentValue !== cell.source.join("")) {
+    // Save changes when cell loses focus (only if autosave is enabled)
+    if (autosaveEnabled && currentValue !== cell.source.join("")) {
       setContent(currentValue);
       onUpdate(index, currentValue);
     }
@@ -55,44 +70,88 @@ function NotebookCell({ cell, index, onUpdate, onDelete, onExecute, onMoveUp, on
   const handleKeyDown = (e) => {
     if (e.shiftKey && e.key === "Enter") {
       e.preventDefault();
-      handleExecute();
+      handleExecute('shift-enter');
+    } else if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
+      e.preventDefault();
+      handleExecute('ctrl-enter');
+    } else if (e.altKey && e.key === "Enter") {
+      e.preventDefault();
+      handleExecute('alt-enter');
     }
   };
 
   // Update source when edit mode changes (user navigates away)
   useEffect(() => {
-    if (!isEditMode) {
+    if (!isEditMode && autosaveEnabled) {
       const currentValue = editorRef.current ? editorRef.current.getValue() : content;
       if (currentValue !== cell.source.join("")) {
         setContent(currentValue);
         onUpdate(index, currentValue);
       }
     }
-  }, [isEditMode]);
+  }, [isEditMode, autosaveEnabled]);
 
   if (cell.cell_type === "markdown") {
     return (
       <div
         className={`notebook-cell markdown-cell ${isSelected ? "selected" : ""} ${isEditMode ? "edit-mode" : ""}`}
         onClick={() => onSelect(index)}
+        onDoubleClick={() => {
+          onSelect(index);
+          onEnterEditMode();
+        }}
       >
         {isSelected && (
           <div className="cell-toolbar">
+            <button onClick={(e) => { e.stopPropagation(); handleExecute(); }} title="Run cell (render)">▶</button>
             <button onClick={(e) => { e.stopPropagation(); onMoveUp(index); }} title="Move up">↑</button>
             <button onClick={(e) => { e.stopPropagation(); onMoveDown(index); }} title="Move down">↓</button>
             <button onClick={(e) => { e.stopPropagation(); onDelete(index); }} title="Delete">🗑</button>
           </div>
         )}
         <div className="cell-input">
-          <textarea
-            value={content}
-            onChange={(e) => handleEditorChange(e.target.value)}
-            onKeyDown={handleKeyDown}
-            onBlur={handleBlur}
-            className="markdown-editor"
-            placeholder="Enter markdown..."
-            rows={Math.max(3, content.split("\n").length)}
-          />
+          {isEditMode ? (
+            <textarea
+              value={content}
+              onChange={(e) => handleEditorChange(e.target.value)}
+              onKeyDown={handleKeyDown}
+              onBlur={handleBlur}
+              className="markdown-editor"
+              placeholder="Enter markdown..."
+              rows={Math.max(3, content.split("\n").length)}
+              autoFocus
+            />
+          ) : (
+            <div className="markdown-rendered">
+              {content ? (
+                <ReactMarkdown
+                  components={{
+                    code({ node, inline, className, children, ...props }) {
+                      const match = /language-(\w+)/.exec(className || '');
+                      return !inline && match ? (
+                        <SyntaxHighlighter
+                          style={vscDarkPlus}
+                          language={match[1]}
+                          PreTag="div"
+                          {...props}
+                        >
+                          {String(children).replace(/\n$/, '')}
+                        </SyntaxHighlighter>
+                      ) : (
+                        <code className={className} {...props}>
+                          {children}
+                        </code>
+                      );
+                    }
+                  }}
+                >
+                  {content}
+                </ReactMarkdown>
+              ) : (
+                <div className="markdown-placeholder">Double-click to edit markdown</div>
+              )}
+            </div>
+          )}
         </div>
       </div>
     );
@@ -109,6 +168,10 @@ function NotebookCell({ cell, index, onUpdate, onDelete, onExecute, onMoveUp, on
       >
         {isSelected && (
           <div className="cell-toolbar">
+            <button onClick={(e) => { e.stopPropagation(); handleExecute(); }} title="Run cell">▶</button>
+            {hasOutput && (
+              <button onClick={(e) => { e.stopPropagation(); onClearOutput(index); }} title="Clear output">🗙</button>
+            )}
             <button onClick={(e) => { e.stopPropagation(); onMoveUp(index); }} title="Move up">↑</button>
             <button onClick={(e) => { e.stopPropagation(); onMoveDown(index); }} title="Move down">↓</button>
             <button onClick={(e) => { e.stopPropagation(); onDelete(index); }} title="Delete">🗑</button>
@@ -130,7 +193,15 @@ function NotebookCell({ cell, index, onUpdate, onDelete, onExecute, onMoveUp, on
                   if (e.shiftKey && e.keyCode === 3) {
                     // Shift+Enter (keyCode 3 is Enter in Monaco)
                     e.preventDefault();
-                    handleExecute();
+                    handleExecute('shift-enter');
+                  } else if ((e.ctrlKey || e.metaKey) && e.keyCode === 3) {
+                    // Ctrl/Cmd+Enter
+                    e.preventDefault();
+                    handleExecute('ctrl-enter');
+                  } else if (e.altKey && e.keyCode === 3) {
+                    // Alt+Enter
+                    e.preventDefault();
+                    handleExecute('alt-enter');
                   }
                 });
                 editor.onDidBlurEditorText(() => {
@@ -168,6 +239,9 @@ function NotebookCell({ cell, index, onUpdate, onDelete, onExecute, onMoveUp, on
 }
 
 function CellOutput({ output }) {
+  // Check if output was truncated by the backend
+  const isTruncatedByBackend = output.metadata && output.metadata.truncated === true;
+
   // Strip ANSI color codes from text
   const stripAnsi = (text) => {
     if (!text) return text;
@@ -178,27 +252,112 @@ function CellOutput({ output }) {
   if (output.output_type === "stream") {
     const text = Array.isArray(output.text) ? output.text.join("") : output.text;
     const className = output.name === "stderr" ? "output-stderr" : "output-stdout";
+    const cleanText = stripAnsi(text);
+
+    const { text: displayText, truncated, totalLines } = expanded
+      ? { text: cleanText, truncated: false, totalLines: 0 }
+      : truncateText(cleanText, MAX_LINES);
+
     return (
-      <div className={`cell-output ${className}`}>
-        <pre>{stripAnsi(text)}</pre>
+      <div className={`cell-output-wrapper ${className}`}>
+        <div className="cell-output-content">
+          {isTruncatedByBackend && (
+            <div className="output-truncation-warning">
+              ⚠ Output was truncated to save memory (max 1000 lines or 100KB per cell)
+            </div>
+          )}
+          <pre>{displayText}</pre>
+        </div>
+        {truncated && (
+          <button
+            className="output-expand-btn"
+            onClick={() => setExpanded(!expanded)}
+          >
+            Show more ({totalLines - MAX_LINES} more lines)
+          </button>
+        )}
+        {expanded && (
+          <button
+            className="output-expand-btn"
+            onClick={() => setExpanded(false)}
+          >
+            Show less
+          </button>
+        )}
       </div>
     );
   }
 
   if (output.output_type === "execute_result") {
     const text = output.data["text/plain"] || JSON.stringify(output.data);
+    const cleanText = stripAnsi(text);
+    const { text: displayText, truncated, totalLines } = expanded
+      ? { text: cleanText, truncated: false, totalLines: 0 }
+      : truncateText(cleanText, MAX_LINES);
+
     return (
-      <div className="cell-output output-result">
-        <pre>{stripAnsi(text)}</pre>
+      <div className="cell-output-wrapper output-result">
+        <div className="cell-output-content">
+          {isTruncatedByBackend && (
+            <div className="output-truncation-warning">
+              ⚠ Output was truncated to save memory (max 1000 lines or 100KB per cell)
+            </div>
+          )}
+          <pre>{displayText}</pre>
+        </div>
+        {truncated && (
+          <button
+            className="output-expand-btn"
+            onClick={() => setExpanded(!expanded)}
+          >
+            Show more ({totalLines - MAX_LINES} more lines)
+          </button>
+        )}
+        {expanded && (
+          <button
+            className="output-expand-btn"
+            onClick={() => setExpanded(false)}
+          >
+            Show less
+          </button>
+        )}
       </div>
     );
   }
 
   if (output.output_type === "error") {
     const traceback = output.traceback ? output.traceback.join("\n") : output.evalue;
+    const cleanText = stripAnsi(traceback);
+    const { text: displayText, truncated, totalLines } = expanded
+      ? { text: cleanText, truncated: false, totalLines: 0 }
+      : truncateText(cleanText, MAX_LINES);
+
     return (
-      <div className="cell-output output-error">
-        <pre>{stripAnsi(traceback)}</pre>
+      <div className="cell-output-wrapper output-error">
+        <div className="cell-output-content">
+          {isTruncatedByBackend && (
+            <div className="output-truncation-warning">
+              ⚠ Output was truncated to save memory (max 1000 lines or 100KB per cell)
+            </div>
+          )}
+          <pre>{displayText}</pre>
+        </div>
+        {truncated && (
+          <button
+            className="output-expand-btn"
+            onClick={() => setExpanded(!expanded)}
+          >
+            Show more ({totalLines - MAX_LINES} more lines)
+          </button>
+        )}
+        {expanded && (
+          <button
+            className="output-expand-btn"
+            onClick={() => setExpanded(false)}
+          >
+            Show less
+          </button>
+        )}
       </div>
     );
   }
@@ -206,25 +365,49 @@ function CellOutput({ output }) {
   return null;
 }
 
-export function NotebookViewer({ notebookPath, projectRoot, onClose }) {
+export function NotebookViewer({ notebookPath, projectRoot, autosaveEnabled = true, onClose }) {
   const [notebook, setNotebook] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
   const [selectedCell, setSelectedCell] = useState(0);
   const [editMode, setEditMode] = useState(false);
+  const [isRunningAll, setIsRunningAll] = useState(false);
+  const [runningCellIndex, setRunningCellIndex] = useState(null);
   const kernelStartedRef = useRef(false);
   const cellRefs = useRef([]);
+  const currentUnlistenRef = useRef(null);
+  const executingCellRef = useRef(null);
 
   useEffect(() => {
     loadNotebook();
     startKernel();
 
     return () => {
-      // Cleanup: stop kernel when component unmounts
+      // Cleanup: stop kernel and event listener when component unmounts
+      if (currentUnlistenRef.current) {
+        currentUnlistenRef.current();
+        currentUnlistenRef.current = null;
+      }
       stopKernel();
     };
   }, [notebookPath]);
+
+  // Autosave interval
+  useEffect(() => {
+    if (!autosaveEnabled || !hasUnsavedChanges) {
+      return;
+    }
+
+    const autosaveInterval = setInterval(() => {
+      if (hasUnsavedChanges) {
+        console.log("Autosaving notebook...");
+        saveNotebook();
+      }
+    }, 3000); // Autosave every 3 seconds if there are unsaved changes
+
+    return () => clearInterval(autosaveInterval);
+  }, [autosaveEnabled, hasUnsavedChanges, notebook]);
 
   useEffect(() => {
     // Global keyboard shortcuts
@@ -320,6 +503,26 @@ export function NotebookViewer({ notebookPath, projectRoot, onClose }) {
       console.log("Kernel stopped successfully");
     } catch (err) {
       console.error("Failed to stop kernel:", err);
+    }
+  };
+
+  const restartKernel = async () => {
+    try {
+      console.log("Restarting kernel for notebook:", notebookPath);
+      setError(null);
+      await invoke("restart_kernel", {
+        notebookPath: notebookPath,
+        projectPath: projectRoot,
+      });
+      kernelStartedRef.current = true;
+      console.log("Kernel restarted successfully");
+
+      // Clear all outputs after restart
+      clearAllOutputs();
+    } catch (err) {
+      console.error("Failed to restart kernel:", err);
+      setError(`Failed to restart kernel: ${err}`);
+      kernelStartedRef.current = false;
     }
   };
 
@@ -453,9 +656,58 @@ export function NotebookViewer({ notebookPath, projectRoot, onClose }) {
     setHasUnsavedChanges(true);
   };
 
-  const executeCell = async (index, code) => {
+  const executeCell = async (index, code, mode = 'shift-enter') => {
+    const cell = notebook.cells[index];
+
+    // For markdown cells, just render (exit edit mode) and navigate
+    if (cell.cell_type === "markdown") {
+      setEditMode(false);
+
+      // Handle post-execution behavior based on mode
+      if (mode === 'ctrl-enter') {
+        // Ctrl+Enter: stay in current cell
+      } else if (mode === 'alt-enter') {
+        // Alt+Enter: insert new cell below and move to it
+        const newCell = {
+          cell_type: "code",
+          metadata: {},
+          source: [],
+          execution_count: null,
+          outputs: [],
+        };
+        const newCells = [...notebook.cells];
+        newCells.splice(index + 1, 0, newCell);
+        setNotebook({ ...notebook, cells: newCells });
+        setSelectedCell(index + 1);
+        setEditMode(true);
+      } else {
+        // Shift+Enter: move to next cell, or create new one if at end
+        if (index < notebook.cells.length - 1) {
+          setSelectedCell(index + 1);
+          setEditMode(false);
+        } else {
+          // We're at the last cell, create a new code cell
+          const newCell = {
+            cell_type: "code",
+            metadata: {},
+            source: [],
+            execution_count: null,
+            outputs: [],
+          };
+          const newCells = [...notebook.cells];
+          newCells.push(newCell);
+          setNotebook({ ...notebook, cells: newCells });
+          setSelectedCell(index + 1);
+          setEditMode(true);
+        }
+      }
+      return;
+    }
+
+    // For code cells, execute in kernel with streaming
     console.log("executeCell called, kernelStarted:", kernelStartedRef.current);
     console.log("Executing code:", code);
+    console.log("Execution mode:", mode);
 
     if (!kernelStartedRef.current) {
       console.error("Kernel not started! kernelStarted ref is false");
@@ -464,37 +716,36 @@ export function NotebookViewer({ notebookPath, projectRoot, onClose }) {
     }
 
     try {
+      // Use non-streaming execution (more reliable, shows all outputs at once)
       const result = await invoke("execute_cell", {
         notebookPath: notebookPath,
         code: code,
       });
       console.log("Cell execution result:", result);
 
-      // Create new cells array without modifying cell.source
-      // (it was already updated by handleExecute -> onUpdate)
+      // Create new cells array
       const newCells = [...notebook.cells];
-      const cell = newCells[index];
+      const currentCell = newCells[index];
 
-      // Only update outputs and execution count
-      cell.outputs = result.outputs || [];
+      // Update outputs and execution count
+      currentCell.outputs = result.outputs || [];
 
-      // Update execution count - use from result if available, otherwise increment
       const executionCount = result.outputs?.find(o => o.output_type === 'execute_result')?.execution_count;
       if (executionCount) {
-        cell.execution_count = executionCount;
+        currentCell.execution_count = executionCount;
       } else {
-        cell.execution_count = (cell.execution_count || 0) + 1;
+        currentCell.execution_count = (currentCell.execution_count || 0) + 1;
       }
 
       setNotebook({ ...notebook, cells: newCells });
       setHasUnsavedChanges(true);
 
-      // Move to next cell after execution, or create a new one if at the end
-      if (index < notebook.cells.length - 1) {
-        setSelectedCell(index + 1);
-        setEditMode(false);
-      } else {
-        // We're at the last cell, create a new code cell
+      // Handle post-execution behavior based on mode
+      if (mode === 'ctrl-enter') {
+        // Ctrl+Enter: stay in current cell, don't move
+        // Keep current selection and edit mode
+      } else if (mode === 'alt-enter') {
+        // Alt+Enter: insert new cell below and move to it
         const newCell = {
           cell_type: "code",
           metadata: {},
@@ -502,14 +753,118 @@ export function NotebookViewer({ notebookPath, projectRoot, onClose }) {
           execution_count: null,
           outputs: [],
         };
-        newCells.push(newCell);
-        setNotebook({ ...notebook, cells: newCells });
+        setNotebook((prevNotebook) => {
+          const cells = [...prevNotebook.cells];
+          cells.splice(index + 1, 0, newCell);
+          return { ...prevNotebook, cells };
+        });
         setSelectedCell(index + 1);
         setEditMode(true);
+      } else {
+        // Shift+Enter: move to next cell, or create new one if at end
+        if (index < notebook.cells.length - 1) {
+          setSelectedCell(index + 1);
+          setEditMode(false);
+        } else {
+          // We're at the last cell, create a new code cell
+          const newCell = {
+            cell_type: "code",
+            metadata: {},
+            source: [],
+            execution_count: null,
+            outputs: [],
+          };
+          setNotebook((prevNotebook) => {
+            const cells = [...prevNotebook.cells];
+            cells.push(newCell);
+            return { ...prevNotebook, cells };
+          });
+          setSelectedCell(index + 1);
+          setEditMode(true);
+        }
       }
     } catch (err) {
       console.error("Failed to execute cell:", err);
       setError(err.toString());
+    }
+  };
+
+  const runAllCells = async () => {
+    if (!kernelStartedRef.current || isRunningAll) {
+      return;
+    }
+
+    setIsRunningAll(true);
+    setError(null);
+
+    try {
+      // Execute all code cells in sequence
+      for (let i = 0; i < notebook.cells.length; i++) {
+        const cell = notebook.cells[i];
+        if (cell.cell_type === "code") {
+          setSelectedCell(i);
+          setRunningCellIndex(i);
+
+          // Clear the output before running to show it's executing
+          const newCells = [...notebook.cells];
+          newCells[i].outputs = [];
+          setNotebook({ ...notebook, cells: newCells });
+
+          const code = cell.source.join("");
+
+          // Execute the cell
+          const result = await invoke("execute_cell", {
+            notebookPath: notebookPath,
+            code: code,
+          });
+
+          // Update the cell with outputs
+          newCells[i].outputs = result.outputs || [];
+
+          const executionCount = result.outputs?.find(o => o.output_type === 'execute_result')?.execution_count;
+          if (executionCount) {
+            newCells[i].execution_count = executionCount;
+          } else {
+            newCells[i].execution_count = (newCells[i].execution_count || 0) + 1;
+          }
+
+          setNotebook({ ...notebook, cells: newCells });
+          setHasUnsavedChanges(true);
+        }
+      }
+    } catch (err) {
+      console.error("Failed to run all cells:", err);
+      setError(err.toString());
+    } finally {
+      setIsRunningAll(false);
+      setRunningCellIndex(null);
+    }
+  };
+
+  const clearAllOutputs = () => {
+    const newCells = notebook.cells.map(cell => {
+      if (cell.cell_type === "code") {
+        return {
+          ...cell,
+          outputs: [],
+          execution_count: null
+        };
+      }
+      return cell;
+    });
+    setNotebook({ ...notebook, cells: newCells });
+    setHasUnsavedChanges(true);
+  };
+
+  const clearCellOutput = (index) => {
+    const newCells = [...notebook.cells];
+    if (newCells[index].cell_type === "code") {
+      newCells[index] = {
+        ...newCells[index],
+        outputs: [],
+      };
+      setNotebook({ ...notebook, cells: newCells });
+      setHasUnsavedChanges(true);
     }
   };
 
@@ -534,6 +889,27 @@ export function NotebookViewer({ notebookPath, projectRoot, onClose }) {
     return notebookPath.split("/").pop();
   };
 
+  const handleClose = async () => {
+    if (hasUnsavedChanges) {
+      const shouldSave = await ask(
+        "You have unsaved changes. Do you want to save before closing?",
+        {
+          title: "Unsaved Changes",
+          kind: "warning",
+          okLabel: "Save",
+          cancelLabel: "Don't Save"
+        }
+      );
+
+      if (shouldSave) {
+        await saveNotebook();
+      }
+    }
+
+    // Close the notebook
+    onClose();
+  };
+
   if (loading) {
     return (
       <div className="notebook-viewer loading">
@@ -546,7 +922,7 @@ export function NotebookViewer({ notebookPath, projectRoot, onClose }) {
     return (
       <div className="notebook-viewer error">
         <p>Error: {error}</p>
-        <button onClick={onClose}>Close</button>
+        <button onClick={handleClose}>Close</button>
       </div>
     );
   }
@@ -564,12 +940,16 @@ export function NotebookViewer({ notebookPath, projectRoot, onClose }) {
         </h2>
         <div className="notebook-actions">
           <span className="keyboard-hint">Shift+Enter to run</span>
+          <button onClick={runAllCells} disabled={isRunningAll}>
+            {isRunningAll ? "Running..." : "Run All"}
+          </button>
+          <button onClick={clearAllOutputs}>Clear All Outputs</button>
+          <button onClick={restartKernel}>Restart Kernel</button>
           <button onClick={() => addCell("markdown")}>+ Markdown</button>
           <button onClick={() => addCell("code")}>+ Code</button>
           <button onClick={saveNotebook} className={hasUnsavedChanges ? "primary" : ""}>
             Save {hasUnsavedChanges && "*"}
           </button>
-          <button onClick={onClose}>Close</button>
         </div>
       </div>
 
@@ -589,13 +969,17 @@ export function NotebookViewer({ notebookPath, projectRoot, onClose }) {
             onExecute={executeCell}
             onMoveUp={moveCellUp}
             onMoveDown={moveCellDown}
+            onClearOutput={clearCellOutput}
+            onInsertBelow={() => addCellAt(index + 1, "code")}
             isSelected={selectedCell === index}
             isEditMode={editMode && selectedCell === index}
+            isRunning={runningCellIndex === index}
             onSelect={setSelectedCell}
             onEnterEditMode={() => {
               setSelectedCell(index);
               setEditMode(true);
             }}
+            autosaveEnabled={autosaveEnabled}
           />
         ))}
       </div>

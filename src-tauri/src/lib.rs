@@ -1,10 +1,10 @@
 mod python;
 mod project;
 mod fs;
-mod kernel_http;
+mod engine_http;
 
 use std::path::PathBuf;
-use tauri::State;
+use tauri::{Emitter, State};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use serde::{Deserialize, Serialize};
@@ -15,10 +15,10 @@ pub struct ProjectInfo {
     pub root: String,
 }
 
-/// Application state to track the current project and kernel server
+/// Application state to track the current project and engine server
 pub struct AppState {
     pub project_root: Mutex<Option<PathBuf>>,
-    pub kernel_server: Arc<Mutex<Option<kernel_http::KernelServer>>>,
+    pub engine_server: Arc<Mutex<Option<engine_http::EngineServer>>>,
 }
 
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
@@ -201,27 +201,27 @@ async fn list_files(directory_path: String) -> Result<Vec<fs::FileEntry>, String
 }
 
 #[tauri::command]
-async fn create_notebook(
-    notebook_path: String,
-    notebook_name: String,
+async fn create_workbook(
+    workbook_path: String,
+    workbook_name: String,
 ) -> Result<String, String> {
-    let path = PathBuf::from(notebook_path);
-    fs::create_notebook(&path, &notebook_name).map_err(|e| e.to_string())
+    let path = PathBuf::from(workbook_path);
+    fs::create_workbook(&path, &workbook_name).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-async fn read_notebook(notebook_path: String) -> Result<String, String> {
-    let path = PathBuf::from(notebook_path);
-    fs::read_notebook(&path).map_err(|e| e.to_string())
+async fn read_workbook(workbook_path: String) -> Result<String, String> {
+    let path = PathBuf::from(workbook_path);
+    fs::read_workbook(&path).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-async fn save_notebook(
-    notebook_path: String,
+async fn save_workbook(
+    workbook_path: String,
     content: String,
 ) -> Result<(), String> {
-    let path = PathBuf::from(notebook_path);
-    fs::save_notebook(&path, &content).map_err(|e| e.to_string())
+    let path = PathBuf::from(workbook_path);
+    fs::save_workbook(&path, &content).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -240,74 +240,174 @@ async fn save_file(
 }
 
 #[tauri::command]
-async fn ensure_kernel_server(state: State<'_, AppState>) -> Result<(), String> {
+async fn rename_file(
+    old_path: String,
+    new_name: String,
+) -> Result<String, String> {
+    let path = PathBuf::from(old_path);
+    fs::rename_file(&path, &new_name).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn delete_file(file_path: String) -> Result<(), String> {
+    let path = PathBuf::from(file_path);
+    fs::delete_file(&path).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn duplicate_workbook(
+    source_path: String,
+    new_name: String,
+) -> Result<String, String> {
+    let path = PathBuf::from(source_path);
+    fs::duplicate_workbook(&path, &new_name).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn ensure_engine_server(state: State<'_, AppState>) -> Result<(), String> {
     // Use async mutex to hold lock across await - prevents race condition
-    let mut server = state.kernel_server.lock().await;
+    let mut server = state.engine_server.lock().await;
 
     if server.is_none() {
-        println!("Starting kernel server...");
-        let ks = kernel_http::KernelServer::start()
+        println!("Starting engine server...");
+        let es = engine_http::EngineServer::start()
             .await
             .map_err(|e| e.to_string())?;
 
-        *server = Some(ks);
-        println!("Kernel server started successfully");
+        *server = Some(es);
+        println!("Engine server started successfully");
     }
 
     Ok(())
 }
 
 #[tauri::command]
-async fn start_kernel(
-    notebook_path: String,
+async fn start_engine(
+    workbook_path: String,
     project_path: String,
-    _kernel_name: Option<String>,
+    _engine_name: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
-    // Ensure kernel server is running
-    ensure_kernel_server(state.clone()).await?;
+    // Ensure engine server is running
+    ensure_engine_server(state.clone()).await?;
 
     let project_root = PathBuf::from(project_path);
 
     // Get the port
     let port = {
-        let server = state.kernel_server.lock().await;
-        server.as_ref().map(|s| s.port).ok_or("Kernel server not initialized")?
+        let server = state.engine_server.lock().await;
+        server.as_ref().map(|s| s.port).ok_or("Engine server not initialized")?
     };
 
     // Now call the static method without holding any locks
-    kernel_http::KernelServer::start_kernel_http(port, &notebook_path, &project_root)
+    engine_http::EngineServer::start_engine_http(port, &workbook_path, &project_root)
         .await
         .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 async fn execute_cell(
-    notebook_path: String,
+    workbook_path: String,
     code: String,
     state: State<'_, AppState>,
-) -> Result<kernel_http::ExecutionResult, String> {
+) -> Result<engine_http::ExecutionResult, String> {
     let port = {
-        let server = state.kernel_server.lock().await;
-        server.as_ref().map(|s| s.port).ok_or("Kernel server not initialized")?
+        let server = state.engine_server.lock().await;
+        server.as_ref().map(|s| s.port).ok_or("Engine server not initialized")?
     };
 
-    kernel_http::KernelServer::execute_http(port, &notebook_path, &code)
+    engine_http::EngineServer::execute_http(port, &workbook_path, &code)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+// Simple hash function to match JavaScript implementation
+fn hash_string(s: &str) -> u32 {
+    let mut hash: i32 = 0;
+    for c in s.chars() {
+        hash = ((hash << 5).wrapping_sub(hash)).wrapping_add(c as i32);
+    }
+    hash.abs() as u32
+}
+
+#[tauri::command]
+async fn execute_cell_stream(
+    workbook_path: String,
+    code: String,
+    window: tauri::Window,
+    state: State<'_, AppState>,
+) -> Result<bool, String> {
+    let port = {
+        let server = state.engine_server.lock().await;
+        server.as_ref().map(|s| s.port).ok_or("Engine server not initialized")?
+    };
+
+    // Create event name using hash of workbook path
+    let event_name = format!("cell-output-{}", hash_string(&workbook_path));
+    println!("Emitting to event: {}", event_name);
+
+    engine_http::EngineServer::execute_stream(
+        port,
+        &workbook_path,
+        &code,
+        move |output| {
+            // Emit event to frontend with output
+            let _ = window.emit(&event_name, output);
+        }
+    )
+    .await
+    .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn stop_engine(
+    workbook_path: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let port = {
+        let server = state.engine_server.lock().await;
+        server.as_ref().map(|s| s.port).ok_or("Engine server not initialized")?
+    };
+
+    engine_http::EngineServer::stop_engine_http(port, &workbook_path)
         .await
         .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-async fn stop_kernel(
-    notebook_path: String,
+async fn interrupt_engine(
+    workbook_path: String,
     state: State<'_, AppState>,
 ) -> Result<(), String> {
     let port = {
-        let server = state.kernel_server.lock().await;
-        server.as_ref().map(|s| s.port).ok_or("Kernel server not initialized")?
+        let server = state.engine_server.lock().await;
+        server.as_ref().map(|s| s.port).ok_or("Engine server not initialized")?
     };
 
-    kernel_http::KernelServer::stop_kernel_http(port, &notebook_path)
+    engine_http::EngineServer::interrupt_engine_http(port, &workbook_path)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn restart_engine(
+    workbook_path: String,
+    project_path: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    // Ensure engine server is running
+    ensure_engine_server(state.clone()).await?;
+
+    let project_root = PathBuf::from(project_path);
+
+    // Get the port
+    let port = {
+        let server = state.engine_server.lock().await;
+        server.as_ref().map(|s| s.port).ok_or("Engine server not initialized")?
+    };
+
+    // Now call the static method without holding any locks
+    engine_http::EngineServer::restart_engine_http(port, &workbook_path, &project_root)
         .await
         .map_err(|e| e.to_string())
 }
@@ -317,9 +417,10 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_window_state::Builder::default().build())
         .manage(AppState {
             project_root: Mutex::new(None),
-            kernel_server: Arc::new(Mutex::new(None)),
+            engine_server: Arc::new(Mutex::new(None)),
         })
         .invoke_handler(tauri::generate_handler![
             greet,
@@ -338,15 +439,21 @@ pub fn run() {
             set_project_root,
             get_project_root,
             list_files,
-            create_notebook,
-            read_notebook,
-            save_notebook,
+            create_workbook,
+            read_workbook,
+            save_workbook,
             read_file,
             save_file,
-            ensure_kernel_server,
-            start_kernel,
+            rename_file,
+            delete_file,
+            duplicate_workbook,
+            ensure_engine_server,
+            start_engine,
             execute_cell,
-            stop_kernel,
+            execute_cell_stream,
+            stop_engine,
+            interrupt_engine,
+            restart_engine,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

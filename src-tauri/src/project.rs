@@ -6,9 +6,43 @@ use serde::{Deserialize, Serialize};
 
 use crate::python;
 
+/// Slugify a project name to be a valid Python package name
+/// Rules: start/end with letter or digit, only contain -, _, ., and alphanumeric
+fn slugify_package_name(name: &str) -> String {
+    let mut slug = String::new();
+    let mut prev_was_separator = false;
+
+    for c in name.chars() {
+        if c.is_alphanumeric() {
+            slug.push(c.to_ascii_lowercase());
+            prev_was_separator = false;
+        } else if !prev_was_separator && !slug.is_empty() {
+            // Replace spaces and other chars with dash
+            slug.push('-');
+            prev_was_separator = true;
+        }
+    }
+
+    // Remove trailing separator if any
+    slug = slug.trim_end_matches('-').to_string();
+
+    // Ensure we have a valid name
+    if slug.is_empty() {
+        slug = "project".to_string();
+    }
+
+    // Ensure it starts with a letter or digit (should be guaranteed by above logic)
+    if !slug.chars().next().unwrap().is_alphanumeric() {
+        slug = format!("p{}", slug);
+    }
+
+    slug
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct TetherProject {
-    pub name: String,
+    pub name: String,          // Display name (can have spaces)
+    pub package_name: String,  // Slugified name for uv/Python
     pub root: PathBuf,
 }
 
@@ -22,8 +56,10 @@ pub struct TetherShortcut {
 /// Create a new Tether project from scratch
 pub async fn create_new_project(project_path: &Path, project_name: &str) -> Result<TetherProject> {
     let project_root = project_path.to_path_buf();
+    let package_name = slugify_package_name(project_name);
 
     println!("Creating new Tether project at {:?}", project_root);
+    println!("Display name: '{}', Package name: '{}'", project_name, package_name);
 
     // Create project directory if it doesn't exist
     if !project_root.exists() {
@@ -31,8 +67,8 @@ pub async fn create_new_project(project_path: &Path, project_name: &str) -> Resu
             .context("Failed to create project directory")?;
     }
 
-    // Initialize uv project
-    init_uv_project(&project_root, project_name).await?;
+    // Initialize uv project with slugified name
+    init_uv_project(&project_root, &package_name).await?;
 
     // Create Tether directory structure
     create_tether_structure(&project_root)?;
@@ -51,6 +87,7 @@ pub async fn create_new_project(project_path: &Path, project_name: &str) -> Resu
 
     Ok(TetherProject {
         name: project_name.to_string(),
+        package_name,
         root: project_root,
     })
 }
@@ -79,20 +116,29 @@ pub async fn open_folder(folder_path: &Path) -> Result<TetherProject> {
     // Initialize Python environment and sync dependencies
     python::init_project(&project_root).await?;
 
-    // Get project name from pyproject.toml if it exists, otherwise from folder name
-    let project_name = get_project_name(&project_root)
+    // Get package name from pyproject.toml if it exists, otherwise from folder name
+    let package_name = get_project_name(&project_root)
         .unwrap_or_else(|_| {
-            project_root
+            let folder_name = project_root
                 .file_name()
                 .and_then(|n| n.to_str())
                 .unwrap_or("unknown")
-                .to_string()
+                .to_string();
+            slugify_package_name(&folder_name)
         });
 
-    println!("Opened folder as project: {}", project_name);
+    // Use folder name as display name
+    let display_name = project_root
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("unknown")
+        .to_string();
+
+    println!("Opened folder as project: {}", display_name);
 
     Ok(TetherProject {
-        name: project_name,
+        name: display_name,
+        package_name,
         root: project_root,
     })
 }
@@ -290,18 +336,27 @@ pub fn load_project(project_path: &Path) -> Result<TetherProject> {
         anyhow::bail!("Not a Tether project: .tether directory not found");
     }
 
-    // Try to get project name from pyproject.toml
-    let project_name = get_project_name(&project_root)
+    // Try to get package name from pyproject.toml
+    let package_name = get_project_name(&project_root)
         .unwrap_or_else(|_| {
-            project_root
+            let folder_name = project_root
                 .file_name()
                 .and_then(|n| n.to_str())
                 .unwrap_or("unknown")
-                .to_string()
+                .to_string();
+            slugify_package_name(&folder_name)
         });
 
+    // Use folder name as display name
+    let display_name = project_root
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("unknown")
+        .to_string();
+
     Ok(TetherProject {
-        name: project_name,
+        name: display_name,
+        package_name,
         root: project_root,
     })
 }
@@ -328,8 +383,13 @@ fn load_project_from_shortcut(shortcut_path: &Path) -> Result<TetherProject> {
         anyhow::bail!("Project directory not found: {:?}", project_root);
     }
 
+    // Get package name from pyproject.toml
+    let package_name = get_project_name(&project_root)
+        .unwrap_or_else(|_| slugify_package_name(&shortcut.name));
+
     Ok(TetherProject {
         name: shortcut.name,
+        package_name,
         root: project_root,
     })
 }

@@ -3,7 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { Welcome } from "./components/Welcome";
 import { CreateProject } from "./components/CreateProject";
 import { FileExplorer } from "./components/FileExplorer";
-import { NotebookViewer } from "./components/NotebookViewer";
+import { WorkbookViewer } from "./components/WorkbookViewer";
 import { FileViewer } from "./components/FileViewer";
 import { TabBar } from "./components/TabBar";
 import "./App.css";
@@ -14,6 +14,7 @@ function App() {
   const [view, setView] = useState("loading"); // loading, welcome, create, project
   const [tabs, setTabs] = useState([]);
   const [activeTabId, setActiveTabId] = useState(null);
+  const [autosaveEnabled, setAutosaveEnabled] = useState(true);
 
   useEffect(() => {
     checkCurrentProject();
@@ -96,6 +97,14 @@ function App() {
     );
   }
 
+  function handleFileDeleted(filePath) {
+    // Close any tabs for this deleted file
+    const tab = tabs.find((t) => t.path === filePath);
+    if (tab) {
+      handleTabClose(tab.id);
+    }
+  }
+
   if (loading || view === "loading") {
     return (
       <div className="app loading">
@@ -135,7 +144,8 @@ function App() {
           <FileExplorer
             projectRoot={currentProject.root}
             projectName={currentProject.name}
-            onOpenNotebook={handleOpenFile}
+            onOpenWorkbook={handleOpenFile}
+            onFileDeleted={handleFileDeleted}
           />
         </aside>
         <main className="app-main">
@@ -144,14 +154,17 @@ function App() {
             activeTabId={activeTabId}
             onTabSelect={handleTabSelect}
             onTabClose={handleTabClose}
+            autosaveEnabled={autosaveEnabled}
+            onAutosaveToggle={setAutosaveEnabled}
           />
           <div className="project-view">
             {activeTab ? (
-              activeTab.type === "notebook" ? (
-                <NotebookViewer
+              activeTab.type === "workbook" ? (
+                <WorkbookViewer
                   key={activeTab.id}
-                  notebookPath={activeTab.path}
+                  workbookPath={activeTab.path}
                   projectRoot={currentProject.root}
+                  autosaveEnabled={autosaveEnabled}
                   onClose={() => handleTabClose(activeTab.id)}
                 />
               ) : (

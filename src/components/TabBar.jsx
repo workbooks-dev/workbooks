@@ -1,4 +1,4 @@
-export function TabBar({ tabs, activeTabId, onTabSelect, onTabClose }) {
+export function TabBar({ tabs, activeTabId, onTabSelect, onTabClose, autosaveEnabled, onAutosaveToggle }) {
   const getFileName = (path) => {
     return path.split("/").pop();
   };
@@ -25,34 +25,59 @@ export function TabBar({ tabs, activeTabId, onTabSelect, onTabClose }) {
   };
 
   if (tabs.length === 0) {
-    return null;
+    return (
+      <div className="tab-bar">
+        <div className="tab-bar-controls">
+          <label className="autosave-toggle">
+            <input
+              type="checkbox"
+              checked={autosaveEnabled}
+              onChange={(e) => onAutosaveToggle(e.target.checked)}
+            />
+            <span>Autosave</span>
+          </label>
+        </div>
+      </div>
+    );
   }
 
   return (
     <div className="tab-bar">
-      {tabs.map((tab) => (
-        <div
-          key={tab.id}
-          className={`tab ${tab.id === activeTabId ? "active" : ""} ${
-            tab.hasUnsavedChanges ? "unsaved" : ""
-          }`}
-          onClick={() => onTabSelect(tab.id)}
-        >
-          <span className="tab-icon">{getFileIcon(tab.path, tab.type)}</span>
-          <span className="tab-name">{getFileName(tab.path)}</span>
-          {tab.hasUnsavedChanges && <span className="tab-unsaved-dot">•</span>}
-          <button
-            className="tab-close"
-            onClick={(e) => {
-              e.stopPropagation();
-              onTabClose(tab.id);
-            }}
-            title="Close"
+      <div className="tab-bar-tabs">
+        {tabs.map((tab) => (
+          <div
+            key={tab.id}
+            className={`tab ${tab.id === activeTabId ? "active" : ""} ${
+              tab.hasUnsavedChanges ? "unsaved" : ""
+            }`}
+            onClick={() => onTabSelect(tab.id)}
           >
-            ×
-          </button>
-        </div>
-      ))}
+            <span className="tab-icon">{getFileIcon(tab.path, tab.type)}</span>
+            <span className="tab-name">{getFileName(tab.path)}</span>
+            {tab.hasUnsavedChanges && <span className="tab-unsaved-dot">•</span>}
+            <button
+              className="tab-close"
+              onClick={(e) => {
+                e.stopPropagation();
+                onTabClose(tab.id);
+              }}
+              title="Close"
+            >
+              ×
+            </button>
+          </div>
+        ))}
+      </div>
+      <div className="tab-bar-controls">
+        <label className="autosave-toggle">
+          <input
+            type="checkbox"
+            checked={autosaveEnabled}
+            onChange={(e) => onAutosaveToggle(e.target.checked)}
+          />
+          <span>Autosave</span>
+        </label>
+      </div>
     </div>
   );
 }
