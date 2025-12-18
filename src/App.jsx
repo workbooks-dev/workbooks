@@ -4,7 +4,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { ask } from "@tauri-apps/plugin-dialog";
 import { Welcome } from "./components/Welcome";
 import { CreateProject } from "./components/CreateProject";
-import { FileExplorer } from "./components/FileExplorer";
+import { Sidebar } from "./components/Sidebar";
 import { WorkbookViewer } from "./components/WorkbookViewer";
 import { FileViewer } from "./components/FileViewer";
 import { TabBar } from "./components/TabBar";
@@ -213,11 +213,11 @@ function App() {
   return (
     <div className="flex flex-col h-screen w-screen bg-white">
       <div className="flex flex-1 overflow-hidden">
-        <aside className="w-60 border-r border-gray-200 bg-gray-50 overflow-y-auto flex-shrink-0">
-          <FileExplorer
+        <aside className="w-64 border-r border-gray-200 bg-gray-50 overflow-y-auto flex-shrink-0">
+          <Sidebar
             projectRoot={currentProject.root}
             projectName={currentProject.name}
-            onOpenWorkbook={handleOpenFile}
+            onOpenFile={handleOpenFile}
             onFileDeleted={handleFileDeleted}
             activeFilePath={activeTab?.path}
           />

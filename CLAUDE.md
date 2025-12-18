@@ -111,6 +111,38 @@ Durable workbook orchestration for local-first data pipelines.
   - `WorkbookList.jsx` - Placeholder (not implemented)
   - `RunLog.jsx` - Placeholder (not implemented)
 
+- **Planned Sidebar Components** (see app-features.md for full details):
+  - **Workbooks Section**:
+    - Shows list of `.ipynb` files ordered by recent use
+    - Click header for full table view with filtering (Last Run, Status, Scheduled, Actions)
+    - Shows only workbooks in `/notebooks` folder
+  - **Secrets Section** (NOT BUILT):
+    - Table of encrypted key/value pairs
+    - See encryption.md for full implementation details
+    - Uses system keychain (Touch ID on macOS)
+  - **Schedule Section** (NOT BUILT):
+    - Tab 1: Scheduled Workbooks (list with next run time)
+    - Tab 2: Recent Runs (last 30 runs with reports)
+  - **Files Section**:
+    - Shows all project files except `.ipynb` (those appear in Workbooks)
+    - Reflects actual folder structure
+    - Opening a notebook from Files also displays it in Workbooks
+  - **Project Settings** (gear icon at bottom):
+    - Project name editing
+    - Python package management
+    - Export project as ZIP
+
+- **File Drop Behavior** (TO BE IMPLEMENTED):
+  - `.ipynb` files → Saved to `/notebooks` folder, appear in Workbooks sidebar
+  - All other files → Saved to project root, appear in Files sidebar
+
+- **Environment Variables** (✅ IMPLEMENTED):
+  - `TETHER_PROJECT_FOLDER` - Absolute path to project root
+  - Automatically injected into all workbook kernel environments
+  - Implementation: Modified `engine_server.py` to accept `env_vars` parameter, modified `engine_http.rs` to pass TETHER_PROJECT_FOLDER
+  - Usage: `os.path.join(os.environ["TETHER_PROJECT_FOLDER"], "data.csv")`
+  - See `TETHER_PROJECT_FOLDER.md` for examples and best practices
+
 - **Hooks**:
   - `useProject.js` - Project state hooks (exists but implementation TBD)
   - `useTether.js` - Tauri command wrappers (exists but implementation TBD)
@@ -140,11 +172,19 @@ Durable workbook orchestration for local-first data pipelines.
   - Tauri plugins (dialog, opener, window-state)
 
 **What's NOT Built (Yet):**
+- **Sidebar UI redesign** (see app-features.md for planned structure):
+  - Workbooks section with recent-use ordering and table view
+  - Secrets manager component with encryption
+  - Schedule section with two tabs (Scheduled + Recent Runs)
+  - Files section showing all non-notebook files
+  - Project Settings modal
+- **File drop handling** - Drop .ipynb to /notebooks, other files to root
+- **Environment variable injection** - TETHER_PROJECT_FOLDER into workbook runtime
 - State management system (SQLite state.db, blob storage)
 - Checkpointing and durability (cell-by-cell checkpoints)
 - Workbook dependency tracking and auto-discovery
 - React Flow canvas UI for visual pipeline connections
-- Run logs and execution history viewer
+- Run logs and execution history (30-run limit with auto-deletion)
 - Python tether-core package (the `from tether import state` API)
 - Scheduler/cron functionality
 - State forking (Neon-style branches)

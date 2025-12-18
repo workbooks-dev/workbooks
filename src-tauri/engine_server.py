@@ -66,6 +66,7 @@ class StartEngineRequest(BaseModel):
     project_root: str
     venv_path: str
     engine_name: str = "python3"
+    env_vars: Dict[str, str] | None = None  # Optional environment variables to inject
 
 
 class ExecuteRequest(BaseModel):
@@ -191,6 +192,12 @@ async def start_engine(request: StartEngineRequest):
                 # Prepend venv bin directory to PATH
                 # This ensures shell commands like !pip use the venv's executables
                 kernel_spec['env']['PATH'] = f"{venv_bin}:{{PATH}}"
+
+                # Inject custom environment variables (like TETHER_PROJECT_FOLDER)
+                if request.env_vars:
+                    for key, value in request.env_vars.items():
+                        kernel_spec['env'][key] = value
+                        print(f"Injecting env var: {key}={value}")
 
                 with open(kernel_json_path, 'w') as f:
                     json.dump(kernel_spec, f, indent=2)

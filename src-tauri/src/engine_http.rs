@@ -360,13 +360,21 @@ impl EngineServer {
     pub async fn start_engine_http(port: u16, workbook_path: &str, project_root: &Path, venv_path: &Path) -> Result<()> {
         let url = format!("http://127.0.0.1:{}/engine/start", port);
 
+        // Prepare environment variables to inject into the kernel
+        let mut env_vars = std::collections::HashMap::new();
+        env_vars.insert(
+            "TETHER_PROJECT_FOLDER".to_string(),
+            project_root.to_string_lossy().to_string()
+        );
+
         let response = HTTP_CLIENT
             .post(&url)
             .json(&serde_json::json!({
                 "workbook_path": workbook_path,
                 "project_root": project_root.to_string_lossy(),
                 "venv_path": venv_path.to_string_lossy(),
-                "engine_name": "python3"
+                "engine_name": "python3",
+                "env_vars": env_vars
             }))
             .send()
             .await?;
@@ -376,7 +384,8 @@ impl EngineServer {
             anyhow::bail!("Failed to start engine: {}", error_text);
         }
 
-        println!("Engine started for workbook: {}", workbook_path);
+        println!("Engine started for workbook: {} with TETHER_PROJECT_FOLDER={}",
+                 workbook_path, project_root.display());
         Ok(())
     }
 
@@ -535,13 +544,21 @@ impl EngineServer {
     pub async fn restart_engine_http(port: u16, workbook_path: &str, project_root: &Path, venv_path: &Path) -> Result<()> {
         let url = format!("http://127.0.0.1:{}/engine/restart", port);
 
+        // Prepare environment variables to inject into the kernel
+        let mut env_vars = std::collections::HashMap::new();
+        env_vars.insert(
+            "TETHER_PROJECT_FOLDER".to_string(),
+            project_root.to_string_lossy().to_string()
+        );
+
         let response = HTTP_CLIENT
             .post(&url)
             .json(&serde_json::json!({
                 "workbook_path": workbook_path,
                 "project_root": project_root.to_string_lossy(),
                 "venv_path": venv_path.to_string_lossy(),
-                "engine_name": "python3"
+                "engine_name": "python3",
+                "env_vars": env_vars
             }))
             .send()
             .await?;
@@ -551,7 +568,8 @@ impl EngineServer {
             anyhow::bail!("Failed to restart engine: {}", error_text);
         }
 
-        println!("Engine restarted for workbook: {}", workbook_path);
+        println!("Engine restarted for workbook: {} with TETHER_PROJECT_FOLDER={}",
+                 workbook_path, project_root.display());
         Ok(())
     }
 
