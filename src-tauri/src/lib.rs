@@ -330,13 +330,19 @@ fn hash_string(s: &str) -> u32 {
     hash.abs() as u32
 }
 
+#[derive(serde::Serialize)]
+struct StreamExecutionResult {
+    success: bool,
+    execution_count: Option<i32>,
+}
+
 #[tauri::command]
 async fn execute_cell_stream(
     workbook_path: String,
     code: String,
     window: tauri::Window,
     state: State<'_, AppState>,
-) -> Result<bool, String> {
+) -> Result<StreamExecutionResult, String> {
     let port = {
         let server = state.engine_server.lock().await;
         server.as_ref().map(|s| s.port).ok_or("Engine server not initialized")?
@@ -346,7 +352,7 @@ async fn execute_cell_stream(
     let event_name = format!("cell-output-{}", hash_string(&workbook_path));
     println!("Emitting to event: {}", event_name);
 
-    engine_http::EngineServer::execute_stream(
+    let (success, execution_count) = engine_http::EngineServer::execute_stream(
         port,
         &workbook_path,
         &code,
@@ -356,7 +362,12 @@ async fn execute_cell_stream(
         }
     )
     .await
-    .map_err(|e| e.to_string())
+    .map_err(|e| e.to_string())?;
+
+    Ok(StreamExecutionResult {
+        success,
+        execution_count,
+    })
 }
 
 #[tauri::command]
@@ -385,6 +396,23 @@ async fn interrupt_engine(
     };
 
     engine_http::EngineServer::interrupt_engine_http(port, &workbook_path)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn complete_code(
+    workbook_path: String,
+    code: String,
+    cursor_pos: i32,
+    state: State<'_, AppState>,
+) -> Result<engine_http::CompletionResult, String> {
+    let port = {
+        let server = state.engine_server.lock().await;
+        server.as_ref().map(|s| s.port).ok_or("Engine server not initialized")?
+    };
+
+    engine_http::EngineServer::complete_code_http(port, &workbook_path, &code, cursor_pos)
         .await
         .map_err(|e| e.to_string())
 }
@@ -451,6 +479,7 @@ pub fn run() {
             start_engine,
             execute_cell,
             execute_cell_stream,
+            complete_code,
             stop_engine,
             interrupt_engine,
             restart_engine,

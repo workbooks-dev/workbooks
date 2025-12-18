@@ -61,6 +61,24 @@ pub struct ExecutionResult {
     pub outputs: Vec<CellOutput>,
 }
 
+/// A single completion match
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CompletionMatch {
+    pub text: String,
+    pub start: i32,
+    pub end: i32,
+    #[serde(rename = "type")]
+    pub completion_type: Option<String>,
+}
+
+/// Result of code completion request
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CompletionResult {
+    pub matches: Vec<CompletionMatch>,
+    pub cursor_start: i32,
+    pub cursor_end: i32,
+}
+
 /// Manages the FastAPI engine server process
 pub struct EngineServer {
     process: Option<Child>,
@@ -71,8 +89,149 @@ pub struct EngineServer {
 unsafe impl Send for EngineServer {}
 
 impl EngineServer {
+    /// Kill any orphaned engine_server.py processes ONLY on our candidate ports
+    fn cleanup_orphaned_processes() -> Result<()> {
+        println!("Checking for orphaned engine_server.py processes on Tether ports...");
+
+        #[cfg(target_os = "windows")]
+        {
+            // Windows: For each candidate port, check if it's in use and kill the specific process
+            for &port in CANDIDATE_PORTS {
+                let output = std::process::Command::new("netstat")
+                    .args(&["-ano", "-p", "TCP"])
+                    .output();
+
+                if let Ok(output) = output {
+                    let stdout = String::from_utf8_lossy(&output.stdout);
+
+                    // Look for lines with our port
+                    for line in stdout.lines() {
+                        if line.contains(&format!(":{}", port)) && line.contains("LISTENING") {
+                            // Extract PID (last column)
+                            if let Some(pid_str) = line.split_whitespace().last() {
+                                // Check if this PID is running Python with engine_server.py
+                                let tasklist_output = std::process::Command::new("tasklist")
+                                    .args(&["/FI", &format!("PID eq {}", pid_str), "/V"])
+                                    .output();
+
+                                if let Ok(tasklist) = tasklist_output {
+                                    let tasklist_str = String::from_utf8_lossy(&tasklist.stdout);
+                                    if tasklist_str.contains("python") {
+                                        println!("Found orphaned process on port {} with PID {}, killing...", port, pid_str);
+                                        let _ = std::process::Command::new("taskkill")
+                                            .args(&["/F", "/PID", pid_str])
+                                            .output();
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        #[cfg(target_os = "macos")]
+        {
+            // macOS: Use lsof to find processes listening on our specific ports
+            for &port in CANDIDATE_PORTS {
+                let output = std::process::Command::new("lsof")
+                    .args(&["-ti", &format!(":{}", port), "-sTCP:LISTEN"])
+                    .output();
+
+                if let Ok(output) = output {
+                    if output.status.success() {
+                        let pids = String::from_utf8_lossy(&output.stdout);
+                        for pid_str in pids.lines() {
+                            let pid_str = pid_str.trim();
+                            if !pid_str.is_empty() {
+                                // Verify this is actually engine_server.py
+                                let ps_output = std::process::Command::new("ps")
+                                    .args(&["-p", pid_str, "-o", "command="])
+                                    .output();
+
+                                if let Ok(ps) = ps_output {
+                                    let command = String::from_utf8_lossy(&ps.stdout);
+                                    if command.contains("engine_server.py") {
+                                        println!("Found orphaned engine_server.py on port {} with PID {}, killing...", port, pid_str);
+                                        let _ = std::process::Command::new("kill")
+                                            .args(&["-9", pid_str])
+                                            .output();
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        #[cfg(all(unix, not(target_os = "macos")))]
+        {
+            // Linux: Use lsof or fuser to find processes on specific ports
+            for &port in CANDIDATE_PORTS {
+                // Try lsof first
+                let output = std::process::Command::new("lsof")
+                    .args(&["-ti", &format!(":{}", port), "-sTCP:LISTEN"])
+                    .output();
+
+                if let Ok(output) = output {
+                    if output.status.success() {
+                        let pids = String::from_utf8_lossy(&output.stdout);
+                        for pid_str in pids.lines() {
+                            let pid_str = pid_str.trim();
+                            if !pid_str.is_empty() {
+                                // Verify this is engine_server.py
+                                let cmdline_path = format!("/proc/{}/cmdline", pid_str);
+                                if let Ok(cmdline) = std::fs::read_to_string(&cmdline_path) {
+                                    if cmdline.contains("engine_server.py") {
+                                        println!("Found orphaned engine_server.py on port {} with PID {}, killing...", port, pid_str);
+                                        let _ = std::process::Command::new("kill")
+                                            .args(&["-9", pid_str])
+                                            .output();
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    // Fall back to fuser if lsof is not available
+                    let output = std::process::Command::new("fuser")
+                        .args(&[&format!("{}/tcp", port)])
+                        .output();
+
+                    if let Ok(output) = output {
+                        if output.status.success() {
+                            let pids = String::from_utf8_lossy(&output.stdout);
+                            for pid_str in pids.split_whitespace() {
+                                // Verify this is engine_server.py
+                                let cmdline_path = format!("/proc/{}/cmdline", pid_str);
+                                if let Ok(cmdline) = std::fs::read_to_string(&cmdline_path) {
+                                    if cmdline.contains("engine_server.py") {
+                                        println!("Found orphaned engine_server.py on port {} with PID {}, killing...", port, pid_str);
+                                        let _ = std::process::Command::new("kill")
+                                            .args(&["-9", pid_str])
+                                            .output();
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Give the OS time to free up the ports
+        std::thread::sleep(std::time::Duration::from_millis(500));
+
+        println!("Orphaned process cleanup complete");
+        Ok(())
+    }
+
     /// Start the engine server on the first available port
     pub async fn start() -> Result<Self> {
+        // Clean up any orphaned processes first
+        Self::cleanup_orphaned_processes()?;
+
         // Find the engine_server.py script
         let cwd = std::env::current_dir()?;
         let exe_path = std::env::current_exe()?;
@@ -242,7 +401,7 @@ impl EngineServer {
     }
 
     /// Execute code with streaming output (SSE)
-    pub async fn execute_stream<F>(port: u16, workbook_path: &str, code: &str, mut on_output: F) -> Result<bool>
+    pub async fn execute_stream<F>(port: u16, workbook_path: &str, code: &str, mut on_output: F) -> Result<(bool, Option<i32>)>
     where
         F: FnMut(CellOutput) + Send,
     {
@@ -266,6 +425,7 @@ impl EngineServer {
         let mut bytes_stream = response.bytes_stream();
         let mut buffer = String::new();
         let mut success = true;
+        let mut execution_count: Option<i32> = None;
 
         while let Some(chunk) = bytes_stream.next().await {
             let chunk = chunk?;
@@ -290,6 +450,7 @@ impl EngineServer {
                             }
                             Some("complete") => {
                                 success = event.get("success").and_then(|s| s.as_bool()).unwrap_or(true);
+                                execution_count = event.get("execution_count").and_then(|c| c.as_i64()).map(|c| c as i32);
                                 break;
                             }
                             Some("error") => {
@@ -309,7 +470,7 @@ impl EngineServer {
             }
         }
 
-        Ok(success)
+        Ok((success, execution_count))
     }
 
     /// Stop a workbook's engine (static method to avoid Send issues)
@@ -345,6 +506,29 @@ impl EngineServer {
         Ok(())
     }
 
+    /// Get code completions from the Jupyter kernel
+    pub async fn complete_code_http(port: u16, workbook_path: &str, code: &str, cursor_pos: i32) -> Result<CompletionResult> {
+        let url = format!("http://127.0.0.1:{}/engine/complete", port);
+
+        let response = HTTP_CLIENT
+            .post(&url)
+            .json(&serde_json::json!({
+                "workbook_path": workbook_path,
+                "code": code,
+                "cursor_pos": cursor_pos
+            }))
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            let error_text = response.text().await?;
+            anyhow::bail!("Completion failed: {}", error_text);
+        }
+
+        let result: CompletionResult = response.json().await?;
+        Ok(result)
+    }
+
     /// Restart a workbook's engine (static method to avoid Send issues)
     pub async fn restart_engine_http(port: u16, workbook_path: &str, project_root: &Path) -> Result<()> {
         let url = format!("http://127.0.0.1:{}/engine/restart", port);
@@ -376,5 +560,17 @@ impl EngineServer {
             let _ = process.wait();
         }
         Ok(())
+    }
+}
+
+// Implement Drop to ensure the process is killed when EngineServer is dropped
+impl Drop for EngineServer {
+    fn drop(&mut self) {
+        println!("EngineServer being dropped, cleaning up process...");
+        if let Some(mut process) = self.process.take() {
+            let _ = process.kill();
+            let _ = process.wait();
+            println!("Engine server process killed");
+        }
     }
 }

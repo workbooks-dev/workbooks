@@ -3,7 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import Editor from "@monaco-editor/react";
 import { marked } from "marked";
 
-export function FileViewer({ filePath, onClose }) {
+export function FileViewer({ filePath, onClose, onUnsavedChangesUpdate }) {
   const [content, setContent] = useState("");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
@@ -16,6 +16,13 @@ export function FileViewer({ filePath, onClose }) {
   useEffect(() => {
     loadFile();
   }, [filePath]);
+
+  // Notify parent when unsaved changes state changes
+  useEffect(() => {
+    if (onUnsavedChangesUpdate) {
+      onUnsavedChangesUpdate(hasUnsavedChanges);
+    }
+  }, [hasUnsavedChanges, onUnsavedChangesUpdate]);
 
   useEffect(() => {
     // Global keyboard shortcuts

@@ -86,6 +86,7 @@ class Output(BaseModel):
 class ExecuteResponse(BaseModel):
     success: bool
     outputs: List[Output]
+    execution_count: int | None = None
 
 
 @app.get("/health")
@@ -233,6 +234,7 @@ async def execute_code(request: ExecuteRequest):
         truncated = False
         total_text_length = 0
         MAX_TOTAL_TEXT_LENGTH = 10_000_000  # 10MB of text
+        exec_count = None
 
         while True:
             try:
@@ -331,13 +333,25 @@ async def execute_code(request: ExecuteRequest):
                 )
                 break
 
+        # Get execution count from the execute_reply message
+        try:
+            reply = await asyncio.wait_for(kc.get_shell_msg(), timeout=1.0)
+            if reply.get("parent_header", {}).get("msg_id") == msg_id:
+                exec_count = reply.get("content", {}).get("execution_count")
+        except asyncio.TimeoutError:
+            pass
+
         # Combine outputs: first N + truncation message (if any) + last M
         if tail_outputs:
             final_outputs = outputs + tail_outputs
         else:
             final_outputs = outputs
 
-        return ExecuteResponse(success=not has_error, outputs=final_outputs)
+        return ExecuteResponse(
+            success=not has_error,
+            outputs=final_outputs,
+            execution_count=exec_count
+        )
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -364,6 +378,7 @@ async def execute_code_stream(request: ExecuteRequest):
             output_count = 0
             truncated = False
             skip_outputs = False
+            exec_count = None
             MAX_OUTPUT_MESSAGES = 100  # Stop actively processing after this many
 
             # Send a start event
@@ -384,8 +399,16 @@ async def execute_code_stream(request: ExecuteRequest):
 
                     # Check for completion first
                     if msg_type == "status" and content["execution_state"] == "idle":
-                        # Send completion event
-                        yield f"data: {json.dumps({'type': 'complete', 'success': True})}\n\n"
+                        # Get execution count from shell reply
+                        try:
+                            reply = await asyncio.wait_for(kc.get_shell_msg(), timeout=1.0)
+                            if reply.get("parent_header", {}).get("msg_id") == msg_id:
+                                exec_count = reply.get("content", {}).get("execution_count")
+                        except asyncio.TimeoutError:
+                            pass
+
+                        # Send completion event with execution count
+                        yield f"data: {json.dumps({'type': 'complete', 'success': True, 'execution_count': exec_count})}\n\n"
                         break
 
                     # If skipping, just drain the queue and wait for completion
@@ -509,6 +532,77 @@ async def restart_engine(request: StartEngineRequest):
 
     # Start new engine (reuse start_engine logic)
     return await start_engine(request)
+
+
+class CompleteRequest(BaseModel):
+    workbook_path: str
+    code: str
+    cursor_pos: int
+
+
+class CompletionMatch(BaseModel):
+    text: str
+    start: int
+    end: int
+    type: str | None = None
+
+
+class CompleteResponse(BaseModel):
+    matches: List[CompletionMatch]
+    cursor_start: int
+    cursor_end: int
+
+
+@app.post("/engine/complete", response_model=CompleteResponse)
+async def complete_code(request: CompleteRequest):
+    """Get code completions from the Jupyter kernel."""
+    workbook_path = request.workbook_path
+    code = request.code
+    cursor_pos = request.cursor_pos
+
+    km = engines.get(workbook_path)
+    if not km:
+        raise HTTPException(status_code=404, detail="No engine found for this workbook")
+
+    try:
+        kc = km.client()
+
+        # Request completions from kernel
+        msg_id = kc.complete(code, cursor_pos)
+
+        # Wait for completion reply
+        while True:
+            try:
+                msg = await asyncio.wait_for(kc.get_shell_msg(), timeout=5.0)
+                if msg.get("parent_header", {}).get("msg_id") == msg_id:
+                    content = msg["content"]
+                    if msg["msg_type"] == "complete_reply":
+                        matches = content.get("matches", [])
+                        cursor_start = content.get("cursor_start", cursor_pos)
+                        cursor_end = content.get("cursor_end", cursor_pos)
+
+                        # Convert matches to CompletionMatch objects
+                        completion_matches = [
+                            CompletionMatch(
+                                text=match,
+                                start=cursor_start,
+                                end=cursor_end,
+                                type=None  # Jupyter doesn't provide type info by default
+                            )
+                            for match in matches
+                        ]
+
+                        return CompleteResponse(
+                            matches=completion_matches,
+                            cursor_start=cursor_start,
+                            cursor_end=cursor_end
+                        )
+            except asyncio.TimeoutError:
+                # If timeout, return empty completions
+                return CompleteResponse(matches=[], cursor_start=cursor_pos, cursor_end=cursor_pos)
+
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 if __name__ == "__main__":

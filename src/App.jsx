@@ -1,5 +1,7 @@
 import { useState, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { getCurrentWindow } from "@tauri-apps/api/window";
+import { ask } from "@tauri-apps/plugin-dialog";
 import { Welcome } from "./components/Welcome";
 import { CreateProject } from "./components/CreateProject";
 import { FileExplorer } from "./components/FileExplorer";
@@ -20,11 +22,59 @@ function App() {
     checkCurrentProject();
   }, []);
 
+  // Save tabs to localStorage whenever they change
+  useEffect(() => {
+    if (currentProject && tabs.length >= 0) {
+      const projectKey = `tether_tabs_${currentProject.root}`;
+      localStorage.setItem(projectKey, JSON.stringify({
+        tabs: tabs,
+        activeTabId: activeTabId
+      }));
+    }
+  }, [tabs, activeTabId, currentProject]);
+
+  // Prevent window close if there are unsaved changes
+  useEffect(() => {
+    const appWindow = getCurrentWindow();
+
+    const unlisten = appWindow.onCloseRequested(async (event) => {
+      // Check if any tabs have unsaved changes
+      const hasUnsavedChanges = tabs.some(tab => tab.hasUnsavedChanges);
+
+      if (hasUnsavedChanges) {
+        // Prevent the close
+        event.preventDefault();
+
+        // Ask user what to do
+        const shouldClose = await ask(
+          "You have unsaved changes. Are you sure you want to close without saving?",
+          {
+            title: "Unsaved Changes",
+            kind: "warning",
+            okLabel: "Close Without Saving",
+            cancelLabel: "Cancel",
+          }
+        );
+
+        if (shouldClose) {
+          // User confirmed, close the window
+          await appWindow.destroy();
+        }
+      }
+    });
+
+    // Cleanup
+    return () => {
+      unlisten.then(fn => fn());
+    };
+  }, [tabs]);
+
   async function checkCurrentProject() {
     try {
       const project = await invoke("get_current_project");
       if (project) {
         setCurrentProject(project);
+        restoreTabs(project);
         setView("project");
       } else {
         setView("welcome");
@@ -37,11 +87,29 @@ function App() {
     }
   }
 
+  function restoreTabs(project) {
+    const projectKey = `tether_tabs_${project.root}`;
+    const savedState = localStorage.getItem(projectKey);
+
+    if (savedState) {
+      try {
+        const { tabs: savedTabs, activeTabId: savedActiveTabId } = JSON.parse(savedState);
+        if (savedTabs && savedTabs.length > 0) {
+          setTabs(savedTabs);
+          setActiveTabId(savedActiveTabId);
+        }
+      } catch (error) {
+        console.error("Failed to restore tabs:", error);
+      }
+    }
+  }
+
   function handleProjectOpened(project, mode) {
     if (mode === "create") {
       setView("create");
     } else if (project) {
       setCurrentProject(project);
+      restoreTabs(project);
       setView("project");
     }
   }
@@ -138,17 +206,18 @@ function App() {
   const activeTab = tabs.find((tab) => tab.id === activeTabId);
 
   return (
-    <div className="app">
-      <div className="app-body">
-        <aside className="app-sidebar">
+    <div className="flex flex-col h-screen w-screen bg-white">
+      <div className="flex flex-1 overflow-hidden">
+        <aside className="w-60 border-r border-gray-200 bg-gray-50 overflow-y-auto flex-shrink-0">
           <FileExplorer
             projectRoot={currentProject.root}
             projectName={currentProject.name}
             onOpenWorkbook={handleOpenFile}
             onFileDeleted={handleFileDeleted}
+            activeFilePath={activeTab?.path}
           />
         </aside>
-        <main className="app-main">
+        <main className="flex-1 overflow-auto bg-white">
           <TabBar
             tabs={tabs}
             activeTabId={activeTabId}
@@ -157,7 +226,7 @@ function App() {
             autosaveEnabled={autosaveEnabled}
             onAutosaveToggle={setAutosaveEnabled}
           />
-          <div className="project-view">
+          <div className="h-full">
             {activeTab ? (
               activeTab.type === "workbook" ? (
                 <WorkbookViewer
@@ -166,16 +235,18 @@ function App() {
                   projectRoot={currentProject.root}
                   autosaveEnabled={autosaveEnabled}
                   onClose={() => handleTabClose(activeTab.id)}
+                  onUnsavedChangesUpdate={(hasChanges) => updateTabUnsavedState(activeTab.id, hasChanges)}
                 />
               ) : (
                 <FileViewer
                   key={activeTab.id}
                   filePath={activeTab.path}
                   onClose={() => handleTabClose(activeTab.id)}
+                  onUnsavedChangesUpdate={(hasChanges) => updateTabUnsavedState(activeTab.id, hasChanges)}
                 />
               )
             ) : (
-              <div className="placeholder">
+              <div className="flex items-center justify-center h-full text-gray-400">
                 <p>Select a file to open</p>
               </div>
             )}

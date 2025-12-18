@@ -78,16 +78,20 @@ Durable workbook orchestration for local-first data pipelines.
     - Tab close functionality
     - Autosave toggle control
     - Active tab highlighting
-  - `WorkbookViewer.jsx` - Full-featured workbook editor:
-    - Monaco editor for code cells
-    - Markdown cell editing and rendering
-    - Cell execution with Shift+Enter (and streaming output)
-    - Output rendering (stdout, stderr, execute_result, errors, images)
+  - `WorkbookViewer.jsx` - Full-featured workbook editor (85% MVP complete):
+    - Monaco editor for code cells with syntax highlighting
+    - Markdown cell editing and rendering with code syntax highlighting
+    - Cell execution with Shift+Enter, Ctrl/Cmd+Enter, Alt+Enter
+    - **Streaming output** - Real-time stdout/stderr via Server-Sent Events
+    - **Rich output rendering** - PNG, JPEG, SVG, HTML (DataFrames, plots, etc.)
+    - Output rendering (stdout, stderr, execute_result, errors, images, HTML, tables)
     - Cell manipulation (add, delete, move up/down, change type, clear output)
-    - Jupyter-style keyboard shortcuts (a/b for add, m/y for type change, arrows for navigation)
-    - Engine lifecycle management (start, stop, interrupt, restart)
-    - Auto-save support with toggle
+    - **Jupyter-style keyboard shortcuts** - DD double-tap delete, A/B for add, M/Y for type change, arrows for navigation
+    - **Engine lifecycle management** - start, stop, interrupt, restart
+    - **Kernel status indicator** - Real-time status (starting/idle/busy/error/restarting)
+    - Auto-save support with toggle (3s interval + on-blur + on-run)
     - ANSI color code stripping
+    - Output truncation for large outputs with expand/collapse
   - `FileViewer.jsx` - General file editor (BUILT):
     - Monaco editor for code files
     - Markdown preview for .md files
@@ -289,13 +293,19 @@ tether resume [workbook]            # Resume interrupted run
 - ❌ `src/executor.rs` - Workbook execution orchestration (NOT BUILT)
 - ❌ `src/scheduler.rs` - Cron-based scheduling (NOT BUILT)
 
-### React/JSX (src/) - Partially Built
+### React/JSX (src/) - Well Built
 - ✅ `App.jsx` - Main app layout with routing, tab management (BUILT)
 - ✅ `components/Welcome.jsx` - Landing screen (BUILT)
 - ✅ `components/CreateProject.jsx` - New project wizard (BUILT)
 - ✅ `components/FileExplorer.jsx` - File tree browser with context menu (BUILT)
 - ✅ `components/TabBar.jsx` - Tab management with autosave toggle (BUILT)
-- ✅ `components/WorkbookViewer.jsx` - Full workbook editor (BUILT)
+- ✅ `components/WorkbookViewer.jsx` - Full-featured workbook editor with:
+  - Rich output rendering (PNG, JPEG, SVG, HTML)
+  - Streaming execution with real-time output
+  - Interrupt execution button
+  - Kernel status indicator (starting/idle/busy/error/restarting)
+  - DD double-tap delete
+  - All Jupyter keyboard shortcuts
 - ✅ `components/FileViewer.jsx` - General file editor with Monaco (BUILT)
 - ✅ `components/ContextMenu.jsx` - Right-click context menu (BUILT)
 - ✅ `components/InputDialog.jsx` - Modal input dialog (BUILT)

@@ -17,7 +17,7 @@ function hashString(s) {
   return Math.abs(hash);
 }
 
-function WorkbookCell({ cell, index, onUpdate, onDelete, onExecute, onMoveUp, onMoveDown, onClearOutput, isSelected, isEditMode, isRunning, executionElapsed, onSelect, onEnterEditMode, onInsertBelow, autosaveEnabled }) {
+function WorkbookCell({ cell, index, workbookPath, onUpdate, onDelete, onExecute, onMoveUp, onMoveDown, onClearOutput, isSelected, isEditMode, isRunning, executionElapsed, onSelect, onEnterEditMode, onInsertBelow, autosaveEnabled }) {
   // Initialize content from cell source ONCE on mount - don't sync after that
   const [content, setContent] = useState(cell.source.join(""));
   const editorRef = useRef(null);
@@ -72,7 +72,9 @@ function WorkbookCell({ cell, index, onUpdate, onDelete, onExecute, onMoveUp, on
   if (cell.cell_type === "markdown") {
     return (
       <div
-        className={`notebook-cell markdown-cell ${isSelected ? "selected" : ""} ${isEditMode ? "edit-mode" : ""}`}
+        className={`relative mb-4 px-4 py-3 rounded-lg transition-all ${
+          isSelected ? 'bg-blue-50 ring-2 ring-blue-200' : 'hover:bg-gray-50'
+        }`}
         onClick={() => onSelect(index)}
         onDoubleClick={() => {
           onSelect(index);
@@ -80,27 +82,51 @@ function WorkbookCell({ cell, index, onUpdate, onDelete, onExecute, onMoveUp, on
         }}
       >
         {isSelected && (
-          <div className="cell-toolbar">
-            <button onClick={(e) => { e.stopPropagation(); handleExecute(); }} title="Run cell (render)">▶</button>
-            <button onClick={(e) => { e.stopPropagation(); onMoveUp(index); }} title="Move up">↑</button>
-            <button onClick={(e) => { e.stopPropagation(); onMoveDown(index); }} title="Move down">↓</button>
-            <button onClick={(e) => { e.stopPropagation(); onDelete(index); }} title="Delete">🗑</button>
+          <div className="absolute top-2 right-2 flex gap-1 z-10">
+            <button
+              onClick={(e) => { e.stopPropagation(); handleExecute(); }}
+              className="px-2 py-1 text-xs bg-white hover:bg-gray-100 border border-gray-300 rounded shadow-sm transition-colors"
+              title="Run cell (render)"
+            >
+              ▶
+            </button>
+            <button
+              onClick={(e) => { e.stopPropagation(); onMoveUp(index); }}
+              className="px-2 py-1 text-xs bg-white hover:bg-gray-100 border border-gray-300 rounded shadow-sm transition-colors"
+              title="Move up"
+            >
+              ↑
+            </button>
+            <button
+              onClick={(e) => { e.stopPropagation(); onMoveDown(index); }}
+              className="px-2 py-1 text-xs bg-white hover:bg-gray-100 border border-gray-300 rounded shadow-sm transition-colors"
+              title="Move down"
+            >
+              ↓
+            </button>
+            <button
+              onClick={(e) => { e.stopPropagation(); onDelete(index); }}
+              className="px-2 py-1 text-xs bg-white hover:bg-gray-100 border border-gray-300 rounded shadow-sm transition-colors"
+              title="Delete"
+            >
+              🗑
+            </button>
           </div>
         )}
-        <div className="cell-input">
+        <div className="w-full">
           {isEditMode ? (
             <textarea
               value={content}
               onChange={(e) => handleEditorChange(e.target.value)}
               onKeyDown={handleKeyDown}
               onBlur={handleBlur}
-              className="markdown-editor"
+              className="w-full p-3 border-none resize-y font-sans text-sm leading-relaxed focus:outline-none bg-transparent"
               placeholder="Enter markdown..."
               rows={Math.max(3, content.split("\n").length)}
               autoFocus
             />
           ) : (
-            <div className="markdown-rendered">
+            <div className="markdown-content px-3 py-2">
               {content ? (
                 <ReactMarkdown
                   components={{
@@ -126,7 +152,7 @@ function WorkbookCell({ cell, index, onUpdate, onDelete, onExecute, onMoveUp, on
                   {content}
                 </ReactMarkdown>
               ) : (
-                <div className="markdown-placeholder">Double-click to edit markdown</div>
+                <div className="text-gray-400 italic px-3 py-2">Double-click to edit markdown</div>
               )}
             </div>
           )}
@@ -141,36 +167,66 @@ function WorkbookCell({ cell, index, onUpdate, onDelete, onExecute, onMoveUp, on
 
     return (
       <div
-        className={`notebook-cell code-cell ${isSelected ? "selected" : ""} ${isEditMode ? "edit-mode" : ""}`}
+        className={`relative flex gap-3 mb-4 ${isSelected ? 'bg-blue-50/30' : ''}`}
         onClick={() => onSelect(index)}
       >
         {isSelected && (
-          <div className="cell-toolbar">
-            <button onClick={(e) => { e.stopPropagation(); handleExecute(); }} title="Run cell">▶</button>
+          <div className="absolute -top-1 right-2 flex gap-1 z-10">
+            <button
+              onClick={(e) => { e.stopPropagation(); handleExecute(); }}
+              className="px-2 py-1 text-xs bg-white hover:bg-gray-100 border border-gray-300 rounded shadow-sm transition-colors"
+              title="Run cell"
+            >
+              ▶
+            </button>
             {hasOutput && (
-              <button onClick={(e) => { e.stopPropagation(); onClearOutput(index); }} title="Clear output">🗙</button>
+              <button
+                onClick={(e) => { e.stopPropagation(); onClearOutput(index); }}
+                className="px-2 py-1 text-xs bg-white hover:bg-gray-100 border border-gray-300 rounded shadow-sm transition-colors"
+                title="Clear output"
+              >
+                🗙
+              </button>
             )}
-            <button onClick={(e) => { e.stopPropagation(); onMoveUp(index); }} title="Move up">↑</button>
-            <button onClick={(e) => { e.stopPropagation(); onMoveDown(index); }} title="Move down">↓</button>
-            <button onClick={(e) => { e.stopPropagation(); onDelete(index); }} title="Delete">🗑</button>
+            <button
+              onClick={(e) => { e.stopPropagation(); onMoveUp(index); }}
+              className="px-2 py-1 text-xs bg-white hover:bg-gray-100 border border-gray-300 rounded shadow-sm transition-colors"
+              title="Move up"
+            >
+              ↑
+            </button>
+            <button
+              onClick={(e) => { e.stopPropagation(); onMoveDown(index); }}
+              className="px-2 py-1 text-xs bg-white hover:bg-gray-100 border border-gray-300 rounded shadow-sm transition-colors"
+              title="Move down"
+            >
+              ↓
+            </button>
+            <button
+              onClick={(e) => { e.stopPropagation(); onDelete(index); }}
+              className="px-2 py-1 text-xs bg-white hover:bg-gray-100 border border-gray-300 rounded shadow-sm transition-colors"
+              title="Delete"
+            >
+              🗑
+            </button>
           </div>
         )}
-        <div className="cell-prompt">
-          [{cell.execution_count || " "}]
+        <div className={`font-mono text-xs text-gray-500 min-w-[60px] pt-2 pr-2 text-right flex-shrink-0 ${isRunning ? 'text-blue-600 font-semibold' : ''}`}>
+          <div>[{cell.execution_count || " "}]</div>
           {isRunning && executionElapsed > 0 && (
-            <div className="execution-timer" title="Execution time">
+            <div className="text-[10px] text-blue-600 font-medium mt-0.5" title="Execution time">
               {(executionElapsed / 1000).toFixed(1)}s
             </div>
           )}
         </div>
-        <div className="cell-container">
+        <div className={`flex-1 flex flex-col ${isSelected ? 'border-l-2 border-blue-500 pl-3' : 'border-l-2 border-transparent pl-3'} rounded transition-all`}>
           <div className="cell-input">
             <Editor
               height={`${Math.max(100, content.split("\n").length * 19)}px`}
               defaultLanguage="python"
               value={content}
               onChange={handleEditorChange}
-              onMount={(editor) => {
+              onMount={(editor, monaco) => {
                 editorRef.current = editor;
 
                 // Focus editor if cell is in edit mode when it mounts
@@ -179,6 +235,56 @@ function WorkbookCell({ cell, index, onUpdate, onDelete, onExecute, onMoveUp, on
                     editor.focus();
                   }, 50);
                 }
+
+                // Register completion provider for Python
+                const disposable = monaco.languages.registerCompletionItemProvider('python', {
+                  triggerCharacters: ['.', ' '],
+                  provideCompletionItems: async (model, position) => {
+                    try {
+                      const code = model.getValue();
+                      const offset = model.getOffsetAt(position);
+
+                      // Call the Tauri command to get completions
+                      const result = await invoke("complete_code", {
+                        workbookPath: workbookPath,
+                        code: code,
+                        cursorPos: offset,
+                      });
+
+                      if (!result || !result.matches || result.matches.length === 0) {
+                        return { suggestions: [] };
+                      }
+
+                      // Calculate the range based on cursor positions from kernel
+                      const startPos = model.getPositionAt(result.cursor_start);
+                      const endPos = model.getPositionAt(result.cursor_end);
+
+                      // Convert matches to Monaco completion items
+                      const suggestions = result.matches.map((match) => ({
+                        label: match.text,
+                        kind: monaco.languages.CompletionItemKind.Function,
+                        insertText: match.text,
+                        detail: 'Python',
+                        range: {
+                          startLineNumber: startPos.lineNumber,
+                          startColumn: startPos.column,
+                          endLineNumber: endPos.lineNumber,
+                          endColumn: endPos.column,
+                        },
+                      }));
+
+                      return { suggestions };
+                    } catch (error) {
+                      console.error("Failed to get completions:", error);
+                      return { suggestions: [] };
+                    }
+                  },
+                });
+
+                // Clean up provider on unmount
+                editor.onDidDispose(() => {
+                  disposable.dispose();
+                });
 
                 editor.onKeyDown((e) => {
                   if (e.shiftKey && e.keyCode === 3) {
@@ -211,11 +317,34 @@ function WorkbookCell({ cell, index, onUpdate, onDelete, onExecute, onMoveUp, on
                   vertical: "hidden",
                   horizontal: "hidden",
                 },
+                // Autocomplete settings
+                suggestOnTriggerCharacters: true,
+                quickSuggestions: {
+                  other: true,
+                  comments: false,
+                  strings: false,
+                },
+                acceptSuggestionOnEnter: "on",
+                tabCompletion: "on",
+                wordBasedSuggestions: false, // Disable word-based, use only our provider
+                suggest: {
+                  showMethods: true,
+                  showFunctions: true,
+                  showConstructors: true,
+                  showFields: true,
+                  showVariables: true,
+                  showClasses: true,
+                  showModules: true,
+                  showProperties: true,
+                  showKeywords: true,
+                  showSnippets: true,
+                  insertMode: 'replace',
+                },
               }}
             />
           </div>
           {hasOutput && (
-            <div className="cell-outputs">
+            <div className="mt-2 border-t border-gray-200 bg-gray-50 rounded-b">
               {outputs.map((output, idx) => (
                 <CellOutput key={idx} output={output} />
               ))}
@@ -265,18 +394,18 @@ function CellOutput({ output }) {
       : truncateText(cleanText, MAX_LINES);
 
     return (
-      <div className={`cell-output-wrapper ${className}`}>
-        <div className="cell-output-content">
+      <div className={className}>
+        <div className="cell-output-content p-3 max-h-[300px] overflow-auto">
           {isTruncatedByBackend && (
-            <div className="output-truncation-warning">
+            <div className="px-3 py-2 mb-2 bg-amber-50 border border-amber-200 rounded text-amber-800 text-xs font-medium">
               ⚠ Output was truncated to save memory (max 1000 lines or 100KB per cell)
             </div>
           )}
-          <pre>{displayText}</pre>
+          <pre className="m-0 whitespace-pre-wrap break-words">{displayText}</pre>
         </div>
         {truncated && (
           <button
-            className="output-expand-btn"
+            className="block mx-3 my-2 px-3 py-1 text-xs font-medium bg-white hover:bg-gray-50 border border-gray-300 rounded text-blue-600 transition-colors"
             onClick={() => setExpanded(!expanded)}
           >
             Show more ({totalLines - MAX_LINES} more lines)
@@ -284,7 +413,7 @@ function CellOutput({ output }) {
         )}
         {expanded && (
           <button
-            className="output-expand-btn"
+            className="block mx-3 my-2 px-3 py-1 text-xs font-medium bg-white hover:bg-gray-50 border border-gray-300 rounded text-blue-600 transition-colors"
             onClick={() => setExpanded(false)}
           >
             Show less
@@ -302,12 +431,12 @@ function CellOutput({ output }) {
     // Images (PNG)
     if (data["image/png"]) {
       return (
-        <div className="cell-output-wrapper output-result">
-          <div className="cell-output-content">
+        <div>
+          <div className="cell-output-content p-3">
             <img
               src={`data:image/png;base64,${data["image/png"]}`}
               alt="Output"
-              style={{ maxWidth: '100%', height: 'auto' }}
+              className="max-w-full h-auto mx-auto rounded"
             />
           </div>
         </div>
@@ -317,12 +446,12 @@ function CellOutput({ output }) {
     // Images (JPEG)
     if (data["image/jpeg"]) {
       return (
-        <div className="cell-output-wrapper output-result">
-          <div className="cell-output-content">
+        <div>
+          <div className="cell-output-content p-3">
             <img
               src={`data:image/jpeg;base64,${data["image/jpeg"]}`}
               alt="Output"
-              style={{ maxWidth: '100%', height: 'auto' }}
+              className="max-w-full h-auto mx-auto rounded"
             />
           </div>
         </div>
@@ -335,8 +464,8 @@ function CellOutput({ output }) {
         ? data["image/svg+xml"].join("")
         : data["image/svg+xml"];
       return (
-        <div className="cell-output-wrapper output-result">
-          <div className="cell-output-content">
+        <div>
+          <div className="cell-output-content p-3">
             {/* Note: SVG content is rendered directly. For untrusted notebooks, consider sandboxing. */}
             <div dangerouslySetInnerHTML={{ __html: svgContent }} />
           </div>
@@ -350,8 +479,8 @@ function CellOutput({ output }) {
         ? data["text/html"].join("")
         : data["text/html"];
       return (
-        <div className="cell-output-wrapper output-result">
-          <div className="cell-output-content">
+        <div>
+          <div className="cell-output-content p-3">
             {/* Note: HTML rendering uses dangerouslySetInnerHTML.
                 For untrusted notebooks, consider implementing a trust model or HTML sanitization. */}
             <div dangerouslySetInnerHTML={{ __html: htmlContent }} />
@@ -371,18 +500,18 @@ function CellOutput({ output }) {
         : truncateText(cleanText, MAX_LINES);
 
       return (
-        <div className="cell-output-wrapper output-result">
-          <div className="cell-output-content">
+        <div>
+          <div className="cell-output-content p-3 max-h-[300px] overflow-auto">
             {isTruncatedByBackend && (
-              <div className="output-truncation-warning">
+              <div className="px-3 py-2 mb-2 bg-amber-50 border border-amber-200 rounded text-amber-800 text-xs font-medium">
                 ⚠ Output was truncated to save memory (max 1000 lines or 100KB per cell)
               </div>
             )}
-            <pre>{displayText}</pre>
+            <pre className="m-0 whitespace-pre-wrap break-words">{displayText}</pre>
           </div>
           {truncated && (
             <button
-              className="output-expand-btn"
+              className="block mx-3 my-2 px-3 py-1 text-xs font-medium bg-white hover:bg-gray-50 border border-gray-300 rounded text-blue-600 transition-colors"
               onClick={() => setExpanded(!expanded)}
             >
               Show more ({totalLines - MAX_LINES} more lines)
@@ -390,7 +519,7 @@ function CellOutput({ output }) {
           )}
           {expanded && (
             <button
-              className="output-expand-btn"
+              className="block mx-3 my-2 px-3 py-1 text-xs font-medium bg-white hover:bg-gray-50 border border-gray-300 rounded text-blue-600 transition-colors"
               onClick={() => setExpanded(false)}
             >
               Show less
@@ -402,9 +531,9 @@ function CellOutput({ output }) {
 
     // If no recognized mime type, show raw data
     return (
-      <div className="cell-output-wrapper output-result">
-        <div className="cell-output-content">
-          <pre>{JSON.stringify(data, null, 2)}</pre>
+      <div>
+        <div className="cell-output-content p-3">
+          <pre className="m-0 whitespace-pre-wrap break-words">{JSON.stringify(data, null, 2)}</pre>
         </div>
       </div>
     );
@@ -418,18 +547,18 @@ function CellOutput({ output }) {
       : truncateText(cleanText, MAX_LINES);
 
     return (
-      <div className="cell-output-wrapper output-error">
-        <div className="cell-output-content">
+      <div className="bg-red-50">
+        <div className="cell-output-content p-3 max-h-[300px] overflow-auto text-red-700">
           {isTruncatedByBackend && (
-            <div className="output-truncation-warning">
+            <div className="px-3 py-2 mb-2 bg-amber-50 border border-amber-200 rounded text-amber-800 text-xs font-medium">
               ⚠ Output was truncated to save memory (max 1000 lines or 100KB per cell)
             </div>
           )}
-          <pre>{displayText}</pre>
+          <pre className="m-0 whitespace-pre-wrap break-words">{displayText}</pre>
         </div>
         {truncated && (
           <button
-            className="output-expand-btn"
+            className="block mx-3 my-2 px-3 py-1 text-xs font-medium bg-white hover:bg-gray-50 border border-gray-300 rounded text-blue-600 transition-colors"
             onClick={() => setExpanded(!expanded)}
           >
             Show more ({totalLines - MAX_LINES} more lines)
@@ -437,7 +566,7 @@ function CellOutput({ output }) {
         )}
         {expanded && (
           <button
-            className="output-expand-btn"
+            className="block mx-3 my-2 px-3 py-1 text-xs font-medium bg-white hover:bg-gray-50 border border-gray-300 rounded text-blue-600 transition-colors"
             onClick={() => setExpanded(false)}
           >
             Show less
@@ -450,7 +579,7 @@ function CellOutput({ output }) {
   return null;
 }
 
-export function WorkbookViewer({ workbookPath, projectRoot, autosaveEnabled = true, onClose }) {
+export function WorkbookViewer({ workbookPath, projectRoot, autosaveEnabled = true, onClose, onUnsavedChangesUpdate }) {
   const [notebook, setNotebook] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
@@ -485,6 +614,13 @@ export function WorkbookViewer({ workbookPath, projectRoot, autosaveEnabled = tr
       stopEngine();
     };
   }, [workbookPath]);
+
+  // Notify parent when unsaved changes state changes
+  useEffect(() => {
+    if (onUnsavedChangesUpdate) {
+      onUnsavedChangesUpdate(hasUnsavedChanges);
+    }
+  }, [hasUnsavedChanges, onUnsavedChangesUpdate]);
 
   // Autosave removed - user must explicitly save via Cmd+S or Save button
 
@@ -848,6 +984,48 @@ export function WorkbookViewer({ workbookPath, projectRoot, autosaveEnabled = tr
   const executeCell = async (index, code, mode = 'shift-enter') => {
     const cell = notebook.cells[index];
 
+    // Don't execute empty code cells
+    if (cell.cell_type === "code" && !code.trim()) {
+      // Just handle navigation for empty cells without executing
+      if (mode === 'ctrl-enter') {
+        // Ctrl+Enter: stay in current cell
+      } else if (mode === 'alt-enter') {
+        // Alt+Enter: insert new cell below and move to it
+        const newCell = {
+          cell_type: "code",
+          metadata: {},
+          source: [],
+          execution_count: null,
+          outputs: [],
+        };
+        const newCells = [...notebook.cells];
+        newCells.splice(index + 1, 0, newCell);
+        setNotebook({ ...notebook, cells: newCells });
+        setSelectedCell(index + 1);
+        setEditMode(true);
+      } else {
+        // Shift+Enter: move to next cell
+        if (index < notebook.cells.length - 1) {
+          setSelectedCell(index + 1);
+          setEditMode(true);
+        } else {
+          const newCell = {
+            cell_type: "code",
+            metadata: {},
+            source: [],
+            execution_count: null,
+            outputs: [],
+          };
+          const newCells = [...notebook.cells];
+          newCells.push(newCell);
+          setNotebook({ ...notebook, cells: newCells });
+          setSelectedCell(index + 1);
+          setEditMode(true);
+        }
+      }
+      return;
+    }
+
     // For markdown cells, just render (exit edit mode) and navigate
     if (cell.cell_type === "markdown") {
       setEditMode(false);
@@ -976,7 +1154,7 @@ export function WorkbookViewer({ workbookPath, projectRoot, autosaveEnabled = tr
       outputListenerRef.current = unlisten;
 
       // Start streaming execution
-      await invoke("execute_cell_stream", {
+      const result = await invoke("execute_cell_stream", {
         workbookPath: workbookPath,
         code: code,
       });
@@ -985,16 +1163,15 @@ export function WorkbookViewer({ workbookPath, projectRoot, autosaveEnabled = tr
       unlisten();
       outputListenerRef.current = null;
 
-      // Ensure execution count is set even if no execute_result
-      setNotebook(prevNotebook => {
-        const newCells = [...prevNotebook.cells];
-        const currentCell = newCells[index];
-        if (!currentCell.execution_count) {
-          currentCell.execution_count = (currentCell.execution_count || 0) + 1;
-        }
-        return { ...prevNotebook, cells: newCells };
-      });
-      setHasUnsavedChanges(true);
+      // Set execution count from the result
+      if (result && result.execution_count !== null && result.execution_count !== undefined) {
+        setNotebook(prevNotebook => {
+          const newCells = [...prevNotebook.cells];
+          newCells[index].execution_count = result.execution_count;
+          return { ...prevNotebook, cells: newCells };
+        });
+        setHasUnsavedChanges(true);
+      }
 
       // Clear any previous errors on successful execution
       setError(null);
@@ -1095,11 +1272,16 @@ export function WorkbookViewer({ workbookPath, projectRoot, autosaveEnabled = tr
       for (let i = 0; i < notebook.cells.length; i++) {
         const cell = notebook.cells[i];
         if (cell.cell_type === "code") {
-          setSelectedCell(i);
-          setRunningCellIndex(i);
-
           // Get the source code before clearing output
           const code = cell.source.join("");
+
+          // Skip empty cells
+          if (!code.trim()) {
+            continue;
+          }
+
+          setSelectedCell(i);
+          setRunningCellIndex(i);
 
           // Clear the output before running to show it's executing
           setNotebook(prevNotebook => {
@@ -1114,16 +1296,14 @@ export function WorkbookViewer({ workbookPath, projectRoot, autosaveEnabled = tr
             code: code,
           });
 
-          // Update the cell with outputs
+          // Update the cell with outputs and execution count
           setNotebook(prevNotebook => {
             const newCells = [...prevNotebook.cells];
             newCells[i].outputs = result.outputs || [];
 
-            const executionCount = result.outputs?.find(o => o.output_type === 'execute_result')?.execution_count;
-            if (executionCount) {
-              newCells[i].execution_count = executionCount;
-            } else {
-              newCells[i].execution_count = (newCells[i].execution_count || 0) + 1;
+            // Set execution_count from the result
+            if (result.execution_count !== null && result.execution_count !== undefined) {
+              newCells[i].execution_count = result.execution_count;
             }
 
             return { ...prevNotebook, cells: newCells };
@@ -1238,8 +1418,8 @@ export function WorkbookViewer({ workbookPath, projectRoot, autosaveEnabled = tr
 
   if (loading) {
     return (
-      <div className="notebook-viewer loading">
-        <p>Loading notebook...</p>
+      <div className="flex flex-col items-center justify-center h-full bg-white">
+        <p className="text-gray-500">Loading notebook...</p>
       </div>
     );
   }
@@ -1268,47 +1448,112 @@ export function WorkbookViewer({ workbookPath, projectRoot, autosaveEnabled = tr
   const isEngineReady = engineStatus === 'idle' || engineStatus === 'busy';
 
   return (
-    <div className="notebook-viewer">
-      <div className="notebook-header">
-        <h2>
-          {getWorkbookName()}
-          {hasUnsavedChanges && <span className="unsaved-indicator"> •</span>}
-        </h2>
-        <div className="notebook-actions">
-          <span className={`engine-status ${engineStatus}`} title={getEngineStatusText()}>
-            {getEngineStatusText()}
-          </span>
-          {engineStatus === 'error' && (
-            <button onClick={startEngine} title="Retry connecting to engine">
-              Reconnect Engine
+    <div className="flex flex-col h-full bg-white">
+      <div className="px-6 py-4 border-b border-gray-200 bg-white">
+        <div className="flex items-start justify-between gap-4 mb-3">
+          <h2 className="text-base font-semibold text-gray-900 flex items-center gap-2">
+            {getWorkbookName()}
+            {hasUnsavedChanges && <span className="text-amber-500 text-lg">•</span>}
+          </h2>
+          <div className="flex items-center gap-2">
+            <span className={`text-xs px-2 py-1 rounded-md font-medium ${
+              engineStatus === 'starting' ? 'bg-amber-50 text-amber-700' :
+              engineStatus === 'idle' ? 'bg-emerald-50 text-emerald-700' :
+              engineStatus === 'busy' ? 'bg-blue-50 text-blue-700 animate-pulse-subtle' :
+              engineStatus === 'restarting' ? 'bg-amber-50 text-amber-700' :
+              'bg-red-50 text-red-700'
+            }`} title={getEngineStatusText()}>
+              {getEngineStatusText()}
+            </span>
+            {hasUnsavedChanges && (
+              <button
+                onClick={saveWorkbook}
+                className="px-3 py-1.5 text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 rounded-md transition-colors shadow-sm"
+                title="Save notebook"
+              >
+                Save
+              </button>
+            )}
+          </div>
+        </div>
+        <div className="flex items-center gap-2 flex-wrap">
+          <span className="text-xs px-2 py-1 bg-gray-100 text-gray-600 rounded font-mono">Shift+Enter to run</span>
+          <div className="flex-1" />
+          <div className="flex items-center gap-1.5">
+            {engineStatus === 'error' && (
+              <button
+                onClick={startEngine}
+                className="px-2.5 py-1.5 text-xs font-medium text-gray-700 bg-white hover:bg-gray-50 border border-gray-300 rounded-md transition-all"
+                title="Retry connecting to engine"
+              >
+                Reconnect Engine
+              </button>
+            )}
+            <button
+              onClick={runAllCells}
+              disabled={isRunningAll || !isEngineReady}
+              className="px-2.5 py-1.5 text-xs font-medium text-gray-700 bg-white hover:bg-gray-50 border border-gray-300 rounded-md transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+              title="Run all cells"
+            >
+              {isRunningAll ? "Running..." : "Run All"}
             </button>
-          )}
-          <span className="keyboard-hint">Shift+Enter to run</span>
-          <button onClick={runAllCells} disabled={isRunningAll || !engineReady} title="Run all cells">
-            {isRunningAll ? "Running..." : "Run All"}
-          </button>
-          <button onClick={interruptExecution} disabled={engineStatus !== 'busy'} title="Interrupt execution (stop running cell)">
-            ⬛ Interrupt
-          </button>
-          <button onClick={clearAllOutputs} title="Clear all outputs">Clear All Outputs</button>
-          <button onClick={restartEngine} disabled={!engineReady} title="Restart kernel">Restart Engine</button>
-          <button onClick={() => addCell("markdown")} title="Add markdown cell">+ Markdown</button>
-          <button onClick={() => addCell("code")} title="Add code cell">+ Code</button>
-          <button onClick={saveWorkbook} className={hasUnsavedChanges ? "primary" : ""} title="Save notebook">
-            Save {hasUnsavedChanges && "*"}
-          </button>
+            <button
+              onClick={interruptExecution}
+              disabled={engineStatus !== 'busy'}
+              className="px-2.5 py-1.5 text-xs font-medium text-gray-700 bg-white hover:bg-gray-50 border border-gray-300 rounded-md transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+              title="Interrupt execution"
+            >
+              ⬛ Interrupt
+            </button>
+            <button
+              onClick={clearAllOutputs}
+              className="px-2.5 py-1.5 text-xs font-medium text-gray-700 bg-white hover:bg-gray-50 border border-gray-300 rounded-md transition-all"
+              title="Clear all outputs"
+            >
+              Clear All
+            </button>
+            <button
+              onClick={restartEngine}
+              disabled={!isEngineReady}
+              className="px-2.5 py-1.5 text-xs font-medium text-gray-700 bg-white hover:bg-gray-50 border border-gray-300 rounded-md transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+              title="Restart kernel"
+            >
+              Restart
+            </button>
+            <div className="w-px h-4 bg-gray-300"></div>
+            <button
+              onClick={() => addCell("markdown")}
+              className="px-2.5 py-1.5 text-xs font-medium text-gray-700 bg-white hover:bg-gray-50 border border-gray-300 rounded-md transition-all"
+              title="Add markdown cell"
+            >
+              + Markdown
+            </button>
+            <button
+              onClick={() => addCell("code")}
+              className="px-2.5 py-1.5 text-xs font-medium text-gray-700 bg-white hover:bg-gray-50 border border-gray-300 rounded-md transition-all"
+              title="Add code cell"
+            >
+              + Code
+            </button>
+          </div>
         </div>
       </div>
 
-      <div className="notebook-cells">
+      <div className="flex-1 overflow-y-auto px-6 py-6 custom-scrollbar">
         {error && (
-          <div className="notebook-error-banner">
+          <div className="bg-red-50 border border-red-200 rounded-lg px-4 py-3 mb-4 flex items-center justify-between text-red-800 text-sm">
             <span>{error}</span>
-            <button onClick={() => setError(null)} title="Dismiss error">×</button>
+            <button
+              onClick={() => setError(null)}
+              className="text-red-600 hover:bg-red-100 rounded px-2 py-1 transition-colors text-lg font-bold"
+              title="Dismiss error"
+            >
+              ×
+            </button>
           </div>
         )}
         {notebook.cells.length === 0 && (
-          <div className="empty-notebook">
+          <div className="text-center py-16 text-gray-400">
             <p>Empty notebook. Add a cell to get started.</p>
           </div>
         )}
@@ -1317,6 +1562,7 @@ export function WorkbookViewer({ workbookPath, projectRoot, autosaveEnabled = tr
             key={index}
             cell={cell}
             index={index}
+            workbookPath={workbookPath}
             onUpdate={updateCell}
             onDelete={deleteCell}
             onExecute={executeCell}

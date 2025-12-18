@@ -1,8 +1,20 @@
 ## Jupyter Notebook Feature Checklist
 
-**Current Status: 70% MVP Complete** (Last updated: 2025-12-17)
+**Current Status: 85% MVP Complete** (Last updated: 2025-12-18)
 
-The notebook viewer has solid core functionality - editing, execution, keyboard shortcuts, and file management work well. The main gaps are rich output rendering (images/plots/HTML), streaming output, and some UX polish.
+The notebook viewer has excellent core functionality - editing, execution, keyboard shortcuts, rich output rendering, streaming output, interrupt, kernel status, and file management all work well. The main gaps are drag & drop cell reordering, hover-between-cells insert UI, and undo/redo for structural changes.
+
+### Recent Updates (2025-12-18)
+
+Upon review of the actual implementation, discovered that several features previously marked as missing are actually **fully implemented**:
+
+- ✅ **Rich Output Rendering** - PNG, JPEG, SVG, HTML all working (WorkbookViewer.jsx:301-411)
+- ✅ **Interrupt Execution** - Full backend + frontend implementation with toolbar button
+- ✅ **Kernel Status Indicator** - Real-time status display (starting/idle/busy/error/restarting)
+- ✅ **DD Double-Tap Delete** - Proper Jupyter-style deletion with 500ms window
+- ✅ **File Operations** - Rename, delete, duplicate all working with context menu
+
+These improvements raise the completion from 70% → **85% MVP Complete**.
 
 ---
 
@@ -11,27 +23,30 @@ The notebook viewer has solid core functionality - editing, execution, keyboard 
 To reach full MVP parity with Jupyter, implement these in order:
 
 ### P0 - Critical for Basic Usability
-1. **Rich output rendering** - Images, HTML, tables, plots
-   - Extend `CellOutput` component to handle mime types beyond text/plain
-   - Add support for: image/png, image/jpeg, text/html, image/svg+xml
-   - DataFrames and matplotlib plots are essential for data science workflows
+1. ~~**Rich output rendering** - Images, HTML, tables, plots~~ ✅ **COMPLETED**
+   - ✅ Implemented in CellOutput component (WorkbookViewer.jsx:301-411)
+   - ✅ Supports: image/png, image/jpeg, image/svg+xml, text/html
+   - ✅ DataFrames and matplotlib plots render correctly
 
-2. **Kernel status indicator** - Show idle/busy/dead state
-   - Add visual indicator in toolbar or per-cell
-   - Helps users understand when execution is in progress
+2. ~~**Kernel status indicator** - Show idle/busy/dead state~~ ✅ **COMPLETED**
+   - ✅ Visual indicator in toolbar (WorkbookViewer.jsx:1278-1280)
+   - ✅ Shows: starting, idle, busy, error, restarting states
+   - ✅ Updates in real-time during execution
 
 ### P1 - Important for Feature Parity
 3. ~~**Streaming stdout/stderr** - Real-time output during execution~~ ✅ **COMPLETED**
-   - ✅ Backend uses Server-Sent Events (kernel_server.py:327-446)
-   - ✅ Frontend appends outputs as they arrive (NotebookViewer.jsx:710-755)
+   - ✅ Backend uses Server-Sent Events (engine_server.py)
+   - ✅ Frontend appends outputs as they arrive (WorkbookViewer.jsx)
    - Perfect for long-running cells with progress indicators
 
-4. **Interrupt execution** - Stop running cell
-   - Backend support in kernel_server.py (kernel.interrupt_kernel())
-   - UI: Stop button in toolbar + keyboard shortcut
+4. ~~**Interrupt execution** - Stop running cell~~ ✅ **COMPLETED**
+   - ✅ Backend support (engine_http.rs:329-346)
+   - ✅ UI: Interrupt button in toolbar (WorkbookViewer.jsx:1290-1291)
+   - ✅ Disables when not busy
 
-5. **DD (double-tap) delete** - Match Jupyter's cell deletion pattern
-   - Replace Shift+D with proper DD double-tap detection
+5. ~~**DD (double-tap) delete** - Match Jupyter's cell deletion pattern~~ ✅ **COMPLETED**
+   - ✅ Proper DD double-tap detection (WorkbookViewer.jsx:526-540)
+   - ✅ 500ms window for double-tap
 
 ### P2 - Nice to Have
 6. **Drag & drop cell reordering** - Visual reordering
@@ -75,15 +90,14 @@ To reach full MVP parity with Jupyter, implement these in order:
 - [x] All shortcuts work consistently for both code and markdown cells
 
 #### Cell Management
-- [x] `A` - Add cell above (command mode) (NotebookViewer.jsx:332)
-- [x] `B` - Add cell below (command mode) (NotebookViewer.jsx:337)
-- [x] `Shift+D` - Delete cell (NotebookViewer.jsx:342) - **NOTE: Not DD double-tap like Jupyter**
-- [ ] `DD` - Delete cell with double-tap (standard Jupyter behavior)
+- [x] `A` - Add cell above (command mode) (NotebookViewer.jsx:517-520)
+- [x] `B` - Add cell below (command mode) (NotebookViewer.jsx:521-524)
+- [x] `DD` - Delete cell with double-tap (standard Jupyter behavior) (NotebookViewer.jsx:526-540)
 - [ ] `X` - Cut cell
 - [ ] `C` - Copy cell
 - [ ] `V` - Paste cell below
-- [x] `M` - Convert cell to markdown (NotebookViewer.jsx:347)
-- [x] `Y` - Convert cell to code (NotebookViewer.jsx:352)
+- [x] `M` - Convert cell to markdown (NotebookViewer.jsx:541-544)
+- [x] `Y` - Convert cell to code (NotebookViewer.jsx:545-550)
 
 #### Modes
 - [x] Command mode vs Edit mode (or equivalent)
@@ -140,13 +154,13 @@ To reach full MVP parity with Jupyter, implement these in order:
 
 ### Kernel Lifecycle & State
 
-- [x] Kernel start on notebook open (NotebookViewer.jsx:368-388, auto-starts via useEffect)
-- [x] Kernel stop/shutdown (per notebook) (NotebookViewer.jsx:390-401, cleanup on unmount)
-- [x] Restart kernel (NotebookViewer.jsx:403-421, clears all outputs after restart)
-- [ ] Restart kernel & run all (could combine `restartKernel` + `runAllCells`)
-- [ ] Interrupt execution (stop running cell) - no backend support yet
-- [ ] Kernel status indicator (idle / busy / dead / disconnected) - only tracks `kernelStartedRef`
-- [x] Per-notebook kernel association (or kernel picker if supporting multiple) (kernel_server.py manages per-notebook kernels)
+- [x] Kernel start on notebook open (NotebookViewer.jsx:563-588, auto-starts via useEffect)
+- [x] Kernel stop/shutdown (per notebook) (NotebookViewer.jsx:590-600, cleanup on unmount)
+- [x] Restart kernel (NotebookViewer.jsx:602-641, clears all outputs after restart)
+- [ ] Restart kernel & run all (could combine `restartEngine` + `runAllCells`)
+- [x] Interrupt execution (stop running cell) (WorkbookViewer.jsx:643-653, engine_http.rs:329-346)
+- [x] Kernel status indicator (idle / busy / dead / disconnected) (WorkbookViewer.jsx:1278-1280, 464)
+- [x] Per-notebook engine association (or kernel picker if supporting multiple) (engine_server.py manages per-notebook engines)
 
 ---
 
@@ -184,13 +198,13 @@ To reach full MVP parity with Jupyter, implement these in order:
 - [x] "Clear output" button per cell (NotebookViewer.jsx:161-163, toolbar button when output exists)
 
 #### Rich Outputs
-- [ ] Images (PNG, JPEG, etc.) - only handles text/plain currently
-- [ ] HTML rendering (text/html mime type)
-- [ ] SVG rendering (image/svg+xml mime type)
-- [ ] Tables (DataFrame display - text/html mime type)
-- [ ] Plots (matplotlib, plotly, etc. - image/png, application/json mime types)
-- [x] Multiple outputs per cell supported (NotebookViewer.jsx:215-221)
-- **NOTE: CellOutput component only handles text/plain, needs mime type routing**
+- [x] Images (PNG, JPEG, etc.) (WorkbookViewer.jsx:302-330)
+- [x] HTML rendering (text/html mime type) (WorkbookViewer.jsx:347-361)
+- [x] SVG rendering (image/svg+xml mime type) (WorkbookViewer.jsx:332-345)
+- [x] Tables (DataFrame display - text/html mime type) (same as HTML rendering)
+- [x] Plots (matplotlib, plotly, etc. - image/png, application/json mime types)
+- [x] Multiple outputs per cell supported (WorkbookViewer.jsx)
+- **NOTE: CellOutput component handles all major mime types with priority fallback**
 
 #### Error Handling
 - [x] Formatted tracebacks (NotebookViewer.jsx:257-263)
@@ -286,37 +300,38 @@ To reach full MVP parity with Jupyter, implement these in order:
 
 ## MVP Parity Bar (Minimum for "works like Jupyter")
 
-**Summary: 70% Complete** - Core editing and execution work well. Missing: rich output rendering, streaming, kernel status UI, drag reordering, and undo/redo.
+**Summary: 85% Complete** - Core editing, execution, rich outputs, streaming, interrupt, and kernel status all work excellently. Missing only: drag reordering, hover-between-cells insert UI, and undo/redo for structural changes.
 
-- [x] **Kernel start/restart/stop** - WORKS (interrupt ✗, status UI ✗)
+- [x] **Kernel start/restart/stop/interrupt** - WORKS FULLY ✅
   - Start on open ✓, Stop ✓, Restart ✓ + auto-clears outputs
-  - Missing: interrupt execution, visible status indicator (idle/busy/dead)
+  - Interrupt execution ✓ (button + backend support)
+  - Visible status indicator ✓ (starting/idle/busy/error/restarting)
 
-- [x] **Code + Markdown cells with keyboard shortcuts** - WORKS
+- [x] **Code + Markdown cells with keyboard shortcuts** - WORKS FULLY ✅
   - All execution shortcuts work (`Shift+Enter`, `Ctrl/Cmd+Enter`, `Alt+Enter`)
   - Command mode (A/B/M/Y/arrows/Escape/Enter) ✓
-  - Delete is Shift+D (not DD like Jupyter)
+  - DD double-tap delete ✓ (like Jupyter)
 
-- [x] **`.ipynb` read/write with metadata preservation** - WORKS
+- [x] **`.ipynb` read/write with metadata preservation** - WORKS FULLY ✅
   - Faithful round-trip, preserves cell metadata, notebook metadata, outputs
 
-- [ ] **Rich outputs + formatted tracebacks** - PARTIAL (70%)
+- [x] **Rich outputs + formatted tracebacks** - WORKS FULLY ✅
   - Formatted tracebacks ✓, ANSI stripping ✓
-  - Streaming output ✅ **NOW WORKS** (real-time via Server-Sent Events)
-  - **MISSING**: Images, HTML, SVG, tables, plots (only text/plain works)
+  - Streaming output ✓ (real-time via Server-Sent Events)
+  - Images (PNG, JPEG) ✓, SVG ✓, HTML ✓, tables ✓, plots ✓
 
-- [ ] **Cell insert UI + drag reorder** - PARTIAL (50%)
+- [ ] **Cell insert UI + drag reorder** - PARTIAL (60%)
   - Keyboard insert (A/B) ✓, toolbar buttons ✓
-  - **MISSING**: Hover-between-cells UI
+  - **MISSING**: Hover-between-cells insert UI
   - **MISSING**: Drag & drop reordering (has move up/down buttons)
 
 - [ ] **Undo/redo for structural changes** - NOT IMPLEMENTED
   - Monaco has text-level undo, but no structural undo
 
-- [x] **Dirty detection + save/close prompt + autosave** - WORKS (crash recovery ✗)
+- [x] **Dirty detection + save/close prompt + autosave** - WORKS FULLY ✅
   - Dirty detection ✓, visual indicator ✓, save prompt ✓
   - Autosave: interval (3s) + on-blur + on-run ✓
-  - **MISSING**: Crash recovery
+  - **MISSING**: Crash recovery (nice-to-have)
 
 
 ## Additional Items to Consider
@@ -443,371 +458,110 @@ To reach full MVP parity with Jupyter, implement these in order:
 
 ---
 
-## Implementation Notes for Priority Items
+## Implementation Notes for Remaining Priority Items
 
-### Rich Output Rendering (P0)
+### Drag & Drop Cell Reordering (P2)
 
-The current `CellOutput` component (NotebookViewer.jsx:230-267) only handles:
-- `text/plain` - rendered as `<pre>`
-- Basic error formatting with ANSI stripping
+**Approach**: Add drag handles to cells and use HTML5 drag and drop API or a library like react-beautiful-dnd.
 
-To add rich outputs, extend the component to check `output.data` mime types:
-
+**Implementation**:
 ```jsx
-function CellOutput({ output }) {
-  if (output.output_type === "execute_result" || output.output_type === "display_data") {
-    const data = output.data;
-
-    // Priority order: richest format first
-    if (data["image/png"]) {
-      return <img src={`data:image/png;base64,${data["image/png"]}`} />;
-    }
-    if (data["image/jpeg"]) {
-      return <img src={`data:image/jpeg;base64,${data["image/jpeg"]}`} />;
-    }
-    if (data["image/svg+xml"]) {
-      return <div dangerouslySetInnerHTML={{ __html: data["image/svg+xml"] }} />;
-    }
-    if (data["text/html"]) {
-      // For DataFrames, matplotlib HTML output, etc.
-      return <div dangerouslySetInnerHTML={{ __html: data["text/html"] }} />;
-    }
-    if (data["text/plain"]) {
-      return <pre>{data["text/plain"]}</pre>;
-    }
-  }
-  // ... existing stream/error handling
-}
-```
-
-**Security note**: Using `dangerouslySetInnerHTML` requires careful consideration. May want to:
-- Add a trust model (like Jupyter's trusted notebooks)
-- Sanitize HTML with a library like DOMPurify
-- Or render in a sandboxed iframe
-
-### Streaming Output (P1)
-
-Current implementation: `execute_cell` waits for completion, then returns all outputs at once.
-
-**Backend changes needed** (kernel_server.py):
-1. Change execute endpoint to return immediately with a task ID
-2. Add WebSocket endpoint for streaming IOPub messages
-3. Client connects to WS and receives messages in real-time
-
-**Frontend changes** (NotebookViewer.jsx):
-1. Open WebSocket when executing cell
-2. Append to `cell.outputs` as messages arrive
-3. Update UI incrementally (React state updates)
-4. Handle completion/error messages to close stream
-
-**Alternative**: Server-Sent Events (SSE) if one-way streaming is sufficient.
-
-### Kernel Status Indicator (P0)
-
-Track kernel state in NotebookViewer component:
-
-```jsx
-const [kernelStatus, setKernelStatus] = useState('idle'); // idle, busy, dead, starting
-
-// Update status based on:
-// - Starting: when startKernel() is called
-// - Busy: when executing cell
-// - Idle: when execution completes
-// - Dead: when kernel crashes or stops
-
-// Add to toolbar:
-<div className={`kernel-status ${kernelStatus}`}>
-  <span className="status-dot"></span>
-  {kernelStatus}
+// Add drag handle to cell toolbar
+<div className="cell-toolbar">
+  <div className="drag-handle" draggable onDragStart={(e) => handleDragStart(e, index)}>
+    ⋮⋮
+  </div>
+  {/* ... other toolbar buttons */}
 </div>
+
+// Handle drag events
+const handleDragStart = (e, index) => {
+  e.dataTransfer.effectAllowed = 'move';
+  e.dataTransfer.setData('text/plain', index);
+  setDraggingIndex(index);
+};
+
+const handleDrop = (e, targetIndex) => {
+  e.preventDefault();
+  const sourceIndex = parseInt(e.dataTransfer.getData('text/plain'));
+  if (sourceIndex !== targetIndex) {
+    moveCell(sourceIndex, targetIndex);
+  }
+  setDraggingIndex(null);
+};
 ```
 
-For proper status tracking, kernel_server.py should expose a `/status` endpoint or include status in execution responses.
+### Hover-Between-Cells Insert UI (P2)
 
-### Interrupt Execution (P1)
+**Approach**: Add invisible hover zones between cells that show an "Add Cell" button.
 
-**Backend** (kernel_server.py):
-```python
-@app.post("/interrupt/{notebook_path}")
-async def interrupt_kernel(notebook_path: str):
-    kernel_manager = get_kernel_manager(notebook_path)
-    if kernel_manager:
-        kernel_manager.interrupt_kernel()
-        return {"status": "interrupted"}
-```
-
-**Frontend** (NotebookViewer.jsx):
+**Implementation**:
 ```jsx
-const interruptExecution = async () => {
-  try {
-    await invoke("interrupt_kernel", { notebookPath });
-    setKernelStatus('idle');
-  } catch (err) {
-    console.error("Failed to interrupt:", err);
+// Add between each cell
+{cells.map((cell, index) => (
+  <>
+    <div
+      className="cell-divider"
+      onMouseEnter={() => setHoveredDivider(index)}
+      onMouseLeave={() => setHoveredDivider(null)}
+    >
+      {hoveredDivider === index && (
+        <div className="insert-cell-menu">
+          <button onClick={() => addCellAt(index, 'code')}>+ Code</button>
+          <button onClick={() => addCellAt(index, 'markdown')}>+ Markdown</button>
+        </div>
+      )}
+    </div>
+    <Cell key={cell.id} {...cell} />
+  </>
+))}
+```
+
+### Undo/Redo for Structural Changes (P2)
+
+**Approach**: Implement a command pattern with history stack for structural operations.
+
+**Implementation**:
+```jsx
+const [history, setHistory] = useState([]);
+const [historyIndex, setHistoryIndex] = useState(-1);
+
+const executeCommand = (command) => {
+  command.execute();
+  const newHistory = history.slice(0, historyIndex + 1);
+  newHistory.push(command);
+  setHistory(newHistory);
+  setHistoryIndex(newHistory.length - 1);
+};
+
+const undo = () => {
+  if (historyIndex >= 0) {
+    history[historyIndex].undo();
+    setHistoryIndex(historyIndex - 1);
   }
 };
 
-// Add to toolbar:
-<button onClick={interruptExecution} disabled={kernelStatus !== 'busy'}>
-  ⬛ Interrupt
-</button>
+const redo = () => {
+  if (historyIndex < history.length - 1) {
+    history[historyIndex + 1].execute();
+    setHistoryIndex(historyIndex + 1);
+  }
+};
 ```
-
-**Rust** (kernel_http.rs):
-Add `interrupt_kernel` command that POSTs to kernel_server.
 
 ---
 
-## Notebook Management Implementation Guide
+## Notebook Management Implementation Status
 
-### Context Menu for Files
+All notebook management features are fully implemented ✅
 
-To implement rename/delete/duplicate, add a context menu to file tree items:
+### Summary
 
-**FileExplorer.jsx** - Add right-click handler:
-```jsx
-function FileTreeItem({ file, level, onFileClick, onFileAction }) {
-  const [showContextMenu, setShowContextMenu] = useState(false);
-  const [contextMenuPos, setContextMenuPos] = useState({ x: 0, y: 0 });
-
-  const handleContextMenu = (e) => {
-    e.preventDefault();
-    setContextMenuPos({ x: e.clientX, y: e.clientY });
-    setShowContextMenu(true);
-  };
-
-  return (
-    <>
-      <div
-        className="tree-item"
-        onClick={handleToggle}
-        onContextMenu={handleContextMenu}
-      >
-        {/* ... existing content ... */}
-      </div>
-
-      {showContextMenu && (
-        <ContextMenu
-          x={contextMenuPos.x}
-          y={contextMenuPos.y}
-          onClose={() => setShowContextMenu(false)}
-          items={[
-            { label: "Rename", action: () => onFileAction('rename', file) },
-            { label: "Duplicate", action: () => onFileAction('duplicate', file) },
-            { label: "Delete", action: () => onFileAction('delete', file) },
-          ]}
-        />
-      )}
-    </>
-  );
-}
-```
-
-### Rename Notebook
-
-**Backend** (fs.rs):
-```rust
-/// Rename a file or notebook
-pub fn rename_file(old_path: &Path, new_name: &str) -> Result<String> {
-    let parent = old_path.parent()
-        .context("Failed to get parent directory")?;
-
-    let new_path = parent.join(new_name);
-
-    if new_path.exists() {
-        anyhow::bail!("A file with that name already exists");
-    }
-
-    fs::rename(old_path, &new_path)
-        .context("Failed to rename file")?;
-
-    Ok(new_path.to_string_lossy().to_string())
-}
-```
-
-**Frontend** (FileExplorer.jsx):
-```jsx
-const handleRename = async (file) => {
-  const newName = await showRenameDialog(file.name);
-  if (!newName) return;
-
-  try {
-    const newPath = await invoke("rename_file", {
-      oldPath: file.path,
-      newName: newName,
-    });
-
-    // If this notebook is open in a tab, update the tab path
-    updateTabPath(file.path, newPath);
-
-    // Refresh file list
-    await loadRootFiles();
-  } catch (err) {
-    console.error("Failed to rename:", err);
-    showError(err.toString());
-  }
-};
-```
-
-**Important**: When renaming an open notebook, update the corresponding tab's path in App.jsx state, or close the tab and prompt to reopen.
-
-### Delete Notebook
-
-**Backend** (fs.rs):
-```rust
-/// Delete a file or notebook
-pub fn delete_file(file_path: &Path) -> Result<()> {
-    if !file_path.exists() {
-        anyhow::bail!("File does not exist");
-    }
-
-    if file_path.is_dir() {
-        fs::remove_dir_all(file_path)
-            .context("Failed to delete directory")?;
-    } else {
-        fs::remove_file(file_path)
-            .context("Failed to delete file")?;
-    }
-
-    Ok(())
-}
-```
-
-**Frontend** (FileExplorer.jsx):
-```jsx
-const handleDelete = async (file) => {
-  const confirmed = await ask(
-    `Are you sure you want to delete "${file.name}"? This cannot be undone.`,
-    {
-      title: "Delete File",
-      kind: "warning",
-      okLabel: "Delete",
-      cancelLabel: "Cancel",
-    }
-  );
-
-  if (!confirmed) return;
-
-  try {
-    await invoke("delete_file", { filePath: file.path });
-
-    // If this notebook is open in a tab, close the tab
-    closeTabByPath(file.path);
-
-    // Refresh file list
-    await loadRootFiles();
-  } catch (err) {
-    console.error("Failed to delete:", err);
-    showError(err.toString());
-  }
-};
-```
-
-**Important**: If the notebook has a running kernel, stop it before deletion. Check if file is open in tabs and close those tabs.
-
-### Duplicate Notebook
-
-**Backend** (fs.rs):
-```rust
-/// Duplicate a notebook with a new name
-pub fn duplicate_notebook(source_path: &Path, new_name: &str) -> Result<String> {
-    let parent = source_path.parent()
-        .context("Failed to get parent directory")?;
-
-    // Ensure new name has .ipynb extension
-    let new_name = if new_name.ends_with(".ipynb") {
-        new_name.to_string()
-    } else {
-        format!("{}.ipynb", new_name)
-    };
-
-    let target_path = parent.join(&new_name);
-
-    if target_path.exists() {
-        anyhow::bail!("A notebook with that name already exists");
-    }
-
-    // Read source notebook
-    let content = fs::read_to_string(source_path)
-        .context("Failed to read source notebook")?;
-
-    // Parse and clear outputs (optional - makes duplicates cleaner)
-    let mut notebook: serde_json::Value = serde_json::from_str(&content)
-        .context("Invalid notebook JSON")?;
-
-    if let Some(cells) = notebook["cells"].as_array_mut() {
-        for cell in cells {
-            if cell["cell_type"] == "code" {
-                cell["outputs"] = serde_json::json!([]);
-                cell["execution_count"] = serde_json::json!(null);
-            }
-        }
-    }
-
-    // Write to new file
-    let content = serde_json::to_string_pretty(&notebook)
-        .context("Failed to serialize notebook")?;
-
-    fs::write(&target_path, content)
-        .context("Failed to write duplicate notebook")?;
-
-    Ok(target_path.to_string_lossy().to_string())
-}
-```
-
-**Frontend** (FileExplorer.jsx):
-```jsx
-const handleDuplicate = async (file) => {
-  // Suggest a name like "notebook copy.ipynb" or "notebook (2).ipynb"
-  const baseName = file.name.replace('.ipynb', '');
-  const suggestedName = `${baseName} copy`;
-
-  const newName = await showRenameDialog(suggestedName);
-  if (!newName) return;
-
-  try {
-    const newPath = await invoke("duplicate_notebook", {
-      sourcePath: file.path,
-      newName: newName,
-    });
-
-    console.log("Duplicated to:", newPath);
-
-    // Refresh file list
-    await loadRootFiles();
-
-    // Optionally, open the new notebook
-    onOpenNotebook(newPath, "notebook");
-  } catch (err) {
-    console.error("Failed to duplicate:", err);
-    showError(err.toString());
-  }
-};
-```
-
-### Tab Management Considerations
-
-When implementing file operations that affect open notebooks:
-
-1. **Rename**: Update tab path, or close and prompt to reopen
-2. **Delete**: Force-close the tab (with unsaved changes prompt if dirty)
-3. **Move** (if implemented): Update tab path
-
-Add helper functions in App.jsx:
-```jsx
-function updateTabPath(oldPath, newPath) {
-  setTabs(tabs.map(tab =>
-    tab.path === oldPath ? { ...tab, path: newPath } : tab
-  ));
-}
-
-function closeTabByPath(filePath) {
-  const tab = tabs.find(t => t.path === filePath);
-  if (tab) {
-    handleTabClose(tab.id);
-  }
-}
-```
+- **Context Menu**: Right-click on any file/workbook in FileExplorer shows rename/delete/duplicate options
+- **Rename**: Backend (fs.rs:273-288), Frontend (FileExplorer.jsx with InputDialog)
+- **Delete**: Backend (fs.rs:290-305), Frontend (FileExplorer.jsx with confirmation dialog)
+- **Duplicate**: Backend (fs.rs:307-350), Frontend (FileExplorer.jsx with name prompt)
+- **Tab Management**: Properly handles renaming/deleting open files by updating or closing tabs
 
 ---
 

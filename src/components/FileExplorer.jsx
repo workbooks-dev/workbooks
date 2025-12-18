@@ -4,7 +4,7 @@ import { ask } from "@tauri-apps/plugin-dialog";
 import { ContextMenu } from "./ContextMenu";
 import { InputDialog } from "./InputDialog";
 
-function FileTreeItem({ file, level = 0, onFileClick, onFileAction }) {
+function FileTreeItem({ file, level = 0, onFileClick, onFileAction, activeFilePath }) {
   const [isExpanded, setIsExpanded] = useState(false);
   const [children, setChildren] = useState([]);
   const [loading, setLoading] = useState(false);
@@ -77,17 +77,23 @@ function FileTreeItem({ file, level = 0, onFileClick, onFileAction }) {
     return items;
   };
 
+  const isActive = activeFilePath === file.path;
+
   return (
     <>
       <div
-        className={`tree-item ${file.is_dir ? 'directory' : 'file'}`}
-        style={{ paddingLeft: `${level * 12 + 8}px` }}
+        className={`flex items-center gap-2 px-3 py-1.5 cursor-pointer text-sm rounded mx-2 my-0.5 transition-all ${
+          isActive
+            ? 'bg-blue-50 text-blue-900 font-medium shadow-soft border-l-2 border-blue-500'
+            : 'text-gray-900 hover:bg-white hover:shadow-soft'
+        }`}
+        style={{ paddingLeft: `${level * 12 + 12}px` }}
         onClick={handleToggle}
         onContextMenu={handleContextMenu}
       >
-        <span className="tree-icon">{getFileIcon()}</span>
-        <span className="tree-name">{file.name}</span>
-        {loading && <span className="tree-loading">...</span>}
+        <span className="text-xs opacity-60 w-4 text-center flex-shrink-0">{getFileIcon()}</span>
+        <span className="flex-1 overflow-hidden text-ellipsis whitespace-nowrap">{file.name}</span>
+        {loading && <span className="text-xs text-gray-400">...</span>}
       </div>
       {showContextMenu && (
         <ContextMenu
@@ -106,6 +112,7 @@ function FileTreeItem({ file, level = 0, onFileClick, onFileAction }) {
               level={level + 1}
               onFileClick={onFileClick}
               onFileAction={onFileAction}
+              activeFilePath={activeFilePath}
             />
           ))}
         </div>
@@ -114,7 +121,7 @@ function FileTreeItem({ file, level = 0, onFileClick, onFileAction }) {
   );
 }
 
-export function FileExplorer({ projectRoot, projectName, onOpenWorkbook, onFileDeleted }) {
+export function FileExplorer({ projectRoot, projectName, onOpenWorkbook, onFileDeleted, activeFilePath }) {
   const [files, setFiles] = useState([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
@@ -177,6 +184,9 @@ export function FileExplorer({ projectRoot, projectName, onOpenWorkbook, onFileD
 
       // Refresh the file list
       await loadRootFiles();
+
+      // Automatically open the newly created workbook
+      onOpenWorkbook?.(workbookPath, "workbook");
     } catch (err) {
       console.error("Failed to create workbook:", err);
       setError(err.toString());
@@ -273,11 +283,11 @@ export function FileExplorer({ projectRoot, projectName, onOpenWorkbook, onFileD
   };
 
   return (
-    <div className="file-explorer">
-      <div className="file-explorer-header">
-        <h3>{projectName}</h3>
+    <div className="flex flex-col h-full select-none">
+      <div className="px-4 py-4 border-b border-gray-200 flex items-center justify-between">
+        <h3 className="text-xs font-semibold uppercase tracking-wider text-gray-500">{projectName}</h3>
         <button
-          className="new-workbook-btn"
+          className="w-6 h-6 p-0 text-lg leading-none rounded bg-blue-600 text-white hover:bg-blue-700 transition-colors flex items-center justify-center shadow-sm"
           onClick={handleNewWorkbook}
           title="Create new workbook"
         >
@@ -286,33 +296,45 @@ export function FileExplorer({ projectRoot, projectName, onOpenWorkbook, onFileD
       </div>
 
       {creatingWorkbook && (
-        <div className="create-workbook-form">
-          <form onSubmit={handleCreateWorkbook}>
+        <div className="px-4 py-3 border-b border-gray-200 bg-gray-50">
+          <form onSubmit={handleCreateWorkbook} className="flex flex-col gap-2">
             <input
               type="text"
               value={workbookName}
               onChange={(e) => setWorkbookName(e.target.value)}
               placeholder="Workbook name"
+              className="w-full px-2 py-1.5 text-sm border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
               autoFocus
             />
-            <div className="form-actions">
-              <button type="submit">Create</button>
-              <button type="button" onClick={handleCancelCreate}>Cancel</button>
+            <div className="flex gap-1.5">
+              <button
+                type="submit"
+                className="flex-1 px-3 py-1.5 text-xs font-medium text-white bg-blue-600 hover:bg-blue-700 rounded transition-colors"
+              >
+                Create
+              </button>
+              <button
+                type="button"
+                onClick={handleCancelCreate}
+                className="flex-1 px-3 py-1.5 text-xs font-medium text-gray-700 bg-white hover:bg-gray-50 border border-gray-300 rounded transition-colors"
+              >
+                Cancel
+              </button>
             </div>
           </form>
         </div>
       )}
 
-      {loading && <div className="file-explorer-loading">Loading...</div>}
+      {loading && <div className="px-4 py-3 text-xs text-gray-500">Loading...</div>}
 
       {error && (
-        <div className="file-explorer-error">
+        <div className="px-4 py-3 text-xs text-red-600">
           {error}
         </div>
       )}
 
       {!loading && !error && (
-        <div className="file-tree">
+        <div className="flex-1 overflow-y-auto py-1 custom-scrollbar">
           {files.map((file) => (
             <FileTreeItem
               key={file.path}
@@ -320,10 +342,11 @@ export function FileExplorer({ projectRoot, projectName, onOpenWorkbook, onFileD
               level={0}
               onFileClick={handleFileClick}
               onFileAction={handleFileAction}
+              activeFilePath={activeFilePath}
             />
           ))}
           {files.length === 0 && (
-            <div className="file-tree-empty">No files</div>
+            <div className="px-4 py-8 text-center text-xs text-gray-400">No files</div>
           )}
         </div>
       )}
