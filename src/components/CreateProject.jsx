@@ -13,18 +13,16 @@ export function CreateProject({ onProjectCreated }) {
       const selected = await open({
         directory: true,
         multiple: false,
-        title: "Select Project Location",
+        title: "Select Project Folder",
       });
 
       if (selected) {
         setProjectPath(selected);
 
-        // Auto-generate project name from selected folder if not set
-        if (!projectName && selected) {
-          const folderName = selected.split('/').pop() || selected.split('\\').pop();
-          if (folderName) {
-            setProjectName(folderName);
-          }
+        // Auto-populate project name from folder name
+        const folderName = selected.split('/').pop() || selected.split('\\').pop();
+        if (folderName) {
+          setProjectName(folderName);
         }
       }
     } catch (err) {
@@ -37,7 +35,7 @@ export function CreateProject({ onProjectCreated }) {
     e.preventDefault();
 
     if (!projectName || !projectPath) {
-      setError("Please provide both project name and location");
+      setError("Please provide both project name and folder");
       return;
     }
 
@@ -61,53 +59,71 @@ export function CreateProject({ onProjectCreated }) {
   };
 
   return (
-    <div className="create-project">
-      <h2>Create New Tether Project</h2>
-      <form onSubmit={handleCreate}>
-        <div className="form-group">
-          <label htmlFor="project-name">Project Name</label>
-          <input
-            id="project-name"
-            type="text"
-            value={projectName}
-            onChange={(e) => setProjectName(e.target.value)}
-            placeholder="my-pipeline"
-            disabled={creating}
-          />
-        </div>
+    <div className="flex items-center justify-center min-h-[calc(100vh-5rem)] px-6">
+      <div className="w-full max-w-xl">
+        <div className="bg-white rounded-xl shadow-lg p-10 border border-gray-200">
+          <h2 className="text-3xl font-bold text-gray-900 mb-2">Create New Project</h2>
+          <p className="text-sm text-gray-600 mb-8">Set up a new Tether workspace for your data pipelines</p>
 
-        <div className="form-group">
-          <label htmlFor="project-path">Project Location</label>
-          <div className="path-picker">
-            <input
-              id="project-path"
-              type="text"
-              value={projectPath}
-              readOnly
-              placeholder="Click Browse to select location..."
-              disabled={creating}
-            />
+          <form onSubmit={handleCreate} className="space-y-6">
+            <div className="space-y-2">
+              <label htmlFor="project-path" className="block text-sm font-medium text-gray-700">
+                Folder
+              </label>
+              <div className="flex gap-2">
+                <input
+                  id="project-path"
+                  type="text"
+                  value={projectPath}
+                  readOnly
+                  placeholder="Click Browse to select a folder..."
+                  disabled={creating}
+                  className="flex-1 px-3 py-2.5 border border-gray-300 rounded-lg bg-gray-50 text-gray-700 focus:outline-none disabled:cursor-not-allowed text-base"
+                />
+                <button
+                  type="button"
+                  onClick={handleBrowse}
+                  disabled={creating}
+                  className="px-4 py-2.5 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 disabled:opacity-50 disabled:cursor-not-allowed font-medium"
+                >
+                  Browse
+                </button>
+              </div>
+              <p className="text-sm text-gray-500">Select or create a folder for your project</p>
+            </div>
+
+            <div className="space-y-2">
+              <label htmlFor="project-name" className="block text-sm font-medium text-gray-700">
+                Project Name
+              </label>
+              <input
+                id="project-name"
+                type="text"
+                value={projectName}
+                onChange={(e) => setProjectName(e.target.value)}
+                placeholder="my-pipeline"
+                disabled={creating}
+                className="w-full px-3 py-2.5 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent disabled:bg-gray-100 disabled:cursor-not-allowed text-base"
+              />
+              <p className="text-sm text-gray-500">Display name (auto-filled from folder name)</p>
+            </div>
+
+            {error && (
+              <div className="p-3 bg-red-50 border border-red-200 rounded-lg text-red-700 text-sm">
+                {error}
+              </div>
+            )}
+
             <button
-              type="button"
-              onClick={handleBrowse}
-              disabled={creating}
+              type="submit"
+              disabled={creating || !projectName || !projectPath}
+              className="w-full px-4 py-3 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:bg-gray-300 disabled:cursor-not-allowed font-medium text-base shadow-sm transition-all"
             >
-              Browse
+              {creating ? "Creating..." : "Create Project"}
             </button>
-          </div>
-          <small>Select a folder where the project will be created</small>
+          </form>
         </div>
-
-        {error && (
-          <div className="error-message">
-            {error}
-          </div>
-        )}
-
-        <button type="submit" disabled={creating || !projectName || !projectPath}>
-          {creating ? "Creating..." : "Create Project"}
-        </button>
-      </form>
+      </div>
     </div>
   );
 }

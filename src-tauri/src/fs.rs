@@ -66,6 +66,12 @@ pub fn list_directory(directory_path: &Path) -> Result<Vec<FileEntry>> {
 
 /// Create a new workbook file (.ipynb format)
 pub fn create_workbook(workbook_path: &Path, workbook_name: &str) -> Result<String> {
+    // Ensure the parent directory exists
+    if !workbook_path.exists() {
+        fs::create_dir_all(workbook_path)
+            .context("Failed to create workbook directory")?;
+    }
+
     // Ensure the path ends with .ipynb
     let file_path = if workbook_name.ends_with(".ipynb") {
         workbook_path.join(workbook_name)

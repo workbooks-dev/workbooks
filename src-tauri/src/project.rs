@@ -107,12 +107,6 @@ pub async fn open_folder(folder_path: &Path) -> Result<TetherProject> {
         anyhow::bail!("Path is not a directory: {:?}", project_root);
     }
 
-    // Ensure tether dependency group exists in pyproject.toml
-    let pyproject_path = project_root.join("pyproject.toml");
-    if pyproject_path.exists() {
-        ensure_tether_dependency_group(&pyproject_path)?;
-    }
-
     // Get package name from pyproject.toml if it exists, otherwise from folder name
     let package_name = get_project_name(&project_root)
         .unwrap_or_else(|_| {
@@ -123,6 +117,15 @@ pub async fn open_folder(folder_path: &Path) -> Result<TetherProject> {
                 .to_string();
             slugify_package_name(&folder_name)
         });
+
+    // Ensure pyproject.toml exists and has tether dependencies
+    let pyproject_path = project_root.join("pyproject.toml");
+    if !pyproject_path.exists() {
+        // Initialize uv project if pyproject.toml doesn't exist
+        init_uv_project(&project_root, &package_name).await?;
+    } else {
+        ensure_tether_dependency_group(&pyproject_path)?;
+    }
 
     // Initialize Python environment and sync dependencies
     python::init_project(&project_root, &package_name).await?;
