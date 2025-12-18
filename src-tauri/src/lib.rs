@@ -17,7 +17,7 @@ pub struct ProjectInfo {
 
 /// Application state to track the current project and engine server
 pub struct AppState {
-    pub project_root: Mutex<Option<PathBuf>>,
+    pub current_project: Mutex<Option<project::TetherProject>>,
     pub engine_server: Arc<Mutex<Option<engine_http::EngineServer>>>,
 }
 
@@ -56,10 +56,28 @@ async fn ensure_uv() -> Result<String, String> {
 }
 
 #[tauri::command]
-async fn init_python_env(project_path: String) -> Result<String, String> {
-    let path = PathBuf::from(project_path);
+async fn init_python_env(project_path: String, state: State<'_, AppState>) -> Result<String, String> {
+    let path = PathBuf::from(&project_path);
 
-    python::init_project(&path)
+    // Load project to get package name
+    let current = state.current_project.lock().await;
+    let package_name = if let Some(project) = current.as_ref() {
+        if project.root == path {
+            project.package_name.clone()
+        } else {
+            // Load project if path doesn't match current
+            drop(current); // Release lock before loading
+            let loaded_project = project::load_project(&path).map_err(|e| e.to_string())?;
+            loaded_project.package_name
+        }
+    } else {
+        // No current project, load it
+        drop(current); // Release lock before loading
+        let loaded_project = project::load_project(&path).map_err(|e| e.to_string())?;
+        loaded_project.package_name
+    };
+
+    python::init_project(&path, &package_name)
         .await
         .map_err(|e| e.to_string())?;
 
@@ -67,10 +85,26 @@ async fn init_python_env(project_path: String) -> Result<String, String> {
 }
 
 #[tauri::command]
-async fn ensure_python_venv(project_path: String) -> Result<String, String> {
-    let path = PathBuf::from(project_path);
+async fn ensure_python_venv(project_path: String, state: State<'_, AppState>) -> Result<String, String> {
+    let path = PathBuf::from(&project_path);
 
-    let venv_path = python::ensure_venv(&path)
+    // Load project to get package name
+    let current = state.current_project.lock().await;
+    let package_name = if let Some(project) = current.as_ref() {
+        if project.root == path {
+            project.package_name.clone()
+        } else {
+            drop(current);
+            let loaded_project = project::load_project(&path).map_err(|e| e.to_string())?;
+            loaded_project.package_name
+        }
+    } else {
+        drop(current);
+        let loaded_project = project::load_project(&path).map_err(|e| e.to_string())?;
+        loaded_project.package_name
+    };
+
+    let venv_path = python::ensure_venv(&path, &package_name)
         .await
         .map_err(|e| e.to_string())?;
 
@@ -101,10 +135,26 @@ async fn install_python_packages(project_path: String, packages: Vec<String>) ->
 }
 
 #[tauri::command]
-async fn run_python_code(project_path: String, code: String) -> Result<String, String> {
-    let path = PathBuf::from(project_path);
+async fn run_python_code(project_path: String, code: String, state: State<'_, AppState>) -> Result<String, String> {
+    let path = PathBuf::from(&project_path);
 
-    let output = python::run_python_command(&path, &["-c", &code])
+    // Load project to get package name
+    let current = state.current_project.lock().await;
+    let package_name = if let Some(project) = current.as_ref() {
+        if project.root == path {
+            project.package_name.clone()
+        } else {
+            drop(current);
+            let loaded_project = project::load_project(&path).map_err(|e| e.to_string())?;
+            loaded_project.package_name
+        }
+    } else {
+        drop(current);
+        let loaded_project = project::load_project(&path).map_err(|e| e.to_string())?;
+        loaded_project.package_name
+    };
+
+    let output = python::run_python_command(&path, &package_name, &["-c", &code])
         .await
         .map_err(|e| e.to_string())?;
 
@@ -119,14 +169,16 @@ async fn create_project(project_path: String, project_name: String, state: State
         .await
         .map_err(|e| e.to_string())?;
 
-    // Set as current project
-    let mut root = state.project_root.lock().await;
-    *root = Some(project.root.clone());
-
-    Ok(ProjectInfo {
-        name: project.name,
+    let project_info = ProjectInfo {
+        name: project.name.clone(),
         root: project.root.to_string_lossy().to_string(),
-    })
+    };
+
+    // Set as current project
+    let mut current = state.current_project.lock().await;
+    *current = Some(project);
+
+    Ok(project_info)
 }
 
 #[tauri::command]
@@ -137,14 +189,16 @@ async fn open_folder(folder_path: String, state: State<'_, AppState>) -> Result<
         .await
         .map_err(|e| e.to_string())?;
 
-    // Set as current project
-    let mut root = state.project_root.lock().await;
-    *root = Some(project.root.clone());
-
-    Ok(ProjectInfo {
-        name: project.name,
+    let project_info = ProjectInfo {
+        name: project.name.clone(),
         root: project.root.to_string_lossy().to_string(),
-    })
+    };
+
+    // Set as current project
+    let mut current = state.current_project.lock().await;
+    *current = Some(project);
+
+    Ok(project_info)
 }
 
 #[tauri::command]
@@ -154,26 +208,25 @@ async fn load_project(project_path: String, state: State<'_, AppState>) -> Resul
     let project = project::load_project(&path)
         .map_err(|e| e.to_string())?;
 
-    // Set as current project
-    let mut root = state.project_root.lock().await;
-    *root = Some(project.root.clone());
-
-    Ok(ProjectInfo {
-        name: project.name,
+    let project_info = ProjectInfo {
+        name: project.name.clone(),
         root: project.root.to_string_lossy().to_string(),
-    })
+    };
+
+    // Set as current project
+    let mut current = state.current_project.lock().await;
+    *current = Some(project);
+
+    Ok(project_info)
 }
 
 #[tauri::command]
 async fn get_current_project(state: State<'_, AppState>) -> Result<Option<ProjectInfo>, String> {
-    let root = state.project_root.lock().await;
+    let current = state.current_project.lock().await;
 
-    if let Some(project_root) = root.as_ref() {
-        let project = project::load_project(project_root)
-            .map_err(|e| e.to_string())?;
-
+    if let Some(project) = current.as_ref() {
         Ok(Some(ProjectInfo {
-            name: project.name,
+            name: project.name.clone(),
             root: project.root.to_string_lossy().to_string(),
         }))
     } else {
@@ -183,15 +236,19 @@ async fn get_current_project(state: State<'_, AppState>) -> Result<Option<Projec
 
 #[tauri::command]
 async fn set_project_root(project_path: String, state: State<'_, AppState>) -> Result<(), String> {
-    let mut root = state.project_root.lock().await;
-    *root = Some(PathBuf::from(project_path));
+    let path = PathBuf::from(&project_path);
+    let project = project::load_project(&path)
+        .map_err(|e| e.to_string())?;
+
+    let mut current = state.current_project.lock().await;
+    *current = Some(project);
     Ok(())
 }
 
 #[tauri::command]
 async fn get_project_root(state: State<'_, AppState>) -> Result<Option<String>, String> {
-    let root = state.project_root.lock().await;
-    Ok(root.as_ref().map(|p| p.to_string_lossy().to_string()))
+    let current = state.current_project.lock().await;
+    Ok(current.as_ref().map(|p| p.root.to_string_lossy().to_string()))
 }
 
 #[tauri::command]
@@ -291,7 +348,27 @@ async fn start_engine(
     // Ensure engine server is running
     ensure_engine_server(state.clone()).await?;
 
-    let project_root = PathBuf::from(project_path);
+    let project_root = PathBuf::from(&project_path);
+
+    // Get package name from current project or load it
+    let current = state.current_project.lock().await;
+    let package_name = if let Some(project) = current.as_ref() {
+        if project.root == project_root {
+            project.package_name.clone()
+        } else {
+            drop(current);
+            let loaded_project = project::load_project(&project_root).map_err(|e| e.to_string())?;
+            loaded_project.package_name
+        }
+    } else {
+        drop(current);
+        let loaded_project = project::load_project(&project_root).map_err(|e| e.to_string())?;
+        loaded_project.package_name
+    };
+
+    // Get venv path
+    let venv_path = python::get_venv_path(&project_root, &package_name)
+        .map_err(|e| e.to_string())?;
 
     // Get the port
     let port = {
@@ -300,7 +377,7 @@ async fn start_engine(
     };
 
     // Now call the static method without holding any locks
-    engine_http::EngineServer::start_engine_http(port, &workbook_path, &project_root)
+    engine_http::EngineServer::start_engine_http(port, &workbook_path, &project_root, &venv_path)
         .await
         .map_err(|e| e.to_string())
 }
@@ -426,7 +503,27 @@ async fn restart_engine(
     // Ensure engine server is running
     ensure_engine_server(state.clone()).await?;
 
-    let project_root = PathBuf::from(project_path);
+    let project_root = PathBuf::from(&project_path);
+
+    // Get package name from current project or load it
+    let current = state.current_project.lock().await;
+    let package_name = if let Some(project) = current.as_ref() {
+        if project.root == project_root {
+            project.package_name.clone()
+        } else {
+            drop(current);
+            let loaded_project = project::load_project(&project_root).map_err(|e| e.to_string())?;
+            loaded_project.package_name
+        }
+    } else {
+        drop(current);
+        let loaded_project = project::load_project(&project_root).map_err(|e| e.to_string())?;
+        loaded_project.package_name
+    };
+
+    // Get venv path
+    let venv_path = python::get_venv_path(&project_root, &package_name)
+        .map_err(|e| e.to_string())?;
 
     // Get the port
     let port = {
@@ -435,7 +532,7 @@ async fn restart_engine(
     };
 
     // Now call the static method without holding any locks
-    engine_http::EngineServer::restart_engine_http(port, &workbook_path, &project_root)
+    engine_http::EngineServer::restart_engine_http(port, &workbook_path, &project_root, &venv_path)
         .await
         .map_err(|e| e.to_string())
 }
@@ -447,7 +544,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_window_state::Builder::default().build())
         .manage(AppState {
-            project_root: Mutex::new(None),
+            current_project: Mutex::new(None),
             engine_server: Arc::new(Mutex::new(None)),
         })
         .invoke_handler(tauri::generate_handler![

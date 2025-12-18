@@ -64,6 +64,7 @@ app.add_middleware(
 class StartEngineRequest(BaseModel):
     workbook_path: str
     project_root: str
+    venv_path: str
     engine_name: str = "python3"
 
 
@@ -100,31 +101,33 @@ async def start_engine(request: StartEngineRequest):
     """Start a new Jupyter engine for a workbook."""
     workbook_path = request.workbook_path
     project_root = request.project_root
+    venv_path = request.venv_path
     engine_name = request.engine_name
 
     print(f"Starting engine for workbook: {workbook_path}")
     print(f"Project root: {project_root}")
+    print(f"Venv path: {venv_path}")
     print(f"Engine name: {engine_name}")
 
     if workbook_path in engines:
         return {"status": "already_running", "workbook_path": workbook_path}
 
     try:
-        # Point to the project's Python executable in its venv
+        # Point to the project's Python executable in its centralized venv
         import os
         import platform
         import traceback
 
         if platform.system() == "Windows":
-            venv_python = os.path.join(project_root, ".venv", "Scripts", "python.exe")
+            venv_python = os.path.join(venv_path, "Scripts", "python.exe")
         else:
-            venv_python = os.path.join(project_root, ".venv", "bin", "python")
+            venv_python = os.path.join(venv_path, "bin", "python")
 
         print(f"Looking for Python at: {venv_python}")
         print(f"Python exists: {os.path.exists(venv_python)}")
 
         if not os.path.exists(venv_python):
-            error_msg = f"Project Python not found at {venv_python}. Ensure the project has a .venv"
+            error_msg = f"Project Python not found at {venv_python}. Ensure the project's virtual environment is initialized."
             print(f"ERROR: {error_msg}")
             raise HTTPException(status_code=400, detail=error_msg)
 
@@ -142,7 +145,7 @@ async def start_engine(request: StartEngineRequest):
 
         print("ipykernel is installed")
 
-        # Install kernel spec in the project's venv if not already installed
+        # Install kernel spec in the project's venv with proper PATH
         import subprocess
         import json
 
@@ -153,7 +156,7 @@ async def start_engine(request: StartEngineRequest):
         engine_spec_name = f"tether_{slugified_name}"
         print(f"DEBUG: project_name = '{project_name}', slugified = '{slugified_name}', engine_spec_name = '{engine_spec_name}'")
 
-        # Use ipython kernel install to create a kernel spec pointing to this venv
+        # First install the basic kernel spec
         install_result = subprocess.run(
             [venv_python, "-m", "ipykernel", "install", "--user", "--name", engine_spec_name, "--display-name", f"Tether ({os.path.basename(project_root)})"],
             capture_output=True,
@@ -166,6 +169,37 @@ async def start_engine(request: StartEngineRequest):
         else:
             print(f"Engine spec '{engine_spec_name}' installed successfully")
             print(f"Install output: {install_result.stdout}")
+
+        # Now modify the kernel.json to set PATH environment variable
+        # This ensures ! commands use the venv's executables
+        kernel_dir = os.path.expanduser(f"~/.local/share/jupyter/kernels/{engine_spec_name}")
+        if not os.path.exists(kernel_dir):
+            kernel_dir = os.path.expanduser(f"~/Library/Jupyter/kernels/{engine_spec_name}")
+
+        kernel_json_path = os.path.join(kernel_dir, "kernel.json")
+
+        if os.path.exists(kernel_json_path):
+            try:
+                with open(kernel_json_path, 'r') as f:
+                    kernel_spec = json.load(f)
+
+                # Add environment variables to prepend venv bin to PATH
+                venv_bin = os.path.dirname(venv_python)
+                if 'env' not in kernel_spec:
+                    kernel_spec['env'] = {}
+
+                # Prepend venv bin directory to PATH
+                # This ensures shell commands like !pip use the venv's executables
+                kernel_spec['env']['PATH'] = f"{venv_bin}:{{PATH}}"
+
+                with open(kernel_json_path, 'w') as f:
+                    json.dump(kernel_spec, f, indent=2)
+
+                print(f"Updated kernel spec with PATH={venv_bin}:$PATH")
+            except Exception as e:
+                print(f"Warning: Could not update kernel spec PATH: {e}")
+        else:
+            print(f"Warning: kernel.json not found at {kernel_json_path}")
 
         print(f"Creating engine manager with engine_name='{engine_spec_name}'...")
         km = AsyncKernelManager(kernel_name=engine_spec_name)

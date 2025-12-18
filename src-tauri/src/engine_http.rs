@@ -356,7 +356,7 @@ impl EngineServer {
     }
 
     /// Start an engine for a workbook (static method to avoid Send issues)
-    pub async fn start_engine_http(port: u16, workbook_path: &str, project_root: &Path) -> Result<()> {
+    pub async fn start_engine_http(port: u16, workbook_path: &str, project_root: &Path, venv_path: &Path) -> Result<()> {
         let url = format!("http://127.0.0.1:{}/engine/start", port);
 
         let response = HTTP_CLIENT
@@ -364,6 +364,7 @@ impl EngineServer {
             .json(&serde_json::json!({
                 "workbook_path": workbook_path,
                 "project_root": project_root.to_string_lossy(),
+                "venv_path": venv_path.to_string_lossy(),
                 "engine_name": "python3"
             }))
             .send()
@@ -530,7 +531,7 @@ impl EngineServer {
     }
 
     /// Restart a workbook's engine (static method to avoid Send issues)
-    pub async fn restart_engine_http(port: u16, workbook_path: &str, project_root: &Path) -> Result<()> {
+    pub async fn restart_engine_http(port: u16, workbook_path: &str, project_root: &Path, venv_path: &Path) -> Result<()> {
         let url = format!("http://127.0.0.1:{}/engine/restart", port);
 
         let response = HTTP_CLIENT
@@ -538,6 +539,7 @@ impl EngineServer {
             .json(&serde_json::json!({
                 "workbook_path": workbook_path,
                 "project_root": project_root.to_string_lossy(),
+                "venv_path": venv_path.to_string_lossy(),
                 "engine_name": "python3"
             }))
             .send()

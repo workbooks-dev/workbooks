@@ -4,6 +4,8 @@ use std::process::Command;
 use which::which;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 
 /// Check if uv is available in PATH
 pub fn check_uv_available() -> Result<PathBuf> {
@@ -135,13 +137,44 @@ pub async fn ensure_uv() -> Result<PathBuf> {
     }
 }
 
+/// Get the centralized venv path for a project
+/// Format: ~/.tether/venvs/<project-name>-<hash>
+pub fn get_venv_path(project_root: &Path, project_name: &str) -> Result<PathBuf> {
+    // Get home directory
+    let home_dir = dirs::home_dir()
+        .context("Failed to get home directory")?;
+
+    // Create a hash of the project root path for uniqueness
+    let mut hasher = DefaultHasher::new();
+    project_root.to_string_lossy().hash(&mut hasher);
+    let path_hash = format!("{:x}", hasher.finish());
+
+    // Use first 8 characters of hash for brevity
+    let short_hash = &path_hash[..8];
+
+    // Slugify project name for filesystem safety
+    let safe_name = project_name
+        .chars()
+        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '-' })
+        .collect::<String>()
+        .to_lowercase();
+
+    // Build path: ~/.tether/venvs/<project-name>-<hash>
+    let venv_dir = home_dir
+        .join(".tether")
+        .join("venvs")
+        .join(format!("{}-{}", safe_name, short_hash));
+
+    Ok(venv_dir)
+}
+
 /// Ensure Python virtual environment exists for a project
-pub async fn ensure_venv(project_root: &Path) -> Result<PathBuf> {
-    let venv_path = project_root.join(".venv");
+pub async fn ensure_venv(project_root: &Path, project_name: &str) -> Result<PathBuf> {
+    let venv_path = get_venv_path(project_root, project_name)?;
 
     if !venv_path.exists() {
         println!("Creating virtual environment at {:?}", venv_path);
-        create_venv(project_root).await?;
+        create_venv_at_path(&venv_path).await?;
     } else {
         println!("Virtual environment already exists at {:?}", venv_path);
     }
@@ -149,13 +182,18 @@ pub async fn ensure_venv(project_root: &Path) -> Result<PathBuf> {
     Ok(venv_path)
 }
 
-/// Create a new virtual environment using uv
-async fn create_venv(project_root: &Path) -> Result<()> {
+/// Create a new virtual environment at a specific path using uv
+async fn create_venv_at_path(venv_path: &Path) -> Result<()> {
     let uv_path = ensure_uv().await?;
 
+    // Ensure parent directory exists
+    if let Some(parent) = venv_path.parent() {
+        fs::create_dir_all(parent)
+            .context("Failed to create venv parent directory")?;
+    }
+
     let output = Command::new(uv_path)
-        .args(["venv", ".venv"])
-        .current_dir(project_root)
+        .args(["venv", venv_path.to_str().context("Invalid venv path")?])
         .output()
         .context("Failed to create virtual environment")?;
 
@@ -164,7 +202,7 @@ async fn create_venv(project_root: &Path) -> Result<()> {
         anyhow::bail!("Failed to create venv: {}", stderr);
     }
 
-    println!("Virtual environment created successfully");
+    println!("Virtual environment created successfully at {:?}", venv_path);
     Ok(())
 }
 
@@ -214,7 +252,7 @@ pub async fn install_packages(project_root: &Path, packages: &[&str]) -> Result<
 }
 
 /// Sync dependencies from pyproject.toml using uv with tether group
-pub async fn sync_dependencies(project_root: &Path) -> Result<()> {
+pub async fn sync_dependencies(project_root: &Path, venv_path: &Path) -> Result<()> {
     let uv_path = ensure_uv().await?;
     let pyproject_path = project_root.join("pyproject.toml");
 
@@ -223,16 +261,22 @@ pub async fn sync_dependencies(project_root: &Path) -> Result<()> {
         return Ok(());
     }
 
-    println!("Syncing dependencies with tether group");
+    println!("Syncing dependencies with tether group to venv at {:?}", venv_path);
 
+    // Use UV_PROJECT_ENVIRONMENT to tell uv where to install packages
+    // This is the correct way to use a custom venv location with uv sync
     let output = Command::new(uv_path)
         .args(["sync", "--group", "tether"])
         .current_dir(project_root)
+        .env("UV_PROJECT_ENVIRONMENT", venv_path)
         .output()
         .context("Failed to sync dependencies")?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        println!("Sync stderr: {}", stderr);
+        println!("Sync stdout: {}", stdout);
         anyhow::bail!("Failed to sync dependencies: {}", stderr);
     }
 
@@ -241,13 +285,18 @@ pub async fn sync_dependencies(project_root: &Path) -> Result<()> {
 }
 
 /// Initialize a Tether project with Python environment and core dependencies
-pub async fn init_project(project_root: &Path) -> Result<()> {
-    // Ensure venv exists
-    ensure_venv(project_root).await?;
+pub async fn init_project(project_root: &Path, project_name: &str) -> Result<()> {
+    println!("Initializing project: {} at {:?}", project_name, project_root);
+
+    // Ensure venv exists in centralized location
+    let venv_path = ensure_venv(project_root, project_name).await?;
+    println!("Venv path: {:?}", venv_path);
 
     // Always sync dependencies with tether group
     if project_root.join("pyproject.toml").exists() {
-        sync_dependencies(project_root).await?;
+        println!("Found pyproject.toml, syncing dependencies...");
+        sync_dependencies(project_root, &venv_path).await?;
+        println!("Dependencies sync completed");
     } else {
         println!("Warning: No pyproject.toml found. Dependencies not synced.");
     }
@@ -255,27 +304,27 @@ pub async fn init_project(project_root: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Get the Python executable path from the venv
-pub fn get_python_path(project_root: &Path) -> PathBuf {
-    let venv_path = project_root.join(".venv");
+/// Get the Python executable path from the centralized venv
+pub fn get_python_path(project_root: &Path, project_name: &str) -> Result<PathBuf> {
+    let venv_path = get_venv_path(project_root, project_name)?;
 
     #[cfg(target_os = "windows")]
     {
-        venv_path.join("Scripts").join("python.exe")
+        Ok(venv_path.join("Scripts").join("python.exe"))
     }
 
     #[cfg(not(target_os = "windows"))]
     {
-        venv_path.join("bin").join("python")
+        Ok(venv_path.join("bin").join("python"))
     }
 }
 
 /// Run a Python command in the project's virtual environment
-pub async fn run_python_command(project_root: &Path, args: &[&str]) -> Result<String> {
-    let python_path = get_python_path(project_root);
+pub async fn run_python_command(project_root: &Path, project_name: &str, args: &[&str]) -> Result<String> {
+    let python_path = get_python_path(project_root, project_name)?;
 
     if !python_path.exists() {
-        anyhow::bail!("Python executable not found. Please initialize the project first.");
+        anyhow::bail!("Python executable not found at {:?}. Please initialize the project first.", python_path);
     }
 
     let output = Command::new(python_path)

@@ -81,7 +81,7 @@ pub async fn create_new_project(project_path: &Path, project_name: &str) -> Resu
     }
 
     // Initialize Python environment and install core dependencies
-    python::init_project(&project_root).await?;
+    python::init_project(&project_root, &package_name).await?;
 
     println!("Tether project created successfully");
 
@@ -113,9 +113,6 @@ pub async fn open_folder(folder_path: &Path) -> Result<TetherProject> {
         ensure_tether_dependency_group(&pyproject_path)?;
     }
 
-    // Initialize Python environment and sync dependencies
-    python::init_project(&project_root).await?;
-
     // Get package name from pyproject.toml if it exists, otherwise from folder name
     let package_name = get_project_name(&project_root)
         .unwrap_or_else(|_| {
@@ -126,6 +123,9 @@ pub async fn open_folder(folder_path: &Path) -> Result<TetherProject> {
                 .to_string();
             slugify_package_name(&folder_name)
         });
+
+    // Initialize Python environment and sync dependencies
+    python::init_project(&project_root, &package_name).await?;
 
     // Use folder name as display name
     let display_name = project_root
@@ -259,6 +259,7 @@ fn ensure_tether_dependency_group(pyproject_path: &Path) -> Result<()> {
 
 [dependency-groups]
 tether = [
+    "pip>=24.0.0",
     "jupyter>=1.0.0",
     "jupyter-client>=8.0.0",
     "ipykernel>=6.0.0",
