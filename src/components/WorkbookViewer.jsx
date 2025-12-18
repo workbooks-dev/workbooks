@@ -756,20 +756,22 @@ export function WorkbookViewer({ workbookPath, projectRoot, autosaveEnabled = tr
   };
 
   const deleteCell = (index) => {
+    if (notebook.cells.length === 1) {
+      // Don't delete the last cell
+      return;
+    }
+
+    const newCellCount = notebook.cells.length - 1;
+
     setNotebook(prevNotebook => {
-      if (prevNotebook.cells.length === 1) {
-        // Don't delete the last cell
-        return prevNotebook;
-      }
       const newCells = prevNotebook.cells.filter((_, i) => i !== index);
-
-      // Adjust selected cell if needed
-      if (selectedCell >= newCells.length) {
-        setSelectedCell(Math.max(0, newCells.length - 1));
-      }
-
       return { ...prevNotebook, cells: newCells };
     });
+
+    // Adjust selected cell if needed (do this outside of setNotebook)
+    if (selectedCell >= newCellCount) {
+      setSelectedCell(Math.max(0, newCellCount - 1));
+    }
 
     setHasUnsavedChanges(true);
   };

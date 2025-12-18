@@ -128,15 +128,17 @@ Durable workbook orchestration for local-first data pipelines.
 
 ### Package Dependencies
 - **Frontend (`package.json`)**:
-  - React 19
-  - Monaco Editor (@monaco-editor/react)
-  - React Flow (@xyflow/react) - installed but not used
-  - Tauri plugins (dialog, opener)
+  - React 19 (react, react-dom)
+  - Monaco Editor (@monaco-editor/react) - code editing
+  - React Flow (@xyflow/react) - installed but not used yet
+  - Markdown support (marked, react-markdown, rehype-raw)
+  - Syntax highlighting (react-syntax-highlighter)
+  - Tauri plugins (dialog, opener, window-state)
 
 **What's NOT Built (Yet):**
 - State management system (SQLite state.db, blob storage)
 - Checkpointing and durability (cell-by-cell checkpoints)
-- Notebook dependency tracking and auto-discovery
+- Workbook dependency tracking and auto-discovery
 - React Flow canvas UI for visual pipeline connections
 - Run logs and execution history viewer
 - Python tether-core package (the `from tether import state` API)
@@ -145,24 +147,25 @@ Durable workbook orchestration for local-first data pipelines.
 - .tether file association and double-click to open
 
 **Architecture Notes:**
-The app currently uses an HTTP-based kernel architecture:
-1. Tauri starts a FastAPI server (kernel_server.py) on port 8765
-2. Each notebook gets its own Jupyter kernel managed by AsyncKernelManager
-3. Kernels run in the project's venv, with custom kernel specs installed
-4. Frontend communicates via Tauri commands → HTTP → Kernel server → Jupyter kernel
-5. This allows clean isolation and kernel lifecycle management
+The app currently uses an HTTP-based engine architecture:
+1. Tauri starts a FastAPI server (engine_server.py) on port 8765
+2. Each workbook gets its own Jupyter engine managed by AsyncKernelManager
+3. Engines run in the project's venv, with custom kernel specs installed
+4. Frontend communicates via Tauri commands → HTTP → Engine server → Jupyter kernel
+5. This allows clean isolation and engine lifecycle management
+6. Streaming output is supported through event emission from Rust to frontend
 
 **Next Steps:**
 Priority features to implement:
 1. State management system (tether-core Python package + SQLite backend)
-2. React Flow canvas for visualizing notebook connections
+2. React Flow canvas for visualizing workbook connections
 3. Run logs and execution history
 4. Checkpointing and resume functionality
 5. Scheduler for automated runs
 
 ## Project Overview
 
-Tether is a desktop application that makes Jupyter notebooks durable, resumable, and connectable. Users can run notebooks locally with automatic checkpointing, connect notebooks through shared state, and schedule/orchestrate pipelines visually.
+Tether is a desktop application that makes Jupyter notebooks (called "workbooks" in the UI) durable, resumable, and connectable. Users can run workbooks locally with automatic checkpointing, connect workbooks through shared state, and schedule/orchestrate pipelines visually.
 
 **Brand:** Tether
 **CLI:** `tether`
@@ -172,7 +175,7 @@ Tether is a desktop application that makes Jupyter notebooks durable, resumable,
 ## Core Concepts
 
 ### State-Based Connections
-Notebooks communicate through a shared state system rather than explicit wiring. Notebooks read/write state variables, and dependencies are inferred automatically.
+Workbooks communicate through a shared state system rather than explicit wiring. Workbooks read/write state variables, and dependencies are inferred automatically.
 
 ```python
 from tether import state
@@ -214,14 +217,14 @@ state.set("customers_clean", df_clean)
 ### Desktop App
 - **Tauri** (Rust + webview) - lightweight native app
 - **React** + **JSX** (NOT TypeScript unless absolutely necessary) - frontend
-- **React Flow / Xyflow** - drag-and-drop canvas for connecting notebooks
-- **Monaco** - code preview
+- **React Flow / Xyflow** - drag-and-drop canvas for connecting workbooks
+- **Monaco** - code preview and editing
 - **SQLite** - local state and run history
 
 ### Python Runtime
 - **uv** - bundled for environment management, package installation
-- **cloudpickle** - serialize notebook namespace between cells
-- **nbformat** - parse and execute notebooks
+- **cloudpickle** - serialize workbook namespace between cells
+- **nbformat** - parse and execute workbooks
 
 ### State Storage
 - **SQLite** - metadata, small values, run tracking
@@ -244,7 +247,7 @@ state.set("customers_clean", df_clean)
 │                     uv (bundled)                                │
 │  - Creates/manages .venv per project                            │
 │  - Installs packages on demand                                  │
-│  - Runs notebook execution in isolated env                      │
+│  - Runs workbook execution in isolated env                      │
 └─────────────────────────────────────────────────────────────────┘
                              │
                              ▼
@@ -261,16 +264,16 @@ state.set("customers_clean", df_clean)
 
 ```bash
 tether init <name>                  # Create new project
-tether run <notebook.ipynb>         # Run a notebook
+tether run <workbook.ipynb>         # Run a workbook
 tether run --all                    # Run full pipeline
 tether status                       # Show pipeline status
 tether state list                   # List state variables
 tether state inspect <key>          # Inspect a state variable
 tether fork <branch-name>           # Fork state (like Neon for SQLite)
 tether switch <branch-name>         # Switch state branch
-tether schedule <notebook> --cron   # Schedule a notebook
-tether logs [notebook]              # View execution logs
-tether resume [notebook]            # Resume interrupted run
+tether schedule <workbook> --cron   # Schedule a workbook
+tether logs [workbook]              # View execution logs
+tether resume [workbook]            # Resume interrupted run
 ```
 
 ## Key Files Status
@@ -279,28 +282,32 @@ tether resume [notebook]            # Resume interrupted run
 - ✅ `src/lib.rs` - Tauri app entry, command handlers (BUILT)
 - ✅ `src/python.rs` - uv integration, environment management (BUILT)
 - ✅ `src/project.rs` - Project initialization and loading (BUILT)
-- ✅ `src/fs.rs` - File system operations (BUILT)
+- ✅ `src/fs.rs` - File system operations, workbook and file management (BUILT)
 - ✅ `src/kernel.rs` - Direct ZMQ kernel integration (BUILT but not used)
-- ✅ `src/kernel_http.rs` - HTTP kernel server integration (BUILT and in use)
+- ✅ `src/engine_http.rs` - HTTP engine server integration (BUILT and in use)
 - ❌ `src/state.rs` - State management, forking (NOT BUILT)
-- ❌ `src/executor.rs` - Notebook execution orchestration (NOT BUILT)
+- ❌ `src/executor.rs` - Workbook execution orchestration (NOT BUILT)
 - ❌ `src/scheduler.rs` - Cron-based scheduling (NOT BUILT)
 
 ### React/JSX (src/) - Partially Built
-- ✅ `App.jsx` - Main app layout with routing (BUILT)
+- ✅ `App.jsx` - Main app layout with routing, tab management (BUILT)
 - ✅ `components/Welcome.jsx` - Landing screen (BUILT)
 - ✅ `components/CreateProject.jsx` - New project wizard (BUILT)
-- ✅ `components/FileExplorer.jsx` - File tree browser (BUILT)
-- ✅ `components/NotebookViewer.jsx` - Full notebook editor (BUILT)
+- ✅ `components/FileExplorer.jsx` - File tree browser with context menu (BUILT)
+- ✅ `components/TabBar.jsx` - Tab management with autosave toggle (BUILT)
+- ✅ `components/WorkbookViewer.jsx` - Full workbook editor (BUILT)
+- ✅ `components/FileViewer.jsx` - General file editor with Monaco (BUILT)
+- ✅ `components/ContextMenu.jsx` - Right-click context menu (BUILT)
+- ✅ `components/InputDialog.jsx` - Modal input dialog (BUILT)
 - ⚠️ `components/Canvas.jsx` - React Flow visualization (PLACEHOLDER)
 - ⚠️ `components/StatePanel.jsx` - State inspector (PLACEHOLDER)
-- ⚠️ `components/NotebookList.jsx` - Notebook list (PLACEHOLDER)
+- ⚠️ `components/WorkbookList.jsx` - Workbook list (PLACEHOLDER)
 - ⚠️ `components/RunLog.jsx` - Execution logs (PLACEHOLDER)
 - ⚠️ `hooks/useProject.js` - Project state hooks (EXISTS, needs implementation)
 - ⚠️ `hooks/useTether.js` - Tauri command wrappers (EXISTS, needs implementation)
 
 ### Python (tether-core/) - Not Built
-- ✅ `kernel_server.py` - FastAPI kernel manager (BUILT, in src-tauri/)
+- ✅ `engine_server.py` - FastAPI engine manager (BUILT, in src-tauri/)
 - ❌ `tether/__init__.py` - Public API (state) (NOT BUILT)
 - ❌ `tether/state.py` - State get/set/list/delete (NOT BUILT)
 - ❌ `tether/executor.py` - Cell-by-cell execution with checkpointing (NOT BUILT)
@@ -323,7 +330,7 @@ state.watch(key, callback)
 
 # Context for current run
 state.run_id
-state.notebook_name
+state.workbook_name
 ```
 
 ## Checkpointing Strategy
@@ -376,7 +383,7 @@ pub async fn ensure_environment(project_root: &Path) -> Result<()> {
 
 ## Package Auto-Detection
 
-When a notebook fails on import:
+When a workbook fails on import:
 1. Parse the cell for import statements
 2. Check which packages are missing
 3. Prompt user to install
@@ -427,13 +434,15 @@ npm run tauri build
 **Current Development Workflow:**
 1. The app uses uv for Python dependency management (not bundled yet)
 2. Frontend is React 19 with Vite for hot reload
-3. The kernel server (kernel_server.py) is started automatically by Tauri
+3. The engine server (engine_server.py) is started automatically by Tauri
 4. Each project gets its own .venv with ipykernel installed
 5. Monaco editor provides the code editing experience
+6. Tab system allows opening multiple files (workbooks and regular files)
+7. Streaming output provides real-time feedback during cell execution
 
 ## Design Principles
 
-1. **Notebooks stay normal notebooks** - Edit in Jupyter, VS Code, wherever. Tether just watches and orchestrates.
+1. **Workbooks stay normal notebooks** - Edit in Jupyter, VS Code, wherever. Tether just watches and orchestrates.
 
 2. **State is implicit wiring** - No explicit DAG definition. Write `state.get("x")` and `state.set("y")`, dependencies are inferred.
 
@@ -451,5 +460,6 @@ npm run tauri build
 - Team collaboration (shared state branches)
 - Claude Code integration (right-click "Edit with Claude")
 - GPU scheduling for heavy cells
-- Live output streaming during execution
-- Notebook diffing and versioning
+- Workbook diffing and versioning
+- Package auto-detection and installation prompts
+- Variable inspector / debugger integration
