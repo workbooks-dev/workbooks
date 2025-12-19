@@ -1077,13 +1077,36 @@ pub fn run() {
             let open_logs_folder = MenuItemBuilder::with_id("open_logs_folder", "Open Logs Folder")
                 .build(app)?;
 
-            // Build File menu with custom item
-            let file_menu = SubmenuBuilder::new(app, "File")
-                .item(&open_new_window)
+            // Create "About" menu item for app menu
+            let about_item = MenuItemBuilder::with_id("about", "About tether")
+                .build(app)?;
+
+            // Build App menu (appears as "tether" in menu bar)
+            // On macOS, this MUST be the first submenu
+            let app_menu = SubmenuBuilder::new(app, "tether")
+                .item(&about_item)
                 .separator()
-                .close_window()
                 .quit()
                 .build()?;
+
+            // Create "New Workbook" menu item
+            let new_workbook = MenuItemBuilder::with_id("new_workbook", "New Workbook")
+                .accelerator("Cmd+N")
+                .build(app)?;
+
+            let open_project = MenuItemBuilder::with_id("open_project", "Open Project...")
+                .accelerator("Cmd+O")
+                .build(app)?;
+
+            // Build File menu (now second submenu)
+            let file_menu = SubmenuBuilder::new(app, "File")
+                .item(&new_workbook)
+                .item(&open_project)
+                .separator()
+                .item(&open_new_window)
+                .build()?;
+
+            log::info!("File menu created successfully");
 
             // Build Edit menu
             let edit_menu = SubmenuBuilder::new(app, "Edit")
@@ -1097,7 +1120,7 @@ pub fn run() {
                 .select_all()
                 .build()?;
 
-            // Build View menu with logs
+            // Build View menu
             let view_menu = SubmenuBuilder::new(app, "View")
                 .item(&show_logs)
                 .item(&open_logs_folder)
@@ -1108,21 +1131,40 @@ pub fn run() {
                 .minimize()
                 .maximize()
                 .separator()
+                .close_window()
                 .build()?;
+
+            log::info!("Building complete menu bar");
 
             // Build the complete menu
+            // On macOS, the app menu MUST be first, followed by File, Edit, View, Window
             let menu = MenuBuilder::new(app)
-                .item(&file_menu)
-                .item(&edit_menu)
-                .item(&view_menu)
-                .item(&window_menu)
+                .items(&[&app_menu, &file_menu, &edit_menu, &view_menu, &window_menu])
                 .build()?;
 
+            log::info!("Menu bar built, setting on app");
             app.set_menu(menu)?;
+            log::info!("Menu bar set successfully");
 
             // Handle menu events
             app.on_menu_event(move |app_handle, event| {
+                log::info!("Menu event triggered: {}", event.id().as_ref());
                 match event.id().as_ref() {
+                    "about" => {
+                        if let Err(e) = app_handle.emit("menu:about", ()) {
+                            log::error!("Failed to emit menu event: {}", e);
+                        }
+                    }
+                    "new_workbook" => {
+                        if let Err(e) = app_handle.emit("menu:new-workbook", ()) {
+                            log::error!("Failed to emit menu event: {}", e);
+                        }
+                    }
+                    "open_project" => {
+                        if let Err(e) = app_handle.emit("menu:open-project", ()) {
+                            log::error!("Failed to emit menu event: {}", e);
+                        }
+                    }
                     "open_new_window" => {
                         if let Err(e) = app_handle.emit("menu:open-new-window", ()) {
                             log::error!("Failed to emit menu event: {}", e);

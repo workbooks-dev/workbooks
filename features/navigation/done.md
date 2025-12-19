@@ -24,3 +24,15 @@
   - [x] Clicking file in Files section opens tab
   - [x] Clicking workbook in Workbooks section opens tab
   - [x] New workbook creates and opens tab
+
+## Native OS Menu Bar
+
+- [x] macOS native menu bar implementation
+  - [x] App menu ("tether") with About and Quit
+  - [x] File menu with New Workbook (Cmd+N), Open Project (Cmd+O), Open in New Window (Cmd+Shift+O)
+  - [x] Edit menu with standard editing commands (Undo, Redo, Cut, Copy, Paste, Select All)
+  - [x] View menu with Show Runtime Logs (Cmd+Shift+L), Open Logs Folder
+  - [x] Window menu with Minimize, Maximize, Close Window
+  - [x] Proper macOS menu structure (app menu must be first submenu)
+  - [x] Menu event handling and emission to frontend
+  - [x] Keyboard shortcuts for all major actions

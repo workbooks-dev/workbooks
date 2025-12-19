@@ -6,6 +6,24 @@ This file tracks major features and improvements as they're completed.
 
 ### December 2024
 
+**Native macOS Menu Bar (Dec 19, 2024)**
+- **File Menu Fix**: Resolved missing File menu on macOS
+  - Added explicit app menu ("tether") as first submenu to satisfy macOS requirements
+  - File menu now appears correctly between "tether" and "Edit" menus
+  - Fixed Tauri v2 macOS-specific menu rendering issue
+- **New Menu Items**: Enhanced File menu with common actions
+  - "New Workbook" (Cmd+N) - Quick workbook creation
+  - "Open Project..." (Cmd+O) - Open existing projects
+  - "Open Project in New Window..." (Cmd+Shift+O) - Multi-window support
+  - "About tether" - About dialog (in app menu)
+- **Complete Menu Structure**: Professional native menu bar
+  - **tether** menu: About, Quit
+  - **File** menu: New Workbook, Open Project, Open in New Window
+  - **Edit** menu: Undo, Redo, Cut, Copy, Paste, Select All
+  - **View** menu: Show Runtime Logs (Cmd+Shift+L), Open Logs Folder
+  - **Window** menu: Minimize, Maximize, Close Window
+- Files: `src-tauri/src/lib.rs` (menu builder, event handlers)
+
 **Files Section Enhancements (Dec 18, 2024)**
 - **Notebooks Folder Visibility**: Notebooks folder now appears in FILES section
   - Allows direct access to notebooks from file tree
