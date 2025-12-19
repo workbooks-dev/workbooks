@@ -84,6 +84,8 @@
 
 ## UX Improvements
 
+
+
 - [ ] File icons for more types
 - [ ] Better context menu positioning
 - [ ] Keyboard shortcuts for file operations

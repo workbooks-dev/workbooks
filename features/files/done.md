@@ -3,7 +3,8 @@
 ## Files Sidebar Section
 
 - [x] Tree view of all project files
-- [x] Filters out .ipynb files (shown in Workbooks)
+- [x] Shows notebooks folder in FILES section
+- [x] Workbooks can be opened from any location (not just Workbooks section)
 - [x] Reflects actual folder structure
 - [x] Expand/collapse folders
 - [x] File type icons
@@ -85,9 +86,16 @@
 ## File Drop Handling
 
 - [x] Drag and drop file upload
+- [x] Drag and drop folder upload (recursive copy)
+  - [x] Automatically detects if dropped item is directory
+  - [x] Recursively copies entire folder structure
+  - [x] Preserves all subdirectories and files
+  - [x] Backend: `copy_folder_recursively()` and `save_dropped_folder()`
+  - [x] Frontend: Uses `stat()` to check if directory
 - [x] `.ipynb` files → Saved to `/notebooks` folder
 - [x] Other files → Saved to project root
-- [x] Automatic file type detection
+- [x] Folders → Saved to project root
+- [x] Automatic file/folder type detection
 - [x] Files appear in correct sidebar section
 - [x] Visual drop zone indicator
   - [x] Blue dashed border overlay when dragging

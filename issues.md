@@ -1,15 +1,7 @@
 # Tether App Issues
 
+## MAJOR logging issue:
+- [x] exposes secrets in logs - FIXED: Removed all env var injection logging entirely to prevent any potential secret exposure (engine_server.py:244, 266)
 
 ## Build issues
-- [] Tether should open 1920 x 1080 if first open and it's possible.
-- [x] shouldn't tether automatically solve issues like this? in some cases uv will be found in `.local/bin/uv` in other cases tether will need to fix it. uv was installed but not found in PATH. You may need to restart your terminal or add ~/.cargo/bin to your PATH
-- [x] App hangs at "starting" - Fixed by disabling tauri-plugin-window-state which was causing startup hangs (lib.rs:940-941)
-- [ ] Workbook hangs at "Starting..." with no indication. 
-- [ ] We need runtime logs as a native file menu drop down
-
-
-## UX issues
-- [ ] command+Q does not quit the application
-- [ ] command+w after no tabs, does not close the project window (as it should)
-- [ ] When closing on a dirty file, we should have "Save + close", "Don't save and close" and "Cancel"
+- [x] Python engine_server setup fails. Shouldn't the engine server be running based on a `uv sync` within a project directory? Is that not the process on boot? - FIXED: Created dedicated engine venv at ~/.tether/engine/.venv with auto-sync on boot (engine_http.rs:302-389, engine_pyproject.toml, tauri.conf.json:36-38)

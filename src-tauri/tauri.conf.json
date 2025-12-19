@@ -34,7 +34,8 @@
       "icons/icon.ico"
     ],
     "resources": [
-      "engine_server.py"
+      "engine_server.py",
+      "engine_pyproject.toml"
     ]
   }
 }

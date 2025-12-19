@@ -11,6 +11,8 @@ Each feature area has three files:
 - **`todo.md`** - What needs to be implemented
 - **`done.md`** - What has been completed
 
+Anytime a feature todo is done, always move it from todo.md to done.md
+
 ### Feature Areas
 
 #### Core UI

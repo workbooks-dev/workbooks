@@ -393,6 +393,60 @@ pub fn save_dropped_file(project_root: &Path, file_name: &str, file_content: &[u
     Ok(target_path.to_string_lossy().to_string())
 }
 
+/// Recursively copy a folder to the project root
+pub fn copy_folder_recursively(source_path: &Path, dest_path: &Path) -> Result<()> {
+    // Ensure destination parent exists
+    if let Some(parent) = dest_path.parent() {
+        if !parent.exists() {
+            fs::create_dir_all(parent)
+                .context("Failed to create destination parent directory")?;
+        }
+    }
+
+    // Create the destination folder
+    fs::create_dir_all(dest_path)
+        .context("Failed to create destination directory")?;
+
+    // Iterate through source directory
+    for entry in fs::read_dir(source_path)
+        .context("Failed to read source directory")? {
+        let entry = entry.context("Failed to read directory entry")?;
+        let path = entry.path();
+        let file_name = entry.file_name();
+        let dest_entry_path = dest_path.join(&file_name);
+
+        if path.is_dir() {
+            // Recursively copy subdirectory
+            copy_folder_recursively(&path, &dest_entry_path)?;
+        } else {
+            // Copy file
+            fs::copy(&path, &dest_entry_path)
+                .context("Failed to copy file")?;
+        }
+    }
+
+    Ok(())
+}
+
+/// Save a dropped folder to the project root
+pub fn save_dropped_folder(project_root: &Path, folder_path: &Path) -> Result<String> {
+    // Extract folder name
+    let folder_name = folder_path.file_name()
+        .ok_or_else(|| anyhow::anyhow!("Invalid folder path"))?;
+
+    let dest_path = project_root.join(folder_name);
+
+    // Check if folder already exists
+    if dest_path.exists() {
+        anyhow::bail!("A folder with that name already exists");
+    }
+
+    // Recursively copy the folder
+    copy_folder_recursively(folder_path, &dest_path)?;
+
+    Ok(dest_path.to_string_lossy().to_string())
+}
+
 /// Create a new empty file
 pub fn create_new_file(parent_path: &Path, file_name: &str, initial_content: Option<&str>) -> Result<String> {
     // Ensure parent directory exists

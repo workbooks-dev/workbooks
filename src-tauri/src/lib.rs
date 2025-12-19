@@ -8,7 +8,7 @@ mod secrets;
 mod local_auth_macos;
 
 use std::path::PathBuf;
-use tauri::{Emitter, State};
+use tauri::{Emitter, Manager, State};
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use serde::{Deserialize, Serialize};
@@ -362,18 +362,31 @@ async fn save_dropped_file(
 }
 
 #[tauri::command]
+async fn save_dropped_folder(
+    project_root: String,
+    folder_path: String,
+) -> Result<String, String> {
+    let proj_path = PathBuf::from(project_root);
+    let folder = PathBuf::from(folder_path);
+    fs::save_dropped_folder(&proj_path, &folder).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 async fn ensure_engine_server(state: State<'_, AppState>) -> Result<(), String> {
     // Use async mutex to hold lock across await - prevents race condition
     let mut server = state.engine_server.lock().await;
 
     if server.is_none() {
-        println!("Starting engine server...");
+        log::info!("Starting engine server...");
         let es = engine_http::EngineServer::start()
             .await
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| {
+                log::error!("Failed to start engine server: {}", e);
+                e.to_string()
+            })?;
 
         *server = Some(es);
-        println!("Engine server started successfully");
+        log::info!("Engine server started successfully");
     }
 
     Ok(())
@@ -468,7 +481,7 @@ async fn execute_cell_stream(
 
     // Create event name using hash of workbook path
     let event_name = format!("cell-output-{}", hash_string(&workbook_path));
-    println!("Emitting to event: {}", event_name);
+    log::debug!("Emitting to event: {}", event_name);
 
     let (success, execution_count) = engine_http::EngineServer::execute_stream(
         port,
@@ -888,11 +901,9 @@ async fn test_secrets_loading(
 }
 
 #[tauri::command]
-async fn get_logs_directory() -> Result<String, String> {
-    let logs_dir = dirs::home_dir()
-        .ok_or("Failed to get home directory")?
-        .join(".tether")
-        .join("logs");
+async fn get_logs_directory(app: tauri::AppHandle) -> Result<String, String> {
+    let logs_dir = app.path().app_log_dir()
+        .map_err(|e| format!("Failed to get log directory: {}", e))?;
 
     // Ensure the logs directory exists
     std::fs::create_dir_all(&logs_dir)
@@ -902,11 +913,9 @@ async fn get_logs_directory() -> Result<String, String> {
 }
 
 #[tauri::command]
-async fn open_logs_folder() -> Result<(), String> {
-    let logs_dir = dirs::home_dir()
-        .ok_or("Failed to get home directory")?
-        .join(".tether")
-        .join("logs");
+async fn open_logs_folder(app: tauri::AppHandle) -> Result<(), String> {
+    let logs_dir = app.path().app_log_dir()
+        .map_err(|e| format!("Failed to get log directory: {}", e))?;
 
     // Ensure the logs directory exists
     std::fs::create_dir_all(&logs_dir)
@@ -941,14 +950,12 @@ async fn open_logs_folder() -> Result<(), String> {
 }
 
 #[tauri::command]
-async fn get_recent_logs(lines: Option<usize>) -> Result<String, String> {
-    let logs_dir = dirs::home_dir()
-        .ok_or("Failed to get home directory")?
-        .join(".tether")
-        .join("logs");
+async fn get_recent_logs(app: tauri::AppHandle, lines: Option<usize>) -> Result<String, String> {
+    let logs_dir = app.path().app_log_dir()
+        .map_err(|e| format!("Failed to get log directory: {}", e))?;
 
-    // For now, we'll return stdout/stderr from the engine server
-    // In the future, we could implement proper file-based logging
+    // tauri-plugin-log creates log files with timestamp suffixes
+    // Look for the most recent log file
     let log_file = logs_dir.join("tether.log");
 
     if !log_file.exists() {
@@ -975,7 +982,7 @@ async fn open_project_window(
 ) -> Result<(), String> {
     use tauri::Manager;
 
-    println!("Opening new window for project: {}", project_path);
+    log::info!("Opening new window for project: {}", project_path);
 
     // Create a unique window label
     let window_label = format!("project-{}", std::time::SystemTime::now()
@@ -994,7 +1001,7 @@ async fn open_project_window(
     let mut url = current_url.clone();
     url.set_query(Some(&format!("project={}", urlencoding::encode(&project_path))));
 
-    println!("Opening window with URL: {}", url);
+    log::info!("Opening window with URL: {}", url);
 
     // Create new window
     tauri::WebviewWindowBuilder::new(
@@ -1007,7 +1014,7 @@ async fn open_project_window(
     .build()
     .map_err(|e| format!("Failed to create window: {}", e))?;
 
-    println!("Window created with label: {}", window_label);
+    log::info!("Window created with label: {}", window_label);
     Ok(())
 }
 
@@ -1021,6 +1028,16 @@ pub fn run() {
         // NOTE: window-state plugin disabled - causes startup hangs on first launch
         // .plugin(tauri_plugin_window_state::Builder::default().build())
         .plugin(tauri_plugin_fs::init())
+        .plugin(
+            tauri_plugin_log::Builder::new()
+                .target(tauri_plugin_log::Target::new(
+                    tauri_plugin_log::TargetKind::LogDir {
+                        file_name: Some("tether".to_string()),
+                    },
+                ))
+                .level(log::LevelFilter::Info)
+                .build(),
+        )
         .setup(|app| {
             // Create custom menu items
             let open_new_window = MenuItemBuilder::with_id("open_new_window", "Open Project in New Window...")
@@ -1039,6 +1056,7 @@ pub fn run() {
                 .item(&open_new_window)
                 .separator()
                 .close_window()
+                .quit()
                 .build()?;
 
             // Build Edit menu
@@ -1081,17 +1099,17 @@ pub fn run() {
                 match event.id().as_ref() {
                     "open_new_window" => {
                         if let Err(e) = app_handle.emit("menu:open-new-window", ()) {
-                            eprintln!("Failed to emit menu event: {}", e);
+                            log::error!("Failed to emit menu event: {}", e);
                         }
                     }
                     "show_logs" => {
                         if let Err(e) = app_handle.emit("menu:show-logs", ()) {
-                            eprintln!("Failed to emit menu event: {}", e);
+                            log::error!("Failed to emit menu event: {}", e);
                         }
                     }
                     "open_logs_folder" => {
                         if let Err(e) = app_handle.emit("menu:open-logs-folder", ()) {
-                            eprintln!("Failed to emit menu event: {}", e);
+                            log::error!("Failed to emit menu event: {}", e);
                         }
                     }
                     _ => {}
@@ -1134,6 +1152,7 @@ pub fn run() {
             create_new_folder,
             duplicate_workbook,
             save_dropped_file,
+            save_dropped_folder,
             ensure_engine_server,
             start_engine,
             execute_cell,

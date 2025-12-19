@@ -2,16 +2,6 @@
 
 ## Critical Issues
 
-### Output Redaction (IMPLEMENTED)
-- [x] **Frontend warning when saving workbooks with secrets in output**
-  - [x] Before save, scan all cell outputs for secret values
-  - [x] If secrets detected, show modal with options:
-    - [x] "Clear and Save" - Clear outputs containing secrets, then save
-    - [x] "Go Back and Fix" - Cancel save, let user fix manually
-    - [x] "Dangerously Save Anyway" - Save with secrets (requires confirmation)
-  - [x] Show which cells contain secrets in the warning
-  - [x] Modal highlights affected cell indices
-
 - [ ] **Backend automatic redaction (alternative/complement to frontend warning)**
   - [ ] Scan outputs before save/display
   - [ ] Replace secret values with `[REDACTED]` marker
@@ -19,18 +9,11 @@
   - [ ] Test that secrets never appear in saved notebook files
   - [ ] Verify redaction works for partial matches and variations
 
-### Touch ID Session Management (IMPLEMENTED)
-- [x] **Implement persistent Touch ID authentication session** - Working with 10-minute timeout
-  - [x] Implement session state management in Rust backend
-  - [x] Keep authentication session active for 10 minutes
-  - [x] Only re-prompt for Touch ID after session timeout
-  - [x] Allow reading secrets without re-authentication during active session
-  - [x] Always require re-authentication for destructive operations (delete, edit)
-  - [x] Session state persists across Tauri commands via AppState
-  - [x] Store session timestamp and validate on each secrets operation
-  - [ ] Session should expire on app close or manual lock
-  - [ ] Visual indicator of authentication status (locked/unlocked state)
-  - [ ] "Lock Secrets" button to manually invalidate session
+### Touch ID Session Management
+
+- [ ] Session should expire on app close or manual lock
+- [ ] Visual indicator of authentication status (locked/unlocked state)
+- [ ] "Lock Secrets" button to manually invalidate session
 
 ## Future Enhancements
 

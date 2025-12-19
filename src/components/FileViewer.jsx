@@ -38,6 +38,19 @@ export function FileViewer({ filePath, onClose, onUnsavedChangesUpdate }) {
     }
   }, [hasUnsavedChanges, onUnsavedChangesUpdate]);
 
+  // Listen for save-all event from parent
+  useEffect(() => {
+    const handleSaveAll = () => {
+      if (hasUnsavedChanges) {
+        console.log("Saving file in response to save-all event");
+        saveFile();
+      }
+    };
+
+    window.addEventListener("tether:save-all", handleSaveAll);
+    return () => window.removeEventListener("tether:save-all", handleSaveAll);
+  }, [hasUnsavedChanges]);
+
   useEffect(() => {
     // Global keyboard shortcuts
     const handleKeyDown = (e) => {

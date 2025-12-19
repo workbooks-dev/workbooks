@@ -2,8 +2,13 @@ import { useState, useEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { ask } from "@tauri-apps/plugin-dialog";
 import { listen } from "@tauri-apps/api/event";
+import { convertFileSrc } from "@tauri-apps/api/core";
 import Editor from "@monaco-editor/react";
 import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
+import remarkMath from "remark-math";
+import rehypeKatex from "rehype-katex";
+import rehypeRaw from "rehype-raw";
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
 import { vscDarkPlus } from "react-syntax-highlighter/dist/esm/styles/prism";
 import { SecretsWarningModal } from "./SecretsWarningModal";
@@ -35,7 +40,7 @@ const STYLES = {
   markdown: {
     container: "w-full",
     textarea: "w-full p-3 border-none resize-y font-sans text-sm leading-relaxed focus:outline-none bg-transparent",
-    content: "markdown-content px-3 py-2",
+    content: "markdown-content prose prose-sm max-w-none px-3 py-2",
     placeholder: "text-gray-400 italic px-3 py-2",
   },
 
@@ -253,6 +258,8 @@ function WorkbookCell({ cell, index, workbookPath, onUpdate, onDelete, onExecute
             <div className={STYLES.markdown.content}>
               {content ? (
                 <ReactMarkdown
+                  remarkPlugins={[remarkGfm, remarkMath]}
+                  rehypePlugins={[rehypeKatex, rehypeRaw]}
                   components={{
                     code({ node, inline, className, children, ...props }) {
                       const match = /language-(\w+)/.exec(className || '');
@@ -270,6 +277,98 @@ function WorkbookCell({ cell, index, workbookPath, onUpdate, onDelete, onExecute
                           {children}
                         </code>
                       );
+                    },
+                    img({ node, src, alt, ...props }) {
+                      // Handle local file paths
+                      let imgSrc = src;
+
+                      // If it's a relative path or absolute local path, convert it
+                      if (src && !src.startsWith('http://') && !src.startsWith('https://') && !src.startsWith('data:')) {
+                        // Check if it's a relative path
+                        if (!src.startsWith('/')) {
+                          // Relative to project root
+                          const projectPath = workbookPath.substring(0, workbookPath.lastIndexOf('/'));
+                          imgSrc = `${projectPath}/${src}`;
+                        }
+                        // Convert to Tauri asset protocol
+                        imgSrc = convertFileSrc(imgSrc);
+                      }
+
+                      return (
+                        <img
+                          src={imgSrc}
+                          alt={alt || ''}
+                          className="max-w-full h-auto rounded-lg my-2"
+                          onError={(e) => {
+                            e.target.onerror = null;
+                            e.target.src = 'data:image/svg+xml,<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100"><text x="10" y="50">Image not found</text></svg>';
+                          }}
+                          {...props}
+                        />
+                      );
+                    },
+                    a({ node, href, children, ...props }) {
+                      // Handle local file links
+                      const isLocalFile = href && !href.startsWith('http://') && !href.startsWith('https://') && !href.startsWith('#');
+
+                      if (isLocalFile) {
+                        return (
+                          <a
+                            href="#"
+                            onClick={(e) => {
+                              e.preventDefault();
+                              // TODO: Open local file in appropriate viewer
+                              console.log('Open local file:', href);
+                            }}
+                            className="text-blue-600 hover:text-blue-800 underline cursor-pointer"
+                            title={`Local file: ${href}`}
+                            {...props}
+                          >
+                            {children}
+                          </a>
+                        );
+                      }
+
+                      return (
+                        <a
+                          href={href}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="text-blue-600 hover:text-blue-800 underline"
+                          {...props}
+                        >
+                          {children}
+                        </a>
+                      );
+                    },
+                    table({ node, children, ...props }) {
+                      return (
+                        <div className="overflow-x-auto my-4">
+                          <table className="min-w-full divide-y divide-gray-300 border border-gray-300" {...props}>
+                            {children}
+                          </table>
+                        </div>
+                      );
+                    },
+                    thead({ node, children, ...props }) {
+                      return <thead className="bg-gray-100" {...props}>{children}</thead>;
+                    },
+                    th({ node, children, ...props }) {
+                      return (
+                        <th className="px-3 py-2 text-left text-xs font-semibold text-gray-900 border-r border-gray-300" {...props}>
+                          {children}
+                        </th>
+                      );
+                    },
+                    td({ node, children, ...props }) {
+                      return (
+                        <td className="px-3 py-2 text-sm text-gray-700 border-r border-gray-300" {...props}>
+                          {children}
+                        </td>
+                      );
+                    },
+                    tr({ node, children, ...props }) {
+                      return <tr className="border-b border-gray-300 hover:bg-gray-50" {...props}>{children}</tr>;
                     }
                   }}
                 >
@@ -787,6 +886,19 @@ export function WorkbookViewer({ workbookPath, projectRoot, autosaveEnabled = tr
     }
   }, [hasUnsavedChanges]);
 
+  // Listen for save-all event from parent
+  useEffect(() => {
+    const handleSaveAll = () => {
+      if (hasUnsavedChanges) {
+        console.log("Saving workbook in response to save-all event");
+        saveWorkbook(true); // Skip secrets check for auto-save
+      }
+    };
+
+    window.addEventListener("tether:save-all", handleSaveAll);
+    return () => window.removeEventListener("tether:save-all", handleSaveAll);
+  }, [hasUnsavedChanges]);
+
   // Scan for secrets whenever notebook changes
   useEffect(() => {
     const scanForSecrets = async () => {
@@ -898,9 +1010,9 @@ export function WorkbookViewer({ workbookPath, projectRoot, autosaveEnabled = tr
       setEngineStatus('starting');
       setError(null);
 
-      // Add timeout to prevent infinite hanging
+      // Add timeout to prevent infinite hanging (60 seconds to allow for venv setup and package installation)
       const timeoutPromise = new Promise((_, reject) =>
-        setTimeout(() => reject(new Error("Engine startup timed out after 30 seconds")), 30000)
+        setTimeout(() => reject(new Error("Engine startup timed out after 60 seconds. This may indicate:\n- Python environment setup is slow\n- Required packages need to be installed\n- Jupyter kernel is not responding\n\nCheck logs (View → Show Runtime Logs) for details.")), 60000)
       );
 
       const startPromise = invoke("start_engine", {
@@ -920,7 +1032,7 @@ export function WorkbookViewer({ workbookPath, projectRoot, autosaveEnabled = tr
       console.error("Failed to start engine:", err);
       const errorMsg = typeof err === 'string' ? err : err.message || "Unknown error";
       setEngineStatus('error');
-      setError(`Failed to start engine: ${errorMsg}. Check console for details.`);
+      setError(`Failed to start engine: ${errorMsg}`);
       engineStartedRef.current = false;
       setEngineReady(false);
     }

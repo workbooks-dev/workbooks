@@ -6,6 +6,7 @@ Manages engine lifecycle and code execution.
 import sys
 import os
 import asyncio
+import logging
 from contextlib import asynccontextmanager
 from typing import Dict, List, Any
 from fastapi import FastAPI, HTTPException
@@ -16,6 +17,14 @@ from jupyter_client import AsyncKernelManager
 import uvicorn
 import json
 import re
+
+# Configure logging with timestamps
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
+logger = logging.getLogger(__name__)
 
 # Store engine managers per workbook path
 engines: Dict[str, AsyncKernelManager] = {}
@@ -37,6 +46,19 @@ def slugify_kernel_name(name: str) -> str:
     if not slug:
         slug = "project"
     return slug
+
+
+def mask_secret_value(value: str) -> str:
+    """
+    Mask a secret value for logging.
+    Shows first 4 and last 4 characters for values longer than 10 chars.
+    """
+    if not value:
+        return "***"
+    if len(value) > 10:
+        return value[:4] + "..." + value[-4:]
+    else:
+        return "***"
 
 
 def contains_secret(text: str, secrets: Dict[str, str]) -> bool:
@@ -219,7 +241,7 @@ async def start_engine(request: StartEngineRequest):
                 if request.env_vars:
                     for key, value in request.env_vars.items():
                         kernel_spec['env'][key] = value
-                        print(f"Injecting env var: {key}={value}")
+                    # Note: Not logging env var injection for security (secrets may be present)
 
                 with open(kernel_json_path, 'w') as f:
                     json.dump(kernel_spec, f, indent=2)
@@ -241,12 +263,7 @@ async def start_engine(request: StartEngineRequest):
         if request.env_vars:
             for key, value in request.env_vars.items():
                 kernel_env[key] = value
-                # Mask secret values in logs for security
-                if len(value) > 10:
-                    masked_value = value[:4] + "..." + value[-4:]
-                else:
-                    masked_value = "***"
-                print(f"Injecting env var into kernel: {key}={masked_value}")
+            # Note: Not logging env var injection for security (secrets may be present)
 
         print("Starting engine process with environment variables...")
         await km.start_kernel(cwd=project_root, env=kernel_env)
@@ -258,12 +275,12 @@ async def start_engine(request: StartEngineRequest):
 
         print("Waiting for engine to be ready...")
         try:
-            await kc.wait_for_ready(timeout=30)
+            await kc.wait_for_ready(timeout=60)  # Increased from 30 to 60 seconds
             print("Engine is ready!")
         except RuntimeError as e:
-            print(f"Engine failed to become ready: {e}")
+            print(f"Engine failed to become ready after 60 seconds: {e}")
             await km.shutdown_kernel()
-            raise HTTPException(status_code=500, detail=f"Engine failed to start: {str(e)}")
+            raise HTTPException(status_code=500, detail=f"Engine failed to start after 60 seconds: {str(e)}")
 
         engines[workbook_path] = km
 
@@ -756,4 +773,8 @@ async def complete_code(request: CompleteRequest):
 
 if __name__ == "__main__":
     port = int(sys.argv[1]) if len(sys.argv) > 1 else 8765
+    logger.info(f"=== Tether Engine Server Starting ===")
+    logger.info(f"Port: {port}")
+    logger.info(f"Python: {sys.executable}")
+    logger.info(f"Working directory: {os.getcwd()}")
     uvicorn.run(app, host="127.0.0.1", port=port, log_level="info")

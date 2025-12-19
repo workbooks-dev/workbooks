@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use futures_util::StreamExt;
 use once_cell::sync::Lazy;
@@ -228,10 +228,190 @@ impl EngineServer {
         Ok(())
     }
 
+    /// Cleanup old log files (keep only last 7 days and max 10 files)
+    fn cleanup_old_logs(logs_dir: &Path) -> Result<()> {
+        const MAX_LOG_AGE_DAYS: u64 = 7;
+        const MAX_LOG_FILES: usize = 10;
+
+        let mut log_files: Vec<_> = std::fs::read_dir(logs_dir)?
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| {
+                entry.file_name()
+                    .to_string_lossy()
+                    .starts_with("engine_server_")
+                    && entry.file_name().to_string_lossy().ends_with(".log")
+            })
+            .collect();
+
+        // Sort by modification time (oldest first)
+        log_files.sort_by_key(|entry| {
+            entry.metadata()
+                .and_then(|m| m.modified())
+                .unwrap_or(std::time::SystemTime::UNIX_EPOCH)
+        });
+
+        let now = std::time::SystemTime::now();
+        let max_age = std::time::Duration::from_secs(MAX_LOG_AGE_DAYS * 24 * 60 * 60);
+
+        // Remove files older than MAX_LOG_AGE_DAYS
+        for entry in &log_files {
+            if let Ok(metadata) = entry.metadata() {
+                if let Ok(modified) = metadata.modified() {
+                    if let Ok(age) = now.duration_since(modified) {
+                        if age > max_age {
+                            println!("Removing old log file: {:?} (age: {} days)",
+                                entry.path(), age.as_secs() / 86400);
+                            let _ = std::fs::remove_file(entry.path());
+                        }
+                    }
+                }
+            }
+        }
+
+        // Refresh the list after age-based cleanup
+        let mut log_files: Vec<_> = std::fs::read_dir(logs_dir)?
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| {
+                entry.file_name()
+                    .to_string_lossy()
+                    .starts_with("engine_server_")
+                    && entry.file_name().to_string_lossy().ends_with(".log")
+            })
+            .collect();
+
+        log_files.sort_by_key(|entry| {
+            entry.metadata()
+                .and_then(|m| m.modified())
+                .unwrap_or(std::time::SystemTime::UNIX_EPOCH)
+        });
+
+        // Keep only the most recent MAX_LOG_FILES
+        if log_files.len() > MAX_LOG_FILES {
+            let files_to_remove = log_files.len() - MAX_LOG_FILES;
+            for entry in log_files.iter().take(files_to_remove) {
+                println!("Removing excess log file: {:?} (keeping only {} most recent)",
+                    entry.path(), MAX_LOG_FILES);
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Ensure the engine venv exists at ~/.tether/engine/.venv and is synced
+    async fn ensure_engine_venv() -> Result<PathBuf> {
+        println!("Ensuring engine venv exists and is up to date...");
+
+        // Get ~/.tether/engine directory
+        let home_dir = dirs::home_dir().context("Failed to get home directory")?;
+        let engine_dir = home_dir.join(".tether").join("engine");
+        let venv_path = engine_dir.join(".venv");
+
+        // Create engine directory if it doesn't exist
+        std::fs::create_dir_all(&engine_dir)
+            .context("Failed to create ~/.tether/engine directory")?;
+
+        // Find and copy engine_pyproject.toml to engine directory
+        let cwd = std::env::current_dir()?;
+        let exe_path = std::env::current_exe()?;
+        let exe_dir = exe_path.parent().context("Failed to get executable directory")?;
+
+        let possible_pyproject_paths = vec![
+            // Dev mode
+            cwd.join("src-tauri/engine_pyproject.toml"),
+            // Production - macOS
+            exe_dir.join("../Resources/engine_pyproject.toml"),
+            // Production - Windows/Linux
+            exe_dir.join("engine_pyproject.toml"),
+        ];
+
+        let source_pyproject = possible_pyproject_paths
+            .iter()
+            .find(|p| p.exists())
+            .ok_or_else(|| anyhow::anyhow!("Could not find engine_pyproject.toml. Searched: {:?}", possible_pyproject_paths))?;
+
+        println!("Found engine_pyproject.toml at: {:?}", source_pyproject);
+
+        // Copy to engine directory as pyproject.toml
+        let dest_pyproject = engine_dir.join("pyproject.toml");
+        std::fs::copy(source_pyproject, &dest_pyproject)
+            .context("Failed to copy engine_pyproject.toml to ~/.tether/engine")?;
+
+        // Get uv path
+        let uv_path = crate::python::check_uv_available()
+            .context("uv is required to create engine venv")?;
+
+        // Create venv if it doesn't exist
+        if !venv_path.exists() {
+            println!("Creating engine venv at {:?}", venv_path);
+            let output = Command::new(&uv_path)
+                .args(["venv", ".venv"])
+                .current_dir(&engine_dir)
+                .output()
+                .context("Failed to create engine venv")?;
+
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                anyhow::bail!("Failed to create engine venv: {}", stderr);
+            }
+            println!("Engine venv created successfully");
+        } else {
+            println!("Engine venv already exists at {:?}", venv_path);
+        }
+
+        // Always sync dependencies on startup
+        println!("Syncing engine dependencies...");
+        let output = Command::new(&uv_path)
+            .args(["sync"])
+            .current_dir(&engine_dir)
+            .output()
+            .context("Failed to sync engine dependencies")?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            println!("Sync stderr: {}", stderr);
+            println!("Sync stdout: {}", stdout);
+            anyhow::bail!("Failed to sync engine dependencies: {}", stderr);
+        }
+
+        println!("Engine dependencies synced successfully");
+
+        // Return the Python executable path
+        #[cfg(target_os = "windows")]
+        {
+            Ok(venv_path.join("Scripts").join("python.exe"))
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            Ok(venv_path.join("bin").join("python"))
+        }
+    }
+
     /// Start the engine server on the first available port
     pub async fn start() -> Result<Self> {
         // Clean up any orphaned processes first
         Self::cleanup_orphaned_processes()?;
+
+        // Create ~/.tether/logs directory if it doesn't exist
+        let home_dir = dirs::home_dir().context("Failed to get home directory")?;
+        let tether_logs_dir = home_dir.join(".tether").join("logs");
+        std::fs::create_dir_all(&tether_logs_dir)
+            .context("Failed to create ~/.tether/logs directory")?;
+
+        // Cleanup old log files before creating a new one
+        if let Err(e) = Self::cleanup_old_logs(&tether_logs_dir) {
+            eprintln!("Warning: Failed to cleanup old logs: {}", e);
+        }
+
+        // Create log file for engine server
+        let timestamp = chrono::Utc::now().format("%Y%m%d_%H%M%S");
+        let log_file_path = tether_logs_dir.join(format!("engine_server_{}.log", timestamp));
+        let log_file = std::fs::File::create(&log_file_path)
+            .context(format!("Failed to create log file: {:?}", log_file_path))?;
+
+        println!("Engine server logs will be written to: {:?}", log_file_path);
+        println!("Log retention: 7 days, max 10 files");
 
         // Find the engine_server.py script
         let cwd = std::env::current_dir()?;
@@ -254,42 +434,13 @@ impl EngineServer {
 
         println!("Found engine_server.py at: {:?}", engine_script);
 
-        // Find Tether's Python executable
-        let tether_python = {
-            // Try dev mode first - venv is in parent directory
-            let dev_venv = if cwd.ends_with("src-tauri") {
-                cwd.parent().map(|p| p.join(".venv"))
-            } else {
-                Some(cwd.join(".venv"))
-            };
+        // Ensure engine venv exists and is synced, get Python path
+        let tether_python = Self::ensure_engine_venv().await?;
 
-            if let Some(venv_path) = dev_venv {
-                if venv_path.exists() {
-                    #[cfg(target_os = "windows")]
-                    {
-                        venv_path.join("Scripts").join("python.exe")
-                    }
-                    #[cfg(not(target_os = "windows"))]
-                    {
-                        venv_path.join("bin").join("python")
-                    }
-                } else {
-                    // Production - TODO: bundle Python or use system Python
-                    which::which("python3")
-                        .or_else(|_| which::which("python"))
-                        .context("Python not found in venv or system")?
-                }
-            } else {
-                which::which("python3")
-                    .or_else(|_| which::which("python"))
-                    .context("Python not found")?
-            }
-        };
-
-        println!("Using Python: {:?}", tether_python);
+        println!("Using engine Python: {:?}", tether_python);
 
         if !tether_python.exists() {
-            anyhow::bail!("Python executable not found at {:?}", tether_python);
+            anyhow::bail!("Engine Python executable not found at {:?}", tether_python);
         }
 
         // Try each port until we find an available one
@@ -302,47 +453,63 @@ impl EngineServer {
 
             println!("Attempting to start engine server on port {}...", port);
 
-            // Start the FastAPI server
+            // Clone the log file handle for stdout and stderr
+            let stdout_file = log_file.try_clone()
+                .context("Failed to clone log file for stdout")?;
+            let stderr_file = log_file.try_clone()
+                .context("Failed to clone log file for stderr")?;
+
+            // Start the FastAPI server with logs redirected to file
             let process = Command::new(&tether_python)
                 .arg(engine_script)
                 .arg(port.to_string())
-                .stdout(Stdio::inherit())
-                .stderr(Stdio::inherit())
+                .stdout(Stdio::from(stdout_file))
+                .stderr(Stdio::from(stderr_file))
                 .spawn()
                 .context("Failed to start engine server")?;
 
             println!("Engine server started with PID: {} on port {}", process.id(), port);
+            println!("Logs: {:?}", log_file_path);
 
             // Poll for server readiness with exponential backoff
             let url = format!("http://127.0.0.1:{}/health", port);
-            let mut retry_delay = 100; // Start with 100ms
-            let max_retries = 15; // Total ~5 seconds (100+150+225+...≈5000ms)
+            let mut retry_delay = 200; // Start with 200ms (increased from 100ms)
+            let max_retries = 25; // Total ~15 seconds with exponential backoff (increased from 15)
 
             for attempt in 0..max_retries {
                 tokio::time::sleep(std::time::Duration::from_millis(retry_delay)).await;
 
-                match HTTP_CLIENT.get(&url).timeout(std::time::Duration::from_secs(2)).send().await {
+                match HTTP_CLIENT.get(&url).timeout(std::time::Duration::from_secs(3)).send().await {
                     Ok(response) if response.status().is_success() => {
-                        println!("Engine server is healthy on port {} (attempt {})", port, attempt + 1);
+                        println!("Engine server is healthy on port {} (attempt {}/{})", port, attempt + 1, max_retries);
                         return Ok(Self {
                             process: Some(process),
                             port,
                         });
                     }
                     Ok(response) => {
-                        last_error = Some(format!("Engine server returned status: {}", response.status()));
+                        let error_msg = format!("Engine server returned status: {}", response.status());
+                        println!("Attempt {}/{}: {}", attempt + 1, max_retries, error_msg);
+                        last_error = Some(error_msg);
                     }
-                    Err(e) if attempt == max_retries - 1 => {
-                        // Only log error on final attempt
-                        last_error = Some(format!("Engine server health check failed: {}", e));
-                    }
-                    _ => {
-                        // Continue retrying
+                    Err(e) => {
+                        let error_msg = format!("Engine server health check failed: {}", e);
+                        if attempt == max_retries - 1 {
+                            // Log error on final attempt
+                            println!("Final attempt {}/{} failed: {}", attempt + 1, max_retries, error_msg);
+                            println!("Check logs at: {:?}", log_file_path);
+                        } else if attempt % 5 == 0 {
+                            // Log every 5th attempt to show progress
+                            println!("Attempt {}/{}: Still waiting for engine server...", attempt + 1, max_retries);
+                        }
+                        last_error = Some(error_msg);
                     }
                 }
 
-                // Exponential backoff: increase delay by 50% each time
-                retry_delay = (retry_delay as f64 * 1.5) as u64;
+                // Exponential backoff: increase delay by 40% each time (slightly slower growth)
+                retry_delay = (retry_delay as f64 * 1.4) as u64;
+                // Cap the retry delay at 2 seconds
+                retry_delay = retry_delay.min(2000);
             }
 
             // If health check failed, kill the process and try next port

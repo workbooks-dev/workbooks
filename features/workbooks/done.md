@@ -12,8 +12,37 @@
 - [x] Markdown cell support
   - [x] Edit mode with plain text editor
   - [x] View mode with rendered markdown
-  - [x] Code syntax highlighting in markdown
+  - [x] Code syntax highlighting in markdown (via react-syntax-highlighter)
   - [x] Toggle between edit/view modes
+  - [x] Enhanced markdown rendering with plugins:
+    - [x] remark-gfm (GitHub Flavored Markdown) - tables, strikethrough, task lists
+    - [x] remark-math - mathematical expressions
+    - [x] rehype-katex - LaTeX math rendering
+    - [x] rehype-raw - HTML support in markdown
+  - [x] Rich markdown features:
+    - [x] Bold, italic, strikethrough text
+    - [x] Headers (h1-h6) with custom styling
+    - [x] Ordered and unordered lists
+    - [x] Task lists with checkboxes
+    - [x] Tables with custom styling and hover effects
+    - [x] Code blocks with syntax highlighting
+    - [x] Inline code with background styling
+    - [x] Blockquotes with left border styling
+    - [x] Links (external URLs open in new tab)
+    - [x] Math equations using LaTeX syntax ($...$ and $$...$$)
+  - [x] Image support:
+    - [x] Remote images from URLs (http/https)
+    - [x] Local images via relative paths (e.g., `./images/plot.png`)
+    - [x] Local images via absolute paths
+    - [x] Automatic conversion to Tauri asset protocol
+    - [x] Error handling with fallback image
+    - [x] Responsive image sizing with rounded corners
+  - [x] Link handling:
+    - [x] External links open in new tab with security attributes
+    - [x] Local file link detection (ready for future file viewer integration)
+    - [x] Custom styling for different link types
+  - [x] Custom CSS styling using Tailwind Typography (prose classes)
+  - [x] Full markdown persistence to .ipynb files
 
 ### Execution System
 

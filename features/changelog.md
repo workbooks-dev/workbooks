@@ -6,6 +6,72 @@ This file tracks major features and improvements as they're completed.
 
 ### December 2024
 
+**Files Section Enhancements (Dec 18, 2024)**
+- **Notebooks Folder Visibility**: Notebooks folder now appears in FILES section
+  - Allows direct access to notebooks from file tree
+  - .ipynb files shown when expanding notebooks folder
+  - Workbooks can be opened from any location, not just Workbooks section
+  - Simplifies file navigation and organization
+- **Folder Drag-and-Drop Support**: Complete folder upload capability
+  - Drag entire folders into Tether to copy them to project
+  - Recursive folder copying preserves all subdirectories and files
+  - Automatic detection of files vs directories using `stat()`
+  - Backend: New `copy_folder_recursively()` and `save_dropped_folder()` functions
+  - Frontend: Enhanced drop handler checks file type before processing
+  - Works seamlessly with existing file drop system
+- **Flexible Notebook Access**: Open notebooks from anywhere in file tree
+  - No longer limited to just the Workbooks section
+  - Can organize notebooks in custom folder structures
+  - Still auto-saves new notebooks to `/notebooks` by default
+- **Improved File Tree Filtering**:
+  - Removed overly aggressive .ipynb filtering
+  - Shows all files within folders including notebooks
+  - Better reflects actual project structure
+- Files: `src/components/Sidebar.jsx` (updated filtering), `src/App.jsx` (folder drop), `src-tauri/src/fs.rs` (recursive copy), `src-tauri/src/lib.rs` (new command)
+
+**Enhanced Markdown Rendering (Dec 18, 2024)**
+- **GitHub Flavored Markdown (GFM) Support**: Full remark-gfm plugin integration
+  - Tables with custom styling, sorting, and hover effects
+  - Strikethrough text support (~~text~~)
+  - Task lists with checkboxes (- [ ] and - [x])
+  - Autolinks for URLs and email addresses
+- **Mathematical Expressions**: LaTeX math rendering with KaTeX
+  - Inline math using $...$ syntax
+  - Display math using $$...$$ syntax
+  - Full KaTeX CSS integration for proper rendering
+- **Rich Text Formatting**: Enhanced typography and styling
+  - Bold, italic, and strikethrough text
+  - Headers (h1-h6) with custom bottom borders
+  - Code blocks with syntax highlighting (via react-syntax-highlighter)
+  - Inline code with gray background styling
+  - Blockquotes with left border accent
+  - Ordered and unordered lists with proper spacing
+- **Image Support**: Complete local and remote image handling
+  - Remote images from URLs (http/https)
+  - Local images via relative paths (e.g., `./images/plot.png`)
+  - Local images via absolute paths
+  - Automatic conversion to Tauri asset protocol for security
+  - Error handling with fallback "Image not found" message
+  - Responsive sizing with rounded corners and margins
+- **Link Handling**: Smart link routing and styling
+  - External links open in new tab with `rel="noopener noreferrer"`
+  - Local file links detected (ready for future integration)
+  - Custom styling for different link types
+  - Blue link color with hover effects
+- **Custom Styling**: Tailwind Typography integration
+  - Prose classes for clean, readable text
+  - Custom table borders and hover effects
+  - Proper spacing and typography hierarchy
+  - Responsive layout for all content types
+- **HTML Support**: Raw HTML rendering via rehype-raw plugin
+  - Allows embedded HTML in markdown cells
+  - Useful for custom layouts and widgets
+- **Dependencies Added**:
+  - remark-gfm, remark-math, rehype-katex, rehype-raw
+  - KaTeX CSS loaded via CDN in index.html
+- **Full Persistence**: All markdown content saves to .ipynb files and renders correctly on reload
+- Files: `src/components/WorkbookViewer.jsx` (enhanced), `index.html` (KaTeX CSS), `package.json` (new deps)
+
 **Workbook Execution Enhancements (Dec 18, 2024)**
 - **Execution Metadata Tracking**: Cell-level performance metrics
   - Last run timestamp stored in cell metadata

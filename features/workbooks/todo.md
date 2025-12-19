@@ -2,12 +2,7 @@
 
 
 ## High Priority
-
-- [ ] Markdown does not render or persist
-  - [ ] Do we need a robust markdown editor? we might
-  - [ ] We need basic markdown formatting within a markdown cell - bold, underline, italics, alignment, bullets/lists, link something
-  - [ ] We need to be able to link a file and render a link or preview (such as an image or video) inline assuming the file is either (a relative link on the system or b) a url
-
+- [ ] Moving cells has an issue. Moving a cell up or down does not update the ui display, the cell is techincally moving (verified by saving + reload the page) but the UI is broken and not showing the element actually move.
 
 ## Medium Priority
 

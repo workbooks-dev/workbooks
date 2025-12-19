@@ -53,9 +53,8 @@ function FileTreeItem({ file, level = 0, onFileClick, onFileAction, activeFilePa
           const fileList = await invoke("list_files", {
             directoryPath: file.path,
           });
-          // Filter out .ipynb files in Files section
-          const nonNotebookFiles = fileList.filter(f => f.extension !== "ipynb");
-          setChildren(nonNotebookFiles);
+          // Include all files, including .ipynb files in folders
+          setChildren(fileList);
         } catch (err) {
           console.error("Failed to load folder contents:", err);
         } finally {
@@ -181,8 +180,9 @@ export function Sidebar({ projectRoot, projectName, onOpenFile, onFileDeleted, a
       });
 
       // Separate workbooks from other files
-      const notebookFiles = fileList.filter(f => f.extension === "ipynb" || f.name === "notebooks");
-      const otherFiles = fileList.filter(f => f.extension !== "ipynb" && f.name !== "notebooks");
+      const notebookFiles = fileList.filter(f => f.extension === "ipynb" && f.name !== "notebooks");
+      // Include notebooks folder in FILES section, but exclude root-level .ipynb files
+      const otherFiles = fileList.filter(f => f.extension !== "ipynb");
 
       setFiles(otherFiles);
 

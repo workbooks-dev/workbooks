@@ -1,0 +1,11 @@
+[project]
+name = "tether-engine"
+version = "0.1.0"
+description = "Tether engine server dependencies"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.124.0",
+    "uvicorn>=0.38.0",
+    "jupyter-client>=8.6.0",
+    "requests>=2.32.5",
+]

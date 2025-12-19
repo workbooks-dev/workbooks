@@ -3,7 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { listen } from "@tauri-apps/api/event";
 import { ask } from "@tauri-apps/plugin-dialog";
-import { readFile } from "@tauri-apps/plugin-fs";
+import { readFile, stat } from "@tauri-apps/plugin-fs";
 import { Welcome } from "./components/Welcome";
 import { CreateProject } from "./components/CreateProject";
 import { Sidebar } from "./components/Sidebar";
@@ -11,6 +11,7 @@ import { WorkbookViewer } from "./components/WorkbookViewer";
 import { FileViewer } from "./components/FileViewer";
 import { SecretsManager } from "./components/SecretsManager";
 import { TabBar } from "./components/TabBar";
+import { SaveConfirmDialog } from "./components/SaveConfirmDialog";
 import "./App.css";
 
 function App() {
@@ -20,6 +21,8 @@ function App() {
   const [tabs, setTabs] = useState([]);
   const [activeTabId, setActiveTabId] = useState(null);
   const [isDragging, setIsDragging] = useState(false);
+  const [showSaveDialog, setShowSaveDialog] = useState(false);
+  const [pendingClose, setPendingClose] = useState(null); // 'window' or 'tab'
 
   useEffect(() => {
     // Check if project path is provided via URL parameter
@@ -120,25 +123,38 @@ function App() {
 
           for (const filePath of paths) {
             try {
-              // Extract filename from path
-              const fileName = filePath.split(/[/\\]/).pop();
-              console.log(`Reading file: ${fileName} from ${filePath}`);
+              // Check if it's a file or directory
+              const stats = await stat(filePath);
 
-              // Read file using Tauri's fs plugin
-              const fileContent = await readFile(filePath);
-              console.log(`Read ${fileContent.length} bytes`);
+              if (stats.isDirectory) {
+                // Handle folder drop
+                console.log(`Copying folder: ${filePath}`);
+                const result = await invoke("save_dropped_folder", {
+                  projectRoot: currentProject.root,
+                  folderPath: filePath,
+                });
+                console.log(`Successfully copied folder to: ${result}`);
+              } else {
+                // Handle file drop
+                const fileName = filePath.split(/[/\\]/).pop();
+                console.log(`Reading file: ${fileName} from ${filePath}`);
 
-              // Save the file using Tauri command
-              const result = await invoke("save_dropped_file", {
-                projectRoot: currentProject.root,
-                fileName: fileName,
-                fileContent: Array.from(fileContent),
-              });
+                // Read file using Tauri's fs plugin
+                const fileContent = await readFile(filePath);
+                console.log(`Read ${fileContent.length} bytes`);
 
-              console.log(`Successfully saved ${fileName} at: ${result}`);
+                // Save the file using Tauri command
+                const result = await invoke("save_dropped_file", {
+                  projectRoot: currentProject.root,
+                  fileName: fileName,
+                  fileContent: Array.from(fileContent),
+                });
+
+                console.log(`Successfully saved ${fileName} at: ${result}`);
+              }
             } catch (error) {
-              console.error(`Failed to save file:`, error);
-              alert(`Failed to save file: ${error}`);
+              console.error(`Failed to save item:`, error);
+              alert(`Failed to save item: ${error}`);
             }
           }
 
@@ -202,21 +218,9 @@ function App() {
         // Prevent the close
         event.preventDefault();
 
-        // Ask user what to do
-        const shouldClose = await ask(
-          "You have unsaved changes. Are you sure you want to close without saving?",
-          {
-            title: "Unsaved Changes",
-            kind: "warning",
-            okLabel: "Close Without Saving",
-            cancelLabel: "Cancel",
-          }
-        );
-
-        if (shouldClose) {
-          // User confirmed, close the window
-          await appWindow.destroy();
-        }
+        // Show custom save dialog
+        setPendingClose('window');
+        setShowSaveDialog(true);
       }
     });
 
@@ -238,28 +242,21 @@ function App() {
         // If there's an active tab, close it
         if (activeTabId) {
           const tabToClose = tabs.find((tab) => tab.id === activeTabId);
+          const isLastTab = tabs.length === 1;
 
           // Check if the tab has unsaved changes
           if (tabToClose?.hasUnsavedChanges) {
-            const shouldClose = await ask(
-              "You have unsaved changes. Close without saving?",
-              {
-                title: "Unsaved Changes",
-                kind: "warning",
-                okLabel: "Close",
-                cancelLabel: "Cancel",
-              }
-            );
-
-            if (!shouldClose) {
-              return;
-            }
+            // Show the save confirmation dialog
+            setPendingClose(isLastTab ? 'window' : 'tab');
+            setShowSaveDialog(true);
+            return;
           }
 
+          // No unsaved changes, just close
           handleTabClose(activeTabId);
 
           // If this was the last tab, close the window
-          if (tabs.length === 1) {
+          if (isLastTab) {
             const appWindow = getCurrentWindow();
             await appWindow.close();
           }
@@ -398,6 +395,50 @@ function App() {
     }
   }
 
+  // Handle save dialog actions
+  const handleSaveAndClose = async () => {
+    // Emit save event to all tabs with unsaved changes
+    window.dispatchEvent(new CustomEvent("tether:save-all"));
+
+    // Give tabs a moment to save (TODO: implement proper save confirmation)
+    await new Promise(resolve => setTimeout(resolve, 500));
+
+    setShowSaveDialog(false);
+
+    if (pendingClose === 'window') {
+      const appWindow = getCurrentWindow();
+      await appWindow.destroy();
+    } else if (pendingClose === 'tab') {
+      // Close the active tab
+      if (activeTabId) {
+        handleTabClose(activeTabId);
+      }
+    }
+
+    setPendingClose(null);
+  };
+
+  const handleDontSaveAndClose = async () => {
+    setShowSaveDialog(false);
+
+    if (pendingClose === 'window') {
+      const appWindow = getCurrentWindow();
+      await appWindow.destroy();
+    } else if (pendingClose === 'tab') {
+      // Close the active tab
+      if (activeTabId) {
+        handleTabClose(activeTabId);
+      }
+    }
+
+    setPendingClose(null);
+  };
+
+  const handleCancelClose = () => {
+    setShowSaveDialog(false);
+    setPendingClose(null);
+  };
+
 
   if (loading || view === "loading") {
     return (
@@ -496,6 +537,15 @@ function App() {
           </div>
         </main>
       </div>
+
+      {/* Save confirmation dialog */}
+      <SaveConfirmDialog
+        isOpen={showSaveDialog}
+        onSave={handleSaveAndClose}
+        onDontSave={handleDontSaveAndClose}
+        onCancel={handleCancelClose}
+        message="You have unsaved changes. Would you like to save before closing?"
+      />
     </div>
   );
 }
