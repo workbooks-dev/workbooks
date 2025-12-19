@@ -6,6 +6,16 @@ Project settings provide configuration and management for the entire Tether proj
 
 **See `/project-defaults.md` for default packages and project initialization.**
 
+## Global Configuration
+
+Tether maintains a **global config file** at `~/.tether/config.toml` that stores settings shared between the desktop app and CLI:
+- Default project
+- Recent projects list
+- App preferences (theme, etc.)
+- CLI preferences
+
+Both the app and CLI read/write this config, enabling seamless integration.
+
 ## Design Philosophy
 
 **One Place for Project Config:**
@@ -48,6 +58,14 @@ Project settings provide configuration and management for the entire Tether proj
 **Created Date:**
 - When project was initialized
 - Read-only
+
+**Default Project:**
+- "Set as Default Project" button
+- Marks this project as the default for CLI and app
+- Updates global config (`~/.tether/config.toml`)
+- Shows "✓ Default Project" badge if currently default
+- On app launch, default project auto-opens
+- CLI uses default if no `--project` flag or cwd detection
 
 #### 2. Python Environment
 
@@ -162,6 +180,27 @@ Project settings provide configuration and management for the entire Tether proj
 - Create project templates
 - Different defaults for different types of projects
 
+#### 5. CLI Integration
+
+**CLI Installation:**
+- "Install CLI" button (if not already installed)
+  - Copies `tether` binary to system PATH
+  - Shows installation progress and success
+  - Verifies accessibility
+- Shows CLI installation status (installed/not installed)
+- Installation path display
+
+**Claude Desktop Integration:**
+- "Add to Claude Desktop" button
+  - Automatically updates Claude Desktop config
+  - Adds MCP server entry for this project
+  - Shows success message with restart instructions
+- "Manage Claude Projects" button
+  - Lists all Tether projects in Claude config
+  - Enable/disable projects
+  - Remove other Tether projects
+  - Shows current project status
+
 ## Integration Points
 
 ### With Python Backend
@@ -174,6 +213,26 @@ Project settings provide configuration and management for the entire Tether proj
 - `uninstall_package(name)` - Remove package
 - `export_project(dest_path)` - Create ZIP
 - `get_venv_info()` - Venv path, size, Python version
+
+### With Global Config
+
+**Global Config Commands:**
+- `get_global_config()` - Read `~/.tether/config.toml`
+- `set_default_project(path)` - Set default project
+- `get_default_project()` - Get current default
+- `unset_default_project()` - Remove default
+- `add_recent_project(path)` - Add to recent list
+- `get_recent_projects()` - Get recent projects
+
+### With Claude Desktop
+
+**Claude Config Commands:**
+- `get_claude_config_path()` - Locate Claude config file
+- `add_to_claude_desktop(project_path, project_name)` - Add MCP entry
+- `list_claude_tether_projects()` - List all Tether MCP servers
+- `remove_from_claude_desktop(project_name)` - Remove MCP entry
+- `get_cli_installation_status()` - Check if CLI installed
+- `install_cli_to_path()` - Install CLI binary
 
 ### With uv
 

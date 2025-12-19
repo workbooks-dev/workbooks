@@ -21,6 +21,16 @@
 - [x] `sync_dependencies()` - Sync from pyproject.toml
 - [x] Centralized venv location (`~/.tether/venvs/`)
 
+## Design Updates
+
+- [x] Designed global configuration system (`~/.tether/config.toml`)
+- [x] Designed default project feature (shared with CLI)
+- [x] Designed CLI integration section for settings
+- [x] Designed Claude Desktop integration ("Add to Claude" button)
+- [x] Designed "Manage Claude Projects" feature
+- [x] Designed CLI installation UI and workflow
+- [x] Planned Tauri installer with opt-out CLI installation
+
 ## Notes
 
 **No settings UI built yet.** Gear icon exists but settings tab component needs to be created. See `todo.md` for implementation roadmap.

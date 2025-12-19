@@ -1,5 +1,41 @@
 # Project Settings - To Do
 
+## Global Configuration (Shared with CLI)
+
+### Backend - Global Config Management
+- [ ] Create global config system in `src/config.rs`
+  - [ ] `GlobalConfig` struct matching TOML structure
+  - [ ] `load_global_config()` - Read from `~/.tether/config.toml`
+  - [ ] `save_global_config()` - Write to `~/.tether/config.toml`
+  - [ ] Create `~/.tether/` directory if doesn't exist
+  - [ ] Handle malformed config gracefully
+- [ ] Implement Tauri commands for global config
+  - [ ] `get_global_config()` - Return entire config
+  - [ ] `set_default_project(path)` - Set default project
+  - [ ] `get_default_project()` - Get current default
+  - [ ] `unset_default_project()` - Remove default
+  - [ ] `add_recent_project(path)` - Add to recent list
+  - [ ] `get_recent_projects()` - Get up to 10 recent
+- [ ] Update recent projects on project open/switch
+  - [ ] Auto-add to recent list
+  - [ ] Maintain chronological order
+  - [ ] Limit to 10 entries
+
+### Frontend - Default Project UI
+- [ ] Add "Default Project" section to Project Info
+  - [ ] "Set as Default Project" button
+  - [ ] Shows "✓ Default Project" badge if current
+  - [ ] Confirm before changing default
+  - [ ] Show success notification
+- [ ] Update app launch behavior
+  - [ ] Check for default project on launch
+  - [ ] Auto-open default if set
+  - [ ] Show welcome screen if no default
+- [ ] Update Welcome screen
+  - [ ] Highlight default project in recent list
+  - [ ] Show badge/indicator for default
+  - [ ] Quick action to change default
+
 ## Settings Tab Component
 
 - [ ] Create ProjectSettings.jsx component
@@ -37,6 +73,63 @@
   - [ ] Export progress indicator
   - [ ] Success notification with path
   - [ ] Explanation of what's included/excluded
+
+- [ ] CLI Integration section
+  - [ ] CLI installation status display
+  - [ ] "Install CLI" button (if not installed)
+  - [ ] Installation progress/success notification
+  - [ ] Show CLI installation path
+  - [ ] Verify CLI is accessible from terminal
+  - [ ] Link to CLI documentation
+
+## Claude Desktop Integration
+
+### Backend - Claude Config Management
+- [ ] Implement Claude Desktop config detection
+  - [ ] `get_claude_config_path()` - Locate config file
+    - [ ] macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`
+    - [ ] Windows: `%APPDATA%\Claude\claude_desktop_config.json`
+    - [ ] Linux: `~/.config/Claude/claude_desktop_config.json`
+  - [ ] Handle missing config file (create if needed)
+  - [ ] Validate JSON structure before modifying
+- [ ] Implement Claude config modification commands
+  - [ ] `add_to_claude_desktop(project_path, project_name)` - Add MCP entry
+  - [ ] `list_claude_tether_projects()` - List all `tether-*` entries
+  - [ ] `remove_from_claude_desktop(project_name)` - Remove entry
+  - [ ] Backup config before modifying
+  - [ ] Validate changes after writing
+- [ ] Implement CLI installation commands
+  - [ ] `get_cli_installation_status()` - Check if `tether` in PATH
+  - [ ] `install_cli_to_path()` - Copy binary to system location
+    - [ ] macOS/Linux: `/usr/local/bin/tether`
+    - [ ] Windows: `%LOCALAPPDATA%\Programs\Tether\bin\`
+  - [ ] Set executable permissions (Unix)
+  - [ ] Verify installation succeeded
+
+### Frontend - Claude Desktop UI
+- [ ] Add "Claude Desktop" section to settings
+  - [ ] "Add to Claude Desktop" button
+    - [ ] Check if `tether` CLI is installed first
+    - [ ] Warn if CLI not installed, offer to install
+    - [ ] Call `add_to_claude_desktop` command
+    - [ ] Show success message with restart instructions
+    - [ ] Display MCP server entry name
+  - [ ] "Manage Claude Projects" button/dialog
+    - [ ] Opens modal/dialog with project list
+    - [ ] Shows all Tether MCP entries
+    - [ ] Checkboxes to enable/disable
+    - [ ] "Remove all other Tether projects" button
+    - [ ] Confirm before removing projects
+    - [ ] Update config on save
+  - [ ] Show current Claude integration status
+    - [ ] "✓ Added to Claude Desktop" if configured
+    - [ ] Show MCP server name
+    - [ ] "Not configured" if missing
+- [ ] Add CLI installation UI
+  - [ ] Show installation status (installed/not installed)
+  - [ ] "Install CLI" button with progress indicator
+  - [ ] Success notification with path
+  - [ ] Link to test CLI with example command
 
 ## Backend (Rust)
 
@@ -86,6 +179,23 @@
   - [ ] Read from project-defaults.md or config
   - [ ] Install on project creation
   - [ ] Allow customization (future)
+
+## App Installation
+
+### Tauri Installer Configuration
+- [ ] Add post-install script for CLI installation
+  - [ ] Prompt user: "Install tether CLI to system PATH?"
+  - [ ] Checkbox: "☑ Install CLI" (checked by default, opt-out)
+  - [ ] Run `install_cli_to_path()` if accepted
+  - [ ] Show installation success/failure
+  - [ ] Test CLI accessibility before finishing
+- [ ] Bundle CLI binary with app installer
+  - [ ] Include `tether` binary in app bundle
+  - [ ] Platform-specific bundling (macOS .app, Windows installer, Linux AppImage)
+- [ ] Test installation on all platforms
+  - [ ] macOS installer with CLI option
+  - [ ] Windows installer with CLI option
+  - [ ] Linux installer with CLI option
 
 ## Import/Import
 
