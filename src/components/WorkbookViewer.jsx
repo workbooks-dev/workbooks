@@ -292,16 +292,16 @@ function WorkbookCell({ cell, index, workbookPath, onUpdate, onDelete, onExecute
 
     return (
       <div
-        className={`relative mb-4 pl-3 border-l-2 transition-all ${
-          isSelected ? 'bg-gray-50/30 border-l-blue-500' : 'border-l-transparent'
+        className={`${STYLES.cell.codeContainer} ${
+          isSelected ? STYLES.cell.codeSelected : STYLES.cell.codeUnselected
         }`}
         onClick={() => onSelect(index)}
       >
         {isSelected && (
-          <div className="absolute -top-2 right-0 flex gap-1 z-10">
+          <div className={STYLES.button.actionBarCode}>
             <button
               onClick={(e) => { e.stopPropagation(); handleExecute(); }}
-              className="px-2 py-1 text-xs bg-white hover:bg-gray-100 border border-gray-300 rounded shadow-sm transition-colors"
+              className={STYLES.button.action}
               title="Run cell"
             >
               ▶
@@ -309,7 +309,7 @@ function WorkbookCell({ cell, index, workbookPath, onUpdate, onDelete, onExecute
             {hasOutput && (
               <button
                 onClick={(e) => { e.stopPropagation(); onClearOutput(index); }}
-                className="px-2 py-1 text-xs bg-white hover:bg-gray-100 border border-gray-300 rounded shadow-sm transition-colors"
+                className={STYLES.button.action}
                 title="Clear output"
               >
                 🗙
@@ -317,50 +317,50 @@ function WorkbookCell({ cell, index, workbookPath, onUpdate, onDelete, onExecute
             )}
             <button
               onClick={(e) => { e.stopPropagation(); onMoveUp(index); }}
-              className="px-2 py-1 text-xs bg-white hover:bg-gray-100 border border-gray-300 rounded shadow-sm transition-colors"
+              className={STYLES.button.action}
               title="Move up"
             >
               ↑
             </button>
             <button
               onClick={(e) => { e.stopPropagation(); onMoveDown(index); }}
-              className="px-2 py-1 text-xs bg-white hover:bg-gray-100 border border-gray-300 rounded shadow-sm transition-colors"
+              className={STYLES.button.action}
               title="Move down"
             >
               ↓
             </button>
             <button
               onClick={(e) => { e.stopPropagation(); onDelete(index); }}
-              className="px-2 py-1 text-xs bg-white hover:bg-gray-100 border border-gray-300 rounded shadow-sm transition-colors"
+              className={STYLES.button.action}
               title="Delete"
             >
               🗑
             </button>
           </div>
         )}
-        <div className="flex gap-2">
-          <div className={`font-mono text-xs min-w-[20px] pt-2 pr-1 text-right flex-shrink-0 ${
-            hasError ? 'text-red-600 font-semibold' :
-            isRunning ? 'text-blue-600 font-semibold' : 'text-gray-500'
+        <div className={STYLES.execution.container}>
+          <div className={`${STYLES.execution.countContainer} ${
+            hasError ? STYLES.execution.countError :
+            isRunning ? STYLES.execution.countRunning : STYLES.execution.countNormal
           }`}>
-            <div className="font-medium">
-              {hasError && <span className="text-red-600 mr-0.5" title="Cell execution failed">✗</span>}
+            <div className={STYLES.execution.countText}>
+              {hasError && <span className={STYLES.execution.errorIndicator} title="Cell execution failed">✗</span>}
               [{cell.execution_count || " "}]
             </div>
             {isRunning && executionElapsed > 0 && (
-              <div className="text-[10px] text-blue-600 font-medium mt-0.5" title="Execution time">
+              <div className={STYLES.execution.timer} title="Execution time">
                 {(executionElapsed / 1000).toFixed(1)}s
               </div>
             )}
             {!isRunning && cell.metadata?.tether?.duration_ms && (
-              <div className="text-[10px] text-gray-500 mt-0.5" title={`Last run: ${cell.metadata.tether.last_run ? new Date(cell.metadata.tether.last_run).toLocaleString() : 'Unknown'}`}>
+              <div className={STYLES.execution.metadata} title={`Last run: ${cell.metadata.tether.last_run ? new Date(cell.metadata.tether.last_run).toLocaleString() : 'Unknown'}`}>
                 {(cell.metadata.tether.duration_ms / 1000).toFixed(2)}s
               </div>
             )}
           </div>
-          <div className="flex-1 flex flex-col min-w-0">
-            <div className={`cell-input rounded-lg bg-white border transition-all px-2 ${
-              isSelected ? 'border-blue-400 shadow-sm' : 'border-gray-300'
+          <div className={STYLES.editor.container}>
+            <div className={`${STYLES.editor.input} ${
+              isSelected ? STYLES.editor.inputSelected : STYLES.editor.inputUnselected
             }`}>
             <Editor
               height={`${Math.max(60, content.split("\n").length * 19 + 24)}px`}
@@ -494,7 +494,7 @@ function WorkbookCell({ cell, index, workbookPath, onUpdate, onDelete, onExecute
             />
             </div>
             {hasOutput && (
-              <div className="mt-2">
+              <div className={STYLES.output.container}>
                 {outputs.map((output, idx) => (
                   <CellOutput key={idx} output={output} />
                 ))}
@@ -523,9 +523,9 @@ function CellOutput({ output }) {
   // If output contains secrets, show redacted message
   if (containsSecrets) {
     return (
-      <div className="cell-output-content p-3 bg-yellow-50 border-t border-yellow-200">
-        <div className="flex items-center gap-2 text-yellow-800 text-sm font-medium">
-          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+      <div className={STYLES.output.secretsWarning}>
+        <div className={STYLES.output.secretsText}>
+          <svg className={STYLES.output.secretsIcon} fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
           </svg>
           <span>[secret hidden here]</span>
@@ -563,20 +563,20 @@ function CellOutput({ output }) {
       : truncateText(cleanText, MAX_LINES);
 
     return (
-      <div className={`${isStderr ? 'rounded-lg border border-red-200 bg-red-50/30' : 'bg-gray-50'}`}>
-        <div className="p-2 max-h-[300px] overflow-auto">
+      <div className={isStderr ? STYLES.output.streamContainer : STYLES.output.streamNormal}>
+        <div className={STYLES.output.streamContent}>
           {isTruncatedByBackend && (
-            <div className="px-2 py-1 mb-2 bg-amber-50 border border-amber-200 rounded text-amber-800 text-xs">
+            <div className={STYLES.output.truncateWarning}>
               ⚠ Output truncated
             </div>
           )}
-          <pre className={`m-0 whitespace-pre-wrap break-words font-mono text-xs ${
-            isStderr ? 'text-red-700' : 'text-gray-900'
+          <pre className={`${STYLES.output.streamPre} ${
+            isStderr ? STYLES.output.streamStderr : STYLES.output.streamStdout
           }`}>{displayText}</pre>
         </div>
         {truncated && (
           <button
-            className="block mx-2 mb-2 px-2 py-1 text-xs font-medium bg-white hover:bg-gray-50 border border-gray-300 rounded text-blue-600 transition-colors"
+            className={STYLES.output.expandButton}
             onClick={() => setExpanded(!expanded)}
           >
             Show more ({totalLines - MAX_LINES} more lines)
@@ -584,7 +584,7 @@ function CellOutput({ output }) {
         )}
         {expanded && (
           <button
-            className="block mx-2 mb-2 px-2 py-1 text-xs font-medium bg-white hover:bg-gray-50 border border-gray-300 rounded text-blue-600 transition-colors"
+            className={STYLES.output.expandButton}
             onClick={() => setExpanded(false)}
           >
             Show less
@@ -602,11 +602,11 @@ function CellOutput({ output }) {
     // Images (PNG)
     if (data["image/png"]) {
       return (
-        <div className="py-3">
+        <div className={STYLES.output.imageContainer}>
           <img
             src={`data:image/png;base64,${data["image/png"]}`}
             alt="Output"
-            className="max-w-full h-auto rounded-lg"
+            className={STYLES.output.image}
           />
         </div>
       );
@@ -615,11 +615,11 @@ function CellOutput({ output }) {
     // Images (JPEG)
     if (data["image/jpeg"]) {
       return (
-        <div className="py-3">
+        <div className={STYLES.output.imageContainer}>
           <img
             src={`data:image/jpeg;base64,${data["image/jpeg"]}`}
             alt="Output"
-            className="max-w-full h-auto rounded-lg"
+            className={STYLES.output.image}
           />
         </div>
       );
@@ -631,7 +631,7 @@ function CellOutput({ output }) {
         ? data["image/svg+xml"].join("")
         : data["image/svg+xml"];
       return (
-        <div className="py-3">
+        <div className={STYLES.output.svgContainer}>
           {/* Note: SVG content is rendered directly. For untrusted notebooks, consider sandboxing. */}
           <div dangerouslySetInnerHTML={{ __html: svgContent }} />
         </div>
@@ -644,8 +644,8 @@ function CellOutput({ output }) {
         ? data["text/html"].join("")
         : data["text/html"];
       return (
-        <div className="rounded-lg bg-gray-50 overflow-hidden">
-          <div className="dataframe-output">
+        <div className={STYLES.output.dataframeWrapper}>
+          <div className={STYLES.output.dataframe}>
             {/* Note: HTML rendering uses dangerouslySetInnerHTML.
                 For untrusted notebooks, consider implementing a trust model or HTML sanitization. */}
             <div dangerouslySetInnerHTML={{ __html: htmlContent }} />
@@ -665,18 +665,18 @@ function CellOutput({ output }) {
         : truncateText(cleanText, MAX_LINES);
 
       return (
-        <div className="bg-gray-50">
-          <div className="p-2 max-h-[300px] overflow-auto">
+        <div className={STYLES.output.plainWrapper}>
+          <div className={STYLES.output.plainContent}>
             {isTruncatedByBackend && (
-              <div className="px-2 py-1 mb-2 bg-amber-50 border border-amber-200 rounded text-amber-800 text-xs">
+              <div className={STYLES.output.truncateWarning}>
                 ⚠ Output truncated
               </div>
             )}
-            <pre className="m-0 whitespace-pre-wrap break-words font-mono text-xs text-gray-900">{displayText}</pre>
+            <pre className={STYLES.output.plainPre}>{displayText}</pre>
           </div>
           {truncated && (
             <button
-              className="block mx-2 mb-2 px-2 py-1 text-xs font-medium bg-white hover:bg-gray-50 border border-gray-300 rounded text-blue-600 transition-colors"
+              className={STYLES.output.expandButton}
               onClick={() => setExpanded(!expanded)}
             >
               Show more ({totalLines - MAX_LINES} more lines)
@@ -684,7 +684,7 @@ function CellOutput({ output }) {
           )}
           {expanded && (
             <button
-              className="block mx-2 mb-2 px-2 py-1 text-xs font-medium bg-white hover:bg-gray-50 border border-gray-300 rounded text-blue-600 transition-colors"
+              className={STYLES.output.expandButton}
               onClick={() => setExpanded(false)}
             >
               Show less
@@ -696,8 +696,8 @@ function CellOutput({ output }) {
 
     // If no recognized mime type, show raw data
     return (
-      <div className="rounded-lg bg-gray-50 px-5 py-3">
-        <pre className="m-0 whitespace-pre-wrap break-words font-mono text-xs text-gray-900">{JSON.stringify(data, null, 2)}</pre>
+      <div className={STYLES.output.rawData}>
+        <pre className={STYLES.output.plainPre}>{JSON.stringify(data, null, 2)}</pre>
       </div>
     );
   }
@@ -710,18 +710,18 @@ function CellOutput({ output }) {
       : truncateText(cleanText, MAX_LINES);
 
     return (
-      <div className="rounded-lg border border-red-200 bg-red-50/30">
-        <div className="p-2 max-h-[300px] overflow-auto">
+      <div className={STYLES.output.errorContainer}>
+        <div className={STYLES.output.errorContent}>
           {isTruncatedByBackend && (
-            <div className="px-2 py-1 mb-2 bg-amber-50 border border-amber-200 rounded text-amber-800 text-xs">
+            <div className={STYLES.output.truncateWarning}>
               ⚠ Output truncated
             </div>
           )}
-          <pre className="m-0 whitespace-pre-wrap break-words font-mono text-xs text-red-700">{displayText}</pre>
+          <pre className={STYLES.output.errorPre}>{displayText}</pre>
         </div>
         {truncated && (
           <button
-            className="block mx-2 mb-2 px-2 py-1 text-xs font-medium bg-white hover:bg-gray-50 border border-gray-300 rounded text-blue-600 transition-colors"
+            className={STYLES.output.expandButton}
             onClick={() => setExpanded(!expanded)}
           >
             Show more ({totalLines - MAX_LINES} more lines)
@@ -729,7 +729,7 @@ function CellOutput({ output }) {
         )}
         {expanded && (
           <button
-            className="block mx-2 mb-2 px-2 py-1 text-xs font-medium bg-white hover:bg-gray-50 border border-gray-300 rounded text-blue-600 transition-colors"
+            className={STYLES.output.expandButton}
             onClick={() => setExpanded(false)}
           >
             Show less
@@ -888,25 +888,39 @@ export function WorkbookViewer({ workbookPath, projectRoot, autosaveEnabled = tr
   const startEngine = async () => {
     // Prevent multiple simultaneous starts
     if (engineStartedRef.current) {
+      console.log("Engine already started, skipping");
       return;
     }
 
     try {
+      console.log("Starting engine for workbook:", workbookPath);
+      console.log("Project root:", projectRoot);
       setEngineStatus('starting');
+      setError(null);
 
-      await invoke("start_engine", {
+      // Add timeout to prevent infinite hanging
+      const timeoutPromise = new Promise((_, reject) =>
+        setTimeout(() => reject(new Error("Engine startup timed out after 30 seconds")), 30000)
+      );
+
+      const startPromise = invoke("start_engine", {
         workbookPath: workbookPath,
         projectPath: projectRoot,
         engineName: null,  // Auto-detect
       });
 
+      await Promise.race([startPromise, timeoutPromise]);
+
+      console.log("Engine started successfully");
       engineStartedRef.current = true;
       setEngineReady(true);
       setEngineStatus('idle');
 
     } catch (err) {
       console.error("Failed to start engine:", err);
+      const errorMsg = typeof err === 'string' ? err : err.message || "Unknown error";
       setEngineStatus('error');
+      setError(`Failed to start engine: ${errorMsg}. Check console for details.`);
       engineStartedRef.current = false;
       setEngineReady(false);
     }
@@ -1657,30 +1671,30 @@ export function WorkbookViewer({ workbookPath, projectRoot, autosaveEnabled = tr
   const isEngineReady = engineStatus === 'idle' || engineStatus === 'busy';
 
   return (
-    <div className="flex flex-col h-full bg-gray-50">
-      <div className="px-6 py-4 border-b border-gray-200 bg-white">
-        <div className="flex items-start justify-between gap-4 mb-3">
-          <h2 className="text-base font-semibold text-gray-900 flex items-center gap-2">
+    <div className={STYLES.viewer.container}>
+      <div className={STYLES.viewer.header}>
+        <div className={STYLES.viewer.headerTop}>
+          <h2 className={STYLES.viewer.title}>
             {getWorkbookName()}
-            {hasUnsavedChanges && <span className="text-amber-500 text-lg">•</span>}
+            {hasUnsavedChanges && <span className={STYLES.viewer.unsavedDot}>•</span>}
           </h2>
-          <div className="flex items-center gap-2">
-            <span className={`text-xs px-2 py-1 rounded-md font-medium ${
-              engineStatus === 'starting' ? 'bg-amber-50 text-amber-700' :
-              engineStatus === 'idle' ? 'bg-emerald-50 text-emerald-700' :
-              engineStatus === 'busy' ? 'bg-blue-50 text-blue-700 animate-pulse-subtle' :
-              engineStatus === 'restarting' ? 'bg-amber-50 text-amber-700' :
-              'bg-red-50 text-red-700'
+          <div className={STYLES.viewer.headerControls}>
+            <span className={`${STYLES.viewer.statusBadge} ${
+              engineStatus === 'starting' ? STYLES.viewer.statusStarting :
+              engineStatus === 'idle' ? STYLES.viewer.statusIdle :
+              engineStatus === 'busy' ? STYLES.viewer.statusBusy :
+              engineStatus === 'restarting' ? STYLES.viewer.statusRestarting :
+              STYLES.viewer.statusError
             }`} title={getEngineStatusText()}>
               {getEngineStatusText()}
             </span>
             {hasUnsavedChanges && (
               <button
                 onClick={() => saveWorkbook()}
-                className={`px-3 py-1.5 text-sm font-medium text-white rounded-md transition-colors shadow-sm ${
+                className={`${STYLES.viewer.saveButton} ${
                   hasSecretsInOutputs
-                    ? 'bg-amber-600 hover:bg-amber-700'
-                    : 'bg-blue-600 hover:bg-blue-700'
+                    ? STYLES.viewer.saveWarning
+                    : STYLES.viewer.saveNormal
                 }`}
                 title={hasSecretsInOutputs ? "Secrets detected in outputs - click to review" : "Save notebook"}
               >
@@ -1689,16 +1703,16 @@ export function WorkbookViewer({ workbookPath, projectRoot, autosaveEnabled = tr
             )}
           </div>
         </div>
-        <div className="flex items-center gap-3 flex-wrap">
-          <span className="text-xs px-2 py-1 bg-gray-100 text-gray-600 rounded-md font-mono">Shift+Enter to run</span>
-          <div className="flex-1" />
+        <div className={STYLES.viewer.toolbar}>
+          <span className={STYLES.viewer.hint}>Shift+Enter to run</span>
+          <div className={STYLES.viewer.spacer} />
 
           {/* Execution controls group */}
-          <div className="flex items-center gap-2">
+          <div className={STYLES.viewer.buttonGroup}>
             {engineStatus === 'error' && (
               <button
                 onClick={startEngine}
-                className="px-3 py-1.5 text-xs font-medium text-white bg-blue-600 hover:bg-blue-700 rounded-md transition-colors shadow-sm"
+                className={STYLES.viewer.buttonPrimary}
                 title="Retry connecting to engine"
               >
                 🔌 Reconnect
@@ -1707,7 +1721,7 @@ export function WorkbookViewer({ workbookPath, projectRoot, autosaveEnabled = tr
             <button
               onClick={runAllCells}
               disabled={isRunningAll || !isEngineReady}
-              className="px-3 py-1.5 text-xs font-medium text-gray-700 bg-white hover:bg-gray-50 border border-gray-300 rounded-md transition-all disabled:opacity-50 disabled:cursor-not-allowed shadow-sm"
+              className={STYLES.viewer.button}
               title="Run all cells"
             >
               {isRunningAll ? "⏳ Running..." : "▶ Run All"}
@@ -1715,20 +1729,20 @@ export function WorkbookViewer({ workbookPath, projectRoot, autosaveEnabled = tr
             <button
               onClick={interruptExecution}
               disabled={engineStatus !== 'busy'}
-              className="px-3 py-1.5 text-xs font-medium text-gray-700 bg-white hover:bg-gray-50 border border-gray-300 rounded-md transition-all disabled:opacity-50 disabled:cursor-not-allowed shadow-sm"
+              className={STYLES.viewer.button}
               title="Interrupt execution"
             >
               ⏹ Interrupt
             </button>
           </div>
 
-          <div className="w-px h-5 bg-gray-300"></div>
+          <div className={STYLES.viewer.separator}></div>
 
           {/* Kernel controls group */}
-          <div className="flex items-center gap-2">
+          <div className={STYLES.viewer.buttonGroup}>
             <button
               onClick={clearAllOutputs}
-              className="px-3 py-1.5 text-xs font-medium text-gray-700 bg-white hover:bg-gray-50 border border-gray-300 rounded-md transition-all shadow-sm"
+              className={STYLES.viewer.button}
               title="Clear all outputs"
             >
               🗙 Clear
@@ -1736,27 +1750,27 @@ export function WorkbookViewer({ workbookPath, projectRoot, autosaveEnabled = tr
             <button
               onClick={restartEngine}
               disabled={!isEngineReady}
-              className="px-3 py-1.5 text-xs font-medium text-gray-700 bg-white hover:bg-gray-50 border border-gray-300 rounded-md transition-all disabled:opacity-50 disabled:cursor-not-allowed shadow-sm"
+              className={STYLES.viewer.button}
               title="Restart kernel"
             >
               🔄 Restart
             </button>
           </div>
 
-          <div className="w-px h-5 bg-gray-300"></div>
+          <div className={STYLES.viewer.separator}></div>
 
           {/* Add cell controls group */}
-          <div className="flex items-center gap-2">
+          <div className={STYLES.viewer.buttonGroup}>
             <button
               onClick={() => addCell("markdown")}
-              className="px-3 py-1.5 text-xs font-medium text-gray-700 bg-white hover:bg-gray-50 border border-gray-300 rounded-md transition-all shadow-sm"
+              className={STYLES.viewer.button}
               title="Add markdown cell"
             >
               + Markdown
             </button>
             <button
               onClick={() => addCell("code")}
-              className="px-3 py-1.5 text-xs font-medium text-gray-700 bg-white hover:bg-gray-50 border border-gray-300 rounded-md transition-all shadow-sm"
+              className={STYLES.viewer.button}
               title="Add code cell"
             >
               + Code
@@ -1765,13 +1779,13 @@ export function WorkbookViewer({ workbookPath, projectRoot, autosaveEnabled = tr
         </div>
       </div>
 
-      <div className="flex-1 overflow-y-auto px-4 py-4 custom-scrollbar">
+      <div className={STYLES.viewer.content}>
         {error && (
-          <div className="bg-red-50 border border-red-200 rounded-lg px-4 py-3 mb-4 flex items-center justify-between text-red-800 text-sm">
+          <div className={STYLES.viewer.error}>
             <span>{error}</span>
             <button
               onClick={() => setError(null)}
-              className="text-red-600 hover:bg-red-100 rounded px-2 py-1 transition-colors text-lg font-bold"
+              className={STYLES.viewer.errorClose}
               title="Dismiss error"
             >
               ×
@@ -1779,7 +1793,7 @@ export function WorkbookViewer({ workbookPath, projectRoot, autosaveEnabled = tr
           </div>
         )}
         {notebook.cells.length === 0 && (
-          <div className="text-center py-16 text-gray-400">
+          <div className={STYLES.viewer.emptyState}>
             <p>Empty notebook. Add a cell to get started.</p>
           </div>
         )}

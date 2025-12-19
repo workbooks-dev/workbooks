@@ -37,10 +37,13 @@ function App() {
 
   // Listen for menu events from native menu
   useEffect(() => {
-    let unlisten;
+    let unlistenNewWindow;
+    let unlistenShowLogs;
+    let unlistenOpenLogsFolder;
 
-    const setupMenuListener = async () => {
-      unlisten = await listen("menu:open-new-window", async () => {
+    const setupMenuListeners = async () => {
+      // Open new window
+      unlistenNewWindow = await listen("menu:open-new-window", async () => {
         try {
           const { open } = await import("@tauri-apps/plugin-dialog");
           const folderPath = await open({
@@ -56,12 +59,38 @@ function App() {
           console.error("Failed to open project in new window:", error);
         }
       });
+
+      // Show logs in console
+      unlistenShowLogs = await listen("menu:show-logs", async () => {
+        try {
+          const logs = await invoke("get_recent_logs", { lines: 1000 });
+          console.log("=== TETHER RUNTIME LOGS ===");
+          console.log(logs);
+          console.log("=== END LOGS ===");
+          alert("Logs have been written to the browser console. Open Developer Tools (Cmd+Option+I) to view them.");
+        } catch (error) {
+          console.error("Failed to get logs:", error);
+          alert(`Failed to get logs: ${error}`);
+        }
+      });
+
+      // Open logs folder
+      unlistenOpenLogsFolder = await listen("menu:open-logs-folder", async () => {
+        try {
+          await invoke("open_logs_folder");
+        } catch (error) {
+          console.error("Failed to open logs folder:", error);
+          alert(`Failed to open logs folder: ${error}`);
+        }
+      });
     };
 
-    setupMenuListener();
+    setupMenuListeners();
 
     return () => {
-      if (unlisten) unlisten();
+      if (unlistenNewWindow) unlistenNewWindow();
+      if (unlistenShowLogs) unlistenShowLogs();
+      if (unlistenOpenLogsFolder) unlistenOpenLogsFolder();
     };
   }, []);
 

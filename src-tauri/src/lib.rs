@@ -888,6 +888,87 @@ async fn test_secrets_loading(
 }
 
 #[tauri::command]
+async fn get_logs_directory() -> Result<String, String> {
+    let logs_dir = dirs::home_dir()
+        .ok_or("Failed to get home directory")?
+        .join(".tether")
+        .join("logs");
+
+    // Ensure the logs directory exists
+    std::fs::create_dir_all(&logs_dir)
+        .map_err(|e| format!("Failed to create logs directory: {}", e))?;
+
+    Ok(logs_dir.to_string_lossy().to_string())
+}
+
+#[tauri::command]
+async fn open_logs_folder() -> Result<(), String> {
+    let logs_dir = dirs::home_dir()
+        .ok_or("Failed to get home directory")?
+        .join(".tether")
+        .join("logs");
+
+    // Ensure the logs directory exists
+    std::fs::create_dir_all(&logs_dir)
+        .map_err(|e| format!("Failed to create logs directory: {}", e))?;
+
+    // Open the directory in the system file manager
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .arg(&logs_dir)
+            .spawn()
+            .map_err(|e| format!("Failed to open logs folder: {}", e))?;
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("explorer")
+            .arg(&logs_dir)
+            .spawn()
+            .map_err(|e| format!("Failed to open logs folder: {}", e))?;
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        std::process::Command::new("xdg-open")
+            .arg(&logs_dir)
+            .spawn()
+            .map_err(|e| format!("Failed to open logs folder: {}", e))?;
+    }
+
+    Ok(())
+}
+
+#[tauri::command]
+async fn get_recent_logs(lines: Option<usize>) -> Result<String, String> {
+    let logs_dir = dirs::home_dir()
+        .ok_or("Failed to get home directory")?
+        .join(".tether")
+        .join("logs");
+
+    // For now, we'll return stdout/stderr from the engine server
+    // In the future, we could implement proper file-based logging
+    let log_file = logs_dir.join("tether.log");
+
+    if !log_file.exists() {
+        return Ok("No logs available yet. Logs will appear here once the app starts generating them.".to_string());
+    }
+
+    let content = std::fs::read_to_string(&log_file)
+        .map_err(|e| format!("Failed to read log file: {}", e))?;
+
+    // Return last N lines if specified
+    if let Some(n) = lines {
+        let all_lines: Vec<&str> = content.lines().collect();
+        let start = if all_lines.len() > n { all_lines.len() - n } else { 0 };
+        Ok(all_lines[start..].join("\n"))
+    } else {
+        Ok(content)
+    }
+}
+
+#[tauri::command]
 async fn open_project_window(
     app: tauri::AppHandle,
     project_path: String,
@@ -937,12 +1018,20 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
-        // .plugin(tauri_plugin_window_state::Builder::default().build())  // Temporarily disabled - may cause startup hangs
+        // NOTE: window-state plugin disabled - causes startup hangs on first launch
+        // .plugin(tauri_plugin_window_state::Builder::default().build())
         .plugin(tauri_plugin_fs::init())
         .setup(|app| {
-            // Create custom menu item
+            // Create custom menu items
             let open_new_window = MenuItemBuilder::with_id("open_new_window", "Open Project in New Window...")
                 .accelerator("Cmd+Shift+O")
+                .build(app)?;
+
+            let show_logs = MenuItemBuilder::with_id("show_logs", "Show Runtime Logs")
+                .accelerator("Cmd+Shift+L")
+                .build(app)?;
+
+            let open_logs_folder = MenuItemBuilder::with_id("open_logs_folder", "Open Logs Folder")
                 .build(app)?;
 
             // Build File menu with custom item
@@ -964,8 +1053,10 @@ pub fn run() {
                 .select_all()
                 .build()?;
 
-            // Build View menu
+            // Build View menu with logs
             let view_menu = SubmenuBuilder::new(app, "View")
+                .item(&show_logs)
+                .item(&open_logs_folder)
                 .build()?;
 
             // Build Window menu
@@ -987,11 +1078,23 @@ pub fn run() {
 
             // Handle menu events
             app.on_menu_event(move |app_handle, event| {
-                if event.id() == "open_new_window" {
-                    // Emit event to trigger frontend to handle the dialog
-                    if let Err(e) = app_handle.emit("menu:open-new-window", ()) {
-                        eprintln!("Failed to emit menu event: {}", e);
+                match event.id().as_ref() {
+                    "open_new_window" => {
+                        if let Err(e) = app_handle.emit("menu:open-new-window", ()) {
+                            eprintln!("Failed to emit menu event: {}", e);
+                        }
                     }
+                    "show_logs" => {
+                        if let Err(e) = app_handle.emit("menu:show-logs", ()) {
+                            eprintln!("Failed to emit menu event: {}", e);
+                        }
+                    }
+                    "open_logs_folder" => {
+                        if let Err(e) = app_handle.emit("menu:open-logs-folder", ()) {
+                            eprintln!("Failed to emit menu event: {}", e);
+                        }
+                    }
+                    _ => {}
                 }
             });
 
@@ -1053,6 +1156,9 @@ pub fn run() {
             lock_secrets_session,
             test_secrets_loading,
             open_project_window,
+            get_logs_directory,
+            open_logs_folder,
+            get_recent_logs,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

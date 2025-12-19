@@ -14,8 +14,8 @@
       {
         "label": "main",
         "title": "tether",
-        "width": 600,
-        "height": 600,
+        "width": 1920,
+        "height": 1080,
         "dragDropEnabled": true
       }
     ],
