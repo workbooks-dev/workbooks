@@ -10,7 +10,8 @@
     "app": "tauri dev",
     "prebuild:cli": "cd src-tauri && cargo build --release --bin tether-cli",
     "app:build": "npm run prebuild:cli && tauri build",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "version": "node scripts/update-version.js"
   },
   "dependencies": {
     "@monaco-editor/react": "^4.7.0",

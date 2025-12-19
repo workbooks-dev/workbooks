@@ -48,6 +48,51 @@ Anytime a feature todo is done, always move it from todo.md to done.md
 5. Move completed items from `todo.md` → `done.md`
 6. Add entry to `features/changelog.md` with date and description
 
+## Version Management
+
+**CRITICAL: Version numbers must stay synchronized across all files.**
+
+The project version is defined in three locations:
+- `package.json` - npm package version
+- `src-tauri/Cargo.toml` - Rust crate version
+- `src-tauri/tauri.conf.json` - Tauri app version
+
+**When to bump the version:**
+- When completing a significant feature or set of features
+- Before creating a release or distributing builds
+- When the user explicitly asks to bump the version
+- When preparing for production deployment
+
+**How to bump the version:**
+
+**For bug fixes and minor changes (patch bump):**
+```bash
+npm run version
+# Auto-increments: 0.1.0 → 0.1.1
+```
+
+**For new features (minor bump):**
+```bash
+npm run version 0.2.0
+# Manually specify the new version
+```
+
+**For breaking changes (major bump):**
+```bash
+npm run version 1.0.0
+# Manually specify the new version
+```
+
+**After bumping:**
+1. Review changes with `git diff`
+2. Commit with message: "Bump version to X.Y.Z"
+3. Tag the commit: `git tag vX.Y.Z`
+4. Push: `git push && git push --tags`
+
+**DO NOT manually edit version numbers in individual files** - always use the version script to keep them synchronized.
+
+**The CLI version detection system depends on these versions being in sync** - the app checks installed CLI version and auto-updates if it doesn't match the bundled version.
+
 ## Tech Stack Summary
 
 - **Tauri** (Rust + webview) - Native desktop app

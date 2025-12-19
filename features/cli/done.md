@@ -154,3 +154,14 @@
   - [x] Updates happen silently in background
   - [x] CLI stays in sync with app version
   - [x] No manual reinstallation needed
+
+## Phase 3: Production Bug Fixes (December 19, 2024)
+
+### Fixed engine_pyproject.toml Not Found Error
+- [x] Fixed critical production issue where installed CLI couldn't find `engine_pyproject.toml`
+  - [x] Root cause: Standalone CLI binary didn't have access to bundled resources
+  - [x] Solution: Embedded `engine_pyproject.toml` content directly in binary using `include_str!`
+  - [x] Removed 24 lines of file search logic, replaced with 2-line write from embedded content
+  - [x] Works for both development (`tether-dev`) and production (`tether`) CLI
+  - [x] Eliminates dependency on external files for engine setup
+  - [x] More robust and portable CLI distribution
