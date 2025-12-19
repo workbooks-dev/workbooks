@@ -1,5 +1,25 @@
 # Files - To Do
 
+## Priority
+
+- [ ] + New Folder needs to retain focus (the input loses focus when the button is pressed)
+- [ ] Sub folder support
+- [ ] Files need to able to be dragged into folders and subfolders
+- [ ] File path support (like vs code)
+- [ ] File search needs to do subfolders
+- [ ] control+click (or right click) should have a menu like vscode and styles matching the other menu in the main viewport with
+  - [ ] New file (if folder)
+  - [ ] New folder (if folder)
+  - [ ] Find in folder
+  - [ ] toggle file size (toggles all file sizes)
+  - [ ] Open with (if file)
+  - [ ] Get info (like macos info if possible)
+  - [ ] Reveal in Finder
+  - [ ] Copy Path
+  - [ ] Copy Relative Path
+  - [ ] Rename
+  - [ ] Delete
+
 ## FileViewer Enhancements
 
 - [ ] Better file type support
