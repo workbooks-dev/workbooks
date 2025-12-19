@@ -48,12 +48,23 @@
 ## Context Menu
 
 - [x] Right-click file operations
-- [x] Rename file
-- [x] Delete file (with confirmation)
-- [x] Duplicate file
+- [x] Enhanced context menu with full options
+  - [x] New File (if folder)
+  - [x] New Folder (if folder)
+  - [x] Rename
+  - [x] Delete (with confirmation)
+  - [x] Reveal in Finder/Explorer
+  - [x] Copy Path (absolute path)
+  - [x] Copy Relative Path
+  - [x] Get Info (file metadata dialog)
+- [x] Support for separators between menu groups
+- [x] Support for disabled menu items
+- [x] Support for keyboard shortcuts display
+- [x] Support for icons
 - [x] Context menu positioning near cursor
 - [x] Click outside to close
 - [x] Escape key to cancel
+- [x] VS Code-style menu appearance
 
 ## Input Dialog
 
@@ -64,6 +75,16 @@
 - [x] Escape to cancel
 - [x] Validation (empty names, duplicates)
 
+## File Info Dialog
+
+- [x] Modal dialog showing file metadata
+- [x] Displays file name, path, type, size
+- [x] Shows modification and creation dates
+- [x] Shows file permissions (read-only vs read & write)
+- [x] Human-readable file size formatting
+- [x] Formatted date/time display
+- [x] Monospace path display with word wrapping
+
 ## File Operations Backend
 
 - [x] `list_files()` - Recursive directory listing
@@ -73,7 +94,14 @@
 - [x] `delete_file()` - Delete file
 - [x] `create_new_file()` - Create new empty file
 - [x] `create_new_folder()` - Create new folder
-- [x] File metadata (name, path, size, modified time)
+- [x] `get_file_info()` - Get detailed file metadata
+  - [x] Returns name, path, size, type, dates, permissions
+- [x] `reveal_in_finder()` - Reveal file in system file manager
+  - [x] macOS support (Finder)
+  - [x] Windows support (Explorer)
+  - [x] Linux support (file manager)
+- [x] File metadata (name, path, size, modified time, created time, permissions)
+- [x] Clipboard integration for copying paths
 
 ## Environment Variable
 

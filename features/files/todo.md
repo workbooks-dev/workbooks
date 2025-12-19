@@ -7,18 +7,18 @@
 - [ ] Files need to able to be dragged into folders and subfolders
 - [ ] File path support (like vs code)
 - [ ] File search needs to do subfolders
-- [ ] control+click (or right click) should have a menu like vscode and styles matching the other menu in the main viewport with
-  - [ ] New file (if folder)
-  - [ ] New folder (if folder)
+- [x] control+click (or right click) should have a menu like vscode and styles matching the other menu in the main viewport with
+  - [x] New file (if folder)
+  - [x] New folder (if folder)
   - [ ] Find in folder
   - [ ] toggle file size (toggles all file sizes)
   - [ ] Open with (if file)
-  - [ ] Get info (like macos info if possible)
-  - [ ] Reveal in Finder
-  - [ ] Copy Path
-  - [ ] Copy Relative Path
-  - [ ] Rename
-  - [ ] Delete
+  - [x] Get info (like macos info if possible)
+  - [x] Reveal in Finder
+  - [x] Copy Path
+  - [x] Copy Relative Path
+  - [x] Rename
+  - [x] Delete
 
 ## FileViewer Enhancements
 

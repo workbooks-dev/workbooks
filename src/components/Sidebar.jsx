@@ -1,9 +1,11 @@
 import { useState, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { ask } from "@tauri-apps/plugin-dialog";
+import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { ContextMenu } from "./ContextMenu";
 import { InputDialog } from "./InputDialog";
 import { WorkbooksTableView } from "./WorkbooksTableView";
+import { FileInfoDialog } from "./FileInfoDialog";
 
 // Collapsible section component
 function SidebarSection({ title, children, defaultExpanded = true, onHeaderClick }) {
@@ -38,7 +40,7 @@ function SidebarSection({ title, children, defaultExpanded = true, onHeaderClick
 }
 
 // File tree item for Files section (filters out .ipynb)
-function FileTreeItem({ file, level = 0, onFileClick, onFileAction, activeFilePath }) {
+function FileTreeItem({ file, level = 0, onFileClick, onFileAction, activeFilePath, projectRoot }) {
   const [isExpanded, setIsExpanded] = useState(false);
   const [children, setChildren] = useState([]);
   const [loading, setLoading] = useState(false);
@@ -83,10 +85,30 @@ function FileTreeItem({ file, level = 0, onFileClick, onFileAction, activeFilePa
   };
 
   const getContextMenuItems = () => {
-    return [
+    const items = [];
+
+    // Folder-specific options
+    if (file.is_dir) {
+      items.push(
+        { label: "New File", action: () => onFileAction('newFile', file) },
+        { label: "New Folder", action: () => onFileAction('newFolder', file) },
+        { type: 'separator' }
+      );
+    }
+
+    // Common options
+    items.push(
       { label: "Rename", action: () => onFileAction('rename', file) },
-      { label: "Delete", action: () => onFileAction('delete', file) }
-    ];
+      { label: "Delete", action: () => onFileAction('delete', file) },
+      { type: 'separator' },
+      { label: "Reveal in Finder", action: () => onFileAction('revealInFinder', file) },
+      { label: "Copy Path", action: () => onFileAction('copyPath', file) },
+      { label: "Copy Relative Path", action: () => onFileAction('copyRelativePath', file, projectRoot) },
+      { type: 'separator' },
+      { label: "Get Info", action: () => onFileAction('getInfo', file) }
+    );
+
+    return items;
   };
 
   const isActive = activeFilePath === file.path;
@@ -125,6 +147,7 @@ function FileTreeItem({ file, level = 0, onFileClick, onFileAction, activeFilePa
               onFileClick={onFileClick}
               onFileAction={onFileAction}
               activeFilePath={activeFilePath}
+              projectRoot={projectRoot}
             />
           ))}
         </div>
@@ -147,6 +170,8 @@ export function Sidebar({ projectRoot, projectName, onOpenFile, onFileDeleted, a
   const [creatingFile, setCreatingFile] = useState(false);
   const [creatingFolder, setCreatingFolder] = useState(false);
   const [newItemName, setNewItemName] = useState("");
+  const [fileInfo, setFileInfo] = useState(null);
+  const [creatingInFolder, setCreatingInFolder] = useState(null);
 
   useEffect(() => {
     loadProjectFiles();
@@ -285,29 +310,84 @@ export function Sidebar({ projectRoot, projectName, onOpenFile, onFileDeleted, a
     }
   };
 
-  const handleFileAction = async (action, file) => {
-    if (action === 'rename') {
-      setRenamingFile(file);
-    } else if (action === 'delete') {
-      const confirmed = await ask(
-        `Are you sure you want to delete "${file.name}"? This cannot be undone.`,
-        {
-          title: "Delete File",
-          kind: "warning",
-          okLabel: "Delete",
-          cancelLabel: "Cancel",
-        }
-      );
+  const handleFileAction = async (action, file, extraData) => {
+    switch (action) {
+      case 'rename':
+        setRenamingFile(file);
+        break;
 
-      if (confirmed) {
-        try {
-          await invoke("delete_file", { filePath: file.path });
-          onFileDeleted?.(file.path);
-          await loadProjectFiles();
-        } catch (err) {
-          console.error("Failed to delete:", err);
+      case 'delete':
+        const confirmed = await ask(
+          `Are you sure you want to delete "${file.name}"? This cannot be undone.`,
+          {
+            title: "Delete File",
+            kind: "warning",
+            okLabel: "Delete",
+            cancelLabel: "Cancel",
+          }
+        );
+
+        if (confirmed) {
+          try {
+            await invoke("delete_file", { filePath: file.path });
+            onFileDeleted?.(file.path);
+            await loadProjectFiles();
+          } catch (err) {
+            console.error("Failed to delete:", err);
+          }
         }
-      }
+        break;
+
+      case 'newFile':
+        setCreatingFile(true);
+        setCreatingInFolder(file);
+        setNewItemName("");
+        break;
+
+      case 'newFolder':
+        setCreatingFolder(true);
+        setCreatingInFolder(file);
+        setNewItemName("");
+        break;
+
+      case 'revealInFinder':
+        try {
+          await invoke("reveal_in_finder", { filePath: file.path });
+        } catch (err) {
+          console.error("Failed to reveal in finder:", err);
+          alert(`Failed to reveal in finder: ${err}`);
+        }
+        break;
+
+      case 'copyPath':
+        try {
+          await writeText(file.path);
+        } catch (err) {
+          console.error("Failed to copy path:", err);
+        }
+        break;
+
+      case 'copyRelativePath':
+        try {
+          const relativePath = file.path.replace(projectRoot + '/', '');
+          await writeText(relativePath);
+        } catch (err) {
+          console.error("Failed to copy relative path:", err);
+        }
+        break;
+
+      case 'getInfo':
+        try {
+          const info = await invoke("get_file_info", { filePath: file.path });
+          setFileInfo(info);
+        } catch (err) {
+          console.error("Failed to get file info:", err);
+          alert(`Failed to get file info: ${err}`);
+        }
+        break;
+
+      default:
+        break;
     }
   };
 
@@ -331,13 +411,15 @@ export function Sidebar({ projectRoot, projectName, onOpenFile, onFileDeleted, a
     if (!newItemName.trim()) return;
 
     try {
+      const parentPath = creatingInFolder ? creatingInFolder.path : projectRoot;
       await invoke("create_new_file", {
-        parentPath: projectRoot,
+        parentPath: parentPath,
         fileName: newItemName,
         initialContent: "",
       });
       setCreatingFile(false);
       setNewItemName("");
+      setCreatingInFolder(null);
       await loadProjectFiles();
     } catch (err) {
       console.error("Failed to create file:", err);
@@ -350,12 +432,14 @@ export function Sidebar({ projectRoot, projectName, onOpenFile, onFileDeleted, a
     if (!newItemName.trim()) return;
 
     try {
+      const parentPath = creatingInFolder ? creatingInFolder.path : projectRoot;
       await invoke("create_new_folder", {
-        parentPath: projectRoot,
+        parentPath: parentPath,
         folderName: newItemName,
       });
       setCreatingFolder(false);
       setNewItemName("");
+      setCreatingInFolder(null);
       await loadProjectFiles();
     } catch (err) {
       console.error("Failed to create folder:", err);
@@ -544,7 +628,7 @@ export function Sidebar({ projectRoot, projectName, onOpenFile, onFileDeleted, a
                   </button>
                   <button
                     type="button"
-                    onClick={() => { setCreatingFile(false); setNewItemName(""); }}
+                    onClick={() => { setCreatingFile(false); setNewItemName(""); setCreatingInFolder(null); }}
                     className="flex-1 px-3 py-1.5 text-xs font-medium text-gray-700 bg-white hover:bg-gray-50 border border-gray-300 rounded"
                   >
                     Cancel
@@ -574,7 +658,7 @@ export function Sidebar({ projectRoot, projectName, onOpenFile, onFileDeleted, a
                   </button>
                   <button
                     type="button"
-                    onClick={() => { setCreatingFolder(false); setNewItemName(""); }}
+                    onClick={() => { setCreatingFolder(false); setNewItemName(""); setCreatingInFolder(null); }}
                     className="flex-1 px-3 py-1.5 text-xs font-medium text-gray-700 bg-white hover:bg-gray-50 border border-gray-300 rounded"
                   >
                     Cancel
@@ -607,6 +691,7 @@ export function Sidebar({ projectRoot, projectName, onOpenFile, onFileDeleted, a
                 onFileClick={handleFileClick}
                 onFileAction={handleFileAction}
                 activeFilePath={activeFilePath}
+                projectRoot={projectRoot}
               />
             ))}
           </div>
@@ -641,6 +726,14 @@ export function Sidebar({ projectRoot, projectName, onOpenFile, onFileDeleted, a
           workbooks={orderedWorkbooks}
           onClose={() => setShowWorkbooksTable(false)}
           onOpenWorkbook={handleFileClick}
+        />
+      )}
+
+      {/* File Info Dialog */}
+      {fileInfo && (
+        <FileInfoDialog
+          fileInfo={fileInfo}
+          onClose={() => setFileInfo(null)}
         />
       )}
     </div>

@@ -343,6 +343,18 @@ async fn create_new_folder(
 }
 
 #[tauri::command]
+async fn get_file_info(file_path: String) -> Result<fs::FileInfo, String> {
+    let path = PathBuf::from(file_path);
+    fs::get_file_info(&path).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn reveal_in_finder(file_path: String) -> Result<(), String> {
+    let path = PathBuf::from(file_path);
+    fs::reveal_in_finder(&path).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 async fn duplicate_workbook(
     source_path: String,
     new_name: String,
@@ -369,6 +381,19 @@ async fn save_dropped_folder(
     let proj_path = PathBuf::from(project_root);
     let folder = PathBuf::from(folder_path);
     fs::save_dropped_folder(&proj_path, &folder).map_err(|e| e.to_string())
+}
+
+/// Handle a dropped file or folder - detects type and saves appropriately
+/// This avoids needing frontend fs permissions by doing everything in Rust
+#[tauri::command]
+async fn handle_dropped_item(
+    project_root: String,
+    dropped_path: String,
+) -> Result<String, String> {
+    let proj_path = PathBuf::from(&project_root);
+    let item_path = PathBuf::from(&dropped_path);
+
+    fs::handle_dropped_item(&proj_path, &item_path).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -1025,6 +1050,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_clipboard_manager::init())
         // NOTE: window-state plugin disabled - causes startup hangs on first launch
         // .plugin(tauri_plugin_window_state::Builder::default().build())
         .plugin(tauri_plugin_fs::init())
@@ -1150,9 +1176,12 @@ pub fn run() {
             delete_file,
             create_new_file,
             create_new_folder,
+            get_file_info,
+            reveal_in_finder,
             duplicate_workbook,
             save_dropped_file,
             save_dropped_folder,
+            handle_dropped_item,
             ensure_engine_server,
             start_engine,
             execute_cell,

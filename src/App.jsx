@@ -3,7 +3,6 @@ import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { listen } from "@tauri-apps/api/event";
 import { ask } from "@tauri-apps/plugin-dialog";
-import { readFile, stat } from "@tauri-apps/plugin-fs";
 import { Welcome } from "./components/Welcome";
 import { CreateProject } from "./components/CreateProject";
 import { Sidebar } from "./components/Sidebar";
@@ -123,35 +122,13 @@ function App() {
 
           for (const filePath of paths) {
             try {
-              // Check if it's a file or directory
-              const stats = await stat(filePath);
-
-              if (stats.isDirectory) {
-                // Handle folder drop
-                console.log(`Copying folder: ${filePath}`);
-                const result = await invoke("save_dropped_folder", {
-                  projectRoot: currentProject.root,
-                  folderPath: filePath,
-                });
-                console.log(`Successfully copied folder to: ${result}`);
-              } else {
-                // Handle file drop
-                const fileName = filePath.split(/[/\\]/).pop();
-                console.log(`Reading file: ${fileName} from ${filePath}`);
-
-                // Read file using Tauri's fs plugin
-                const fileContent = await readFile(filePath);
-                console.log(`Read ${fileContent.length} bytes`);
-
-                // Save the file using Tauri command
-                const result = await invoke("save_dropped_file", {
-                  projectRoot: currentProject.root,
-                  fileName: fileName,
-                  fileContent: Array.from(fileContent),
-                });
-
-                console.log(`Successfully saved ${fileName} at: ${result}`);
-              }
+              // Handle the dropped item (file or folder) using Rust backend
+              // This avoids needing frontend fs permissions - Rust handles everything
+              const result = await invoke("handle_dropped_item", {
+                projectRoot: currentProject.root,
+                droppedPath: filePath,
+              });
+              console.log(`Successfully saved item at: ${result}`);
             } catch (error) {
               console.error(`Failed to save item:`, error);
               alert(`Failed to save item: ${error}`);

@@ -9,7 +9,6 @@
     "opener:default",
     "dialog:default",
     "dialog:allow-open",
-    "fs:allow-read-file",
     {
       "identifier": "fs:scope",
       "allow": [

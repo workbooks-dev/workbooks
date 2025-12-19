@@ -447,6 +447,35 @@ pub fn save_dropped_folder(project_root: &Path, folder_path: &Path) -> Result<St
     Ok(dest_path.to_string_lossy().to_string())
 }
 
+/// Handle a dropped item (file or folder) - detects type and saves appropriately
+/// This function does all filesystem operations in Rust, avoiding frontend ACL restrictions
+pub fn handle_dropped_item(project_root: &Path, item_path: &Path) -> Result<String> {
+    // Check if the item exists
+    if !item_path.exists() {
+        anyhow::bail!("Dropped item does not exist: {}", item_path.display());
+    }
+
+    // Get metadata to determine if it's a file or directory
+    let metadata = fs::metadata(item_path)
+        .context("Failed to read item metadata")?;
+
+    if metadata.is_dir() {
+        // Handle as folder
+        save_dropped_folder(project_root, item_path)
+    } else {
+        // Handle as file - read it and save using existing function
+        let file_name = item_path.file_name()
+            .ok_or_else(|| anyhow::anyhow!("Invalid file path"))?
+            .to_string_lossy()
+            .to_string();
+
+        let file_content = fs::read(item_path)
+            .context("Failed to read dropped file")?;
+
+        save_dropped_file(project_root, &file_name, &file_content)
+    }
+}
+
 /// Create a new empty file
 pub fn create_new_file(parent_path: &Path, file_name: &str, initial_content: Option<&str>) -> Result<String> {
     // Ensure parent directory exists
@@ -488,4 +517,103 @@ pub fn create_new_folder(parent_path: &Path, folder_name: &str) -> Result<String
         .context("Failed to create folder")?;
 
     Ok(folder_path.to_string_lossy().to_string())
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct FileInfo {
+    pub name: String,
+    pub path: String,
+    pub size: u64,
+    pub is_dir: bool,
+    pub is_file: bool,
+    pub modified: Option<String>,
+    pub created: Option<String>,
+    pub readonly: bool,
+}
+
+/// Get detailed information about a file
+pub fn get_file_info(file_path: &Path) -> Result<FileInfo> {
+    if !file_path.exists() {
+        anyhow::bail!("File does not exist");
+    }
+
+    let metadata = fs::metadata(file_path)
+        .context("Failed to read file metadata")?;
+
+    let name = file_path
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy()
+        .to_string();
+
+    let modified = metadata.modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs().to_string());
+
+    let created = metadata.created()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_secs().to_string());
+
+    Ok(FileInfo {
+        name,
+        path: file_path.to_string_lossy().to_string(),
+        size: metadata.len(),
+        is_dir: metadata.is_dir(),
+        is_file: metadata.is_file(),
+        modified,
+        created,
+        readonly: metadata.permissions().readonly(),
+    })
+}
+
+/// Reveal a file in Finder (macOS only)
+#[cfg(target_os = "macos")]
+pub fn reveal_in_finder(file_path: &Path) -> Result<()> {
+    if !file_path.exists() {
+        anyhow::bail!("File does not exist");
+    }
+
+    std::process::Command::new("open")
+        .arg("-R")
+        .arg(file_path)
+        .spawn()
+        .context("Failed to reveal file in Finder")?;
+
+    Ok(())
+}
+
+/// Reveal a file in Explorer (Windows)
+#[cfg(target_os = "windows")]
+pub fn reveal_in_finder(file_path: &Path) -> Result<()> {
+    if !file_path.exists() {
+        anyhow::bail!("File does not exist");
+    }
+
+    std::process::Command::new("explorer")
+        .arg("/select,")
+        .arg(file_path)
+        .spawn()
+        .context("Failed to reveal file in Explorer")?;
+
+    Ok(())
+}
+
+/// Reveal a file in file manager (Linux)
+#[cfg(target_os = "linux")]
+pub fn reveal_in_finder(file_path: &Path) -> Result<()> {
+    if !file_path.exists() {
+        anyhow::bail!("File does not exist");
+    }
+
+    // Try xdg-open on the parent directory
+    if let Some(parent) = file_path.parent() {
+        std::process::Command::new("xdg-open")
+            .arg(parent)
+            .spawn()
+            .context("Failed to open file location")?;
+    }
+
+    Ok(())
 }
