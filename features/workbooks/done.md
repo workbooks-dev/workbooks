@@ -99,3 +99,31 @@
 - [x] Project venv integration
   - [x] Runs in isolated virtual environment
   - [x] Access to project packages
+
+### UI/UX Polish
+
+- [x] Cell visual improvements
+  - [x] Clear cell borders with rounded corners
+  - [x] Improved execution indicator styling [1], [ ], etc
+  - [x] Subtle cell hover states
+  - [x] Visual separators between cells
+  - [x] Matches STYLE_GUIDE.md grayscale + blue aesthetic
+
+- [x] Output area improvements
+  - [x] Better DataFrame styling (borders, zebra striping, header styling)
+  - [x] Padding/margins on output containers
+  - [x] Improved plain text output styling
+  - [x] Better visual distinction between code and output areas
+  - [x] Subtle background colors on output areas
+
+- [x] Toolbar refinements
+  - [x] Better button spacing and grouping (Execution / Kernel / Add Cells)
+  - [x] Icons added to buttons (▶, ⏹, 🔄, 🗙)
+  - [x] Consistent button styling with rest of app
+  - [x] Visual hierarchy with separators
+
+- [x] Monaco editor styling
+  - [x] Improved line number appearance
+  - [x] Adjusted editor padding (top/bottom 8px)
+  - [x] Cleaner cell borders around editor
+  - [x] Removed unnecessary UI elements (glyph margin, folding)

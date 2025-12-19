@@ -109,46 +109,67 @@
     @apply max-w-full h-auto block mx-auto rounded;
   }
 
+  .cell-output-content svg {
+    @apply max-w-full h-auto block mx-auto;
+  }
+
+  /* DataFrame output styles */
+  .dataframe-output table {
+    @apply border-collapse w-full text-xs bg-white !important;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif !important;
+  }
+
+  .dataframe-output table th,
+  .dataframe-output table td {
+    @apply border border-gray-300 px-3 py-2 text-left !important;
+    font-size: 0.75rem !important;
+  }
+
+  .dataframe-output table thead th {
+    @apply bg-gray-100 font-semibold text-gray-900 !important;
+    border-bottom: 2px solid #d1d5db !important;
+  }
+
+  .dataframe-output table tbody tr:nth-child(odd) {
+    @apply bg-white !important;
+  }
+
+  .dataframe-output table tbody tr:nth-child(even) {
+    @apply bg-gray-50 !important;
+  }
+
+  .dataframe-output table tbody tr:hover {
+    @apply bg-blue-50 !important;
+  }
+
+  .dataframe-output table tbody td {
+    @apply text-gray-700 !important;
+  }
+
+  /* Index column styling (first column in pandas dataframes) */
+  .dataframe-output table tbody th {
+    @apply bg-gray-50 font-medium text-gray-600 !important;
+  }
+
+  /* General table fallback for other HTML tables */
   .cell-output-content table {
     @apply border-collapse w-full text-xs bg-white;
   }
 
   .cell-output-content table th,
   .cell-output-content table td {
-    @apply border border-gray-200 px-2.5 py-1.5 text-left;
+    @apply border border-gray-300 px-3 py-2 text-left;
   }
 
-  .cell-output-content table th {
-    @apply bg-gray-50 font-semibold;
+  .cell-output-content table thead th {
+    @apply bg-gray-100 font-semibold text-gray-900;
   }
 
-  .cell-output-content table tr:nth-child(even) {
+  .cell-output-content table tbody tr:nth-child(even) {
     @apply bg-gray-50;
   }
 
-  .cell-output-content table tr:hover {
-    @apply bg-gray-100;
-  }
-
-  /* DataFrame specific styles */
-  .cell-output-content .dataframe {
-    @apply border border-gray-200 !important;
-  }
-
-  .cell-output-content .dataframe th,
-  .cell-output-content .dataframe td {
-    @apply border border-gray-200 px-2.5 py-1.5 !important;
-  }
-
-  .cell-output-content .dataframe thead th {
-    @apply bg-gray-50 font-semibold !important;
-  }
-
-  .cell-output-content .dataframe tbody tr:nth-child(even) {
-    @apply bg-gray-50 !important;
-  }
-
-  .cell-output-content svg {
-    @apply max-w-full h-auto block mx-auto;
+  .cell-output-content table tbody tr:hover {
+    @apply bg-blue-50;
   }
 }

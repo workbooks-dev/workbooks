@@ -76,8 +76,8 @@ function WorkbookCell({ cell, index, workbookPath, onUpdate, onDelete, onExecute
   if (cell.cell_type === "markdown") {
     return (
       <div
-        className={`relative mb-4 px-4 py-3 rounded-lg transition-all ${
-          isSelected ? 'bg-blue-50 ring-2 ring-blue-200' : 'hover:bg-gray-50'
+        className={`relative mb-4 px-2 py-2 pl-3 border-l-2 transition-all ${
+          isSelected ? 'bg-gray-50/30 border-l-blue-500' : 'border-l-transparent'
         }`}
         onClick={() => onSelect(index)}
         onDoubleClick={() => {
@@ -171,11 +171,13 @@ function WorkbookCell({ cell, index, workbookPath, onUpdate, onDelete, onExecute
 
     return (
       <div
-        className={`relative flex gap-3 mb-4 ${isSelected ? 'bg-blue-50/30' : ''}`}
+        className={`relative mb-4 pl-3 border-l-2 transition-all ${
+          isSelected ? 'bg-gray-50/30 border-l-blue-500' : 'border-l-transparent'
+        }`}
         onClick={() => onSelect(index)}
       >
         {isSelected && (
-          <div className="absolute -top-1 right-2 flex gap-1 z-10">
+          <div className="absolute -top-2 right-0 flex gap-1 z-10">
             <button
               onClick={(e) => { e.stopPropagation(); handleExecute(); }}
               className="px-2 py-1 text-xs bg-white hover:bg-gray-100 border border-gray-300 rounded shadow-sm transition-colors"
@@ -215,18 +217,23 @@ function WorkbookCell({ cell, index, workbookPath, onUpdate, onDelete, onExecute
             </button>
           </div>
         )}
-        <div className={`font-mono text-xs text-gray-500 min-w-[60px] pt-2 pr-2 text-right flex-shrink-0 ${isRunning ? 'text-blue-600 font-semibold' : ''}`}>
-          <div>[{cell.execution_count || " "}]</div>
-          {isRunning && executionElapsed > 0 && (
-            <div className="text-[10px] text-blue-600 font-medium mt-0.5" title="Execution time">
-              {(executionElapsed / 1000).toFixed(1)}s
-            </div>
-          )}
-        </div>
-        <div className={`flex-1 flex flex-col ${isSelected ? 'border-l-2 border-blue-500 pl-3' : 'border-l-2 border-transparent pl-3'} rounded transition-all`}>
-          <div className="cell-input">
+        <div className="flex gap-2">
+          <div className={`font-mono text-xs min-w-[20px] pt-2 pr-1 text-right flex-shrink-0 ${
+            isRunning ? 'text-blue-600 font-semibold' : 'text-gray-500'
+          }`}>
+            <div className="font-medium">[{cell.execution_count || " "}]</div>
+            {isRunning && executionElapsed > 0 && (
+              <div className="text-[10px] text-blue-600 font-medium mt-0.5" title="Execution time">
+                {(executionElapsed / 1000).toFixed(1)}s
+              </div>
+            )}
+          </div>
+          <div className="flex-1 flex flex-col min-w-0">
+            <div className={`cell-input rounded-lg bg-white border transition-all px-2 ${
+              isSelected ? 'border-blue-400 shadow-sm' : 'border-gray-300'
+            }`}>
             <Editor
-              height={`${Math.max(100, content.split("\n").length * 19)}px`}
+              height={`${Math.max(60, content.split("\n").length * 19 + 24)}px`}
               defaultLanguage="python"
               value={content}
               onChange={handleEditorChange}
@@ -313,14 +320,23 @@ function WorkbookCell({ cell, index, workbookPath, onUpdate, onDelete, onExecute
               options={{
                 minimap: { enabled: false },
                 fontSize: 13,
-                lineNumbers: "on",
+                lineHeight: 19,
+                lineNumbers: "off",
+                glyphMargin: false,
+                folding: false,
+                lineDecorationsWidth: 0,
                 scrollBeyondLastLine: false,
                 automaticLayout: true,
                 wordWrap: "on",
+                padding: { top: 12, bottom: 12, left: 20, right: 20 },
                 scrollbar: {
                   vertical: "hidden",
                   horizontal: "hidden",
+                  useShadows: false,
                 },
+                renderLineHighlight: "none",
+                overviewRulerBorder: false,
+                hideCursorInOverviewRuler: true,
                 // Autocomplete settings
                 suggestOnTriggerCharacters: true,
                 quickSuggestions: {
@@ -346,14 +362,15 @@ function WorkbookCell({ cell, index, workbookPath, onUpdate, onDelete, onExecute
                 },
               }}
             />
-          </div>
-          {hasOutput && (
-            <div className="mt-2 border-t border-gray-200 bg-gray-50 rounded-b">
-              {outputs.map((output, idx) => (
-                <CellOutput key={idx} output={output} />
-              ))}
             </div>
-          )}
+            {hasOutput && (
+              <div className="mt-2">
+                {outputs.map((output, idx) => (
+                  <CellOutput key={idx} output={output} />
+                ))}
+              </div>
+            )}
+          </div>
         </div>
       </div>
     );
@@ -407,7 +424,7 @@ function CellOutput({ output }) {
 
   if (output.output_type === "stream") {
     const text = Array.isArray(output.text) ? output.text.join("") : output.text;
-    const className = output.name === "stderr" ? "output-stderr" : "output-stdout";
+    const isStderr = output.name === "stderr";
     const cleanText = stripAnsi(text);
 
     const { text: displayText, truncated, totalLines } = expanded
@@ -415,18 +432,20 @@ function CellOutput({ output }) {
       : truncateText(cleanText, MAX_LINES);
 
     return (
-      <div className={className}>
-        <div className="cell-output-content p-3 max-h-[300px] overflow-auto">
+      <div className={`${isStderr ? 'rounded-lg border border-red-200 bg-red-50/30' : 'bg-gray-50'}`}>
+        <div className="p-2 max-h-[300px] overflow-auto">
           {isTruncatedByBackend && (
-            <div className="px-3 py-2 mb-2 bg-amber-50 border border-amber-200 rounded text-amber-800 text-xs font-medium">
-              ⚠ Output was truncated to save memory (max 1000 lines or 100KB per cell)
+            <div className="px-2 py-1 mb-2 bg-amber-50 border border-amber-200 rounded text-amber-800 text-xs">
+              ⚠ Output truncated
             </div>
           )}
-          <pre className="m-0 whitespace-pre-wrap break-words">{displayText}</pre>
+          <pre className={`m-0 whitespace-pre-wrap break-words font-mono text-xs ${
+            isStderr ? 'text-red-700' : 'text-gray-900'
+          }`}>{displayText}</pre>
         </div>
         {truncated && (
           <button
-            className="block mx-3 my-2 px-3 py-1 text-xs font-medium bg-white hover:bg-gray-50 border border-gray-300 rounded text-blue-600 transition-colors"
+            className="block mx-2 mb-2 px-2 py-1 text-xs font-medium bg-white hover:bg-gray-50 border border-gray-300 rounded text-blue-600 transition-colors"
             onClick={() => setExpanded(!expanded)}
           >
             Show more ({totalLines - MAX_LINES} more lines)
@@ -434,7 +453,7 @@ function CellOutput({ output }) {
         )}
         {expanded && (
           <button
-            className="block mx-3 my-2 px-3 py-1 text-xs font-medium bg-white hover:bg-gray-50 border border-gray-300 rounded text-blue-600 transition-colors"
+            className="block mx-2 mb-2 px-2 py-1 text-xs font-medium bg-white hover:bg-gray-50 border border-gray-300 rounded text-blue-600 transition-colors"
             onClick={() => setExpanded(false)}
           >
             Show less
@@ -452,14 +471,12 @@ function CellOutput({ output }) {
     // Images (PNG)
     if (data["image/png"]) {
       return (
-        <div>
-          <div className="cell-output-content p-3">
-            <img
-              src={`data:image/png;base64,${data["image/png"]}`}
-              alt="Output"
-              className="max-w-full h-auto mx-auto rounded"
-            />
-          </div>
+        <div className="py-3">
+          <img
+            src={`data:image/png;base64,${data["image/png"]}`}
+            alt="Output"
+            className="max-w-full h-auto rounded-lg"
+          />
         </div>
       );
     }
@@ -467,14 +484,12 @@ function CellOutput({ output }) {
     // Images (JPEG)
     if (data["image/jpeg"]) {
       return (
-        <div>
-          <div className="cell-output-content p-3">
-            <img
-              src={`data:image/jpeg;base64,${data["image/jpeg"]}`}
-              alt="Output"
-              className="max-w-full h-auto mx-auto rounded"
-            />
-          </div>
+        <div className="py-3">
+          <img
+            src={`data:image/jpeg;base64,${data["image/jpeg"]}`}
+            alt="Output"
+            className="max-w-full h-auto rounded-lg"
+          />
         </div>
       );
     }
@@ -485,11 +500,9 @@ function CellOutput({ output }) {
         ? data["image/svg+xml"].join("")
         : data["image/svg+xml"];
       return (
-        <div>
-          <div className="cell-output-content p-3">
-            {/* Note: SVG content is rendered directly. For untrusted notebooks, consider sandboxing. */}
-            <div dangerouslySetInnerHTML={{ __html: svgContent }} />
-          </div>
+        <div className="py-3">
+          {/* Note: SVG content is rendered directly. For untrusted notebooks, consider sandboxing. */}
+          <div dangerouslySetInnerHTML={{ __html: svgContent }} />
         </div>
       );
     }
@@ -500,8 +513,8 @@ function CellOutput({ output }) {
         ? data["text/html"].join("")
         : data["text/html"];
       return (
-        <div>
-          <div className="cell-output-content p-3">
+        <div className="rounded-lg bg-gray-50 overflow-hidden">
+          <div className="dataframe-output">
             {/* Note: HTML rendering uses dangerouslySetInnerHTML.
                 For untrusted notebooks, consider implementing a trust model or HTML sanitization. */}
             <div dangerouslySetInnerHTML={{ __html: htmlContent }} />
@@ -521,18 +534,18 @@ function CellOutput({ output }) {
         : truncateText(cleanText, MAX_LINES);
 
       return (
-        <div>
-          <div className="cell-output-content p-3 max-h-[300px] overflow-auto">
+        <div className="bg-gray-50">
+          <div className="p-2 max-h-[300px] overflow-auto">
             {isTruncatedByBackend && (
-              <div className="px-3 py-2 mb-2 bg-amber-50 border border-amber-200 rounded text-amber-800 text-xs font-medium">
-                ⚠ Output was truncated to save memory (max 1000 lines or 100KB per cell)
+              <div className="px-2 py-1 mb-2 bg-amber-50 border border-amber-200 rounded text-amber-800 text-xs">
+                ⚠ Output truncated
               </div>
             )}
-            <pre className="m-0 whitespace-pre-wrap break-words">{displayText}</pre>
+            <pre className="m-0 whitespace-pre-wrap break-words font-mono text-xs text-gray-900">{displayText}</pre>
           </div>
           {truncated && (
             <button
-              className="block mx-3 my-2 px-3 py-1 text-xs font-medium bg-white hover:bg-gray-50 border border-gray-300 rounded text-blue-600 transition-colors"
+              className="block mx-2 mb-2 px-2 py-1 text-xs font-medium bg-white hover:bg-gray-50 border border-gray-300 rounded text-blue-600 transition-colors"
               onClick={() => setExpanded(!expanded)}
             >
               Show more ({totalLines - MAX_LINES} more lines)
@@ -540,7 +553,7 @@ function CellOutput({ output }) {
           )}
           {expanded && (
             <button
-              className="block mx-3 my-2 px-3 py-1 text-xs font-medium bg-white hover:bg-gray-50 border border-gray-300 rounded text-blue-600 transition-colors"
+              className="block mx-2 mb-2 px-2 py-1 text-xs font-medium bg-white hover:bg-gray-50 border border-gray-300 rounded text-blue-600 transition-colors"
               onClick={() => setExpanded(false)}
             >
               Show less
@@ -552,10 +565,8 @@ function CellOutput({ output }) {
 
     // If no recognized mime type, show raw data
     return (
-      <div>
-        <div className="cell-output-content p-3">
-          <pre className="m-0 whitespace-pre-wrap break-words">{JSON.stringify(data, null, 2)}</pre>
-        </div>
+      <div className="rounded-lg bg-gray-50 px-5 py-3">
+        <pre className="m-0 whitespace-pre-wrap break-words font-mono text-xs text-gray-900">{JSON.stringify(data, null, 2)}</pre>
       </div>
     );
   }
@@ -568,18 +579,18 @@ function CellOutput({ output }) {
       : truncateText(cleanText, MAX_LINES);
 
     return (
-      <div className="bg-red-50">
-        <div className="cell-output-content p-3 max-h-[300px] overflow-auto text-red-700">
+      <div className="rounded-lg border border-red-200 bg-red-50/30">
+        <div className="p-2 max-h-[300px] overflow-auto">
           {isTruncatedByBackend && (
-            <div className="px-3 py-2 mb-2 bg-amber-50 border border-amber-200 rounded text-amber-800 text-xs font-medium">
-              ⚠ Output was truncated to save memory (max 1000 lines or 100KB per cell)
+            <div className="px-2 py-1 mb-2 bg-amber-50 border border-amber-200 rounded text-amber-800 text-xs">
+              ⚠ Output truncated
             </div>
           )}
-          <pre className="m-0 whitespace-pre-wrap break-words">{displayText}</pre>
+          <pre className="m-0 whitespace-pre-wrap break-words font-mono text-xs text-red-700">{displayText}</pre>
         </div>
         {truncated && (
           <button
-            className="block mx-3 my-2 px-3 py-1 text-xs font-medium bg-white hover:bg-gray-50 border border-gray-300 rounded text-blue-600 transition-colors"
+            className="block mx-2 mb-2 px-2 py-1 text-xs font-medium bg-white hover:bg-gray-50 border border-gray-300 rounded text-blue-600 transition-colors"
             onClick={() => setExpanded(!expanded)}
           >
             Show more ({totalLines - MAX_LINES} more lines)
@@ -587,7 +598,7 @@ function CellOutput({ output }) {
         )}
         {expanded && (
           <button
-            className="block mx-3 my-2 px-3 py-1 text-xs font-medium bg-white hover:bg-gray-50 border border-gray-300 rounded text-blue-600 transition-colors"
+            className="block mx-2 mb-2 px-2 py-1 text-xs font-medium bg-white hover:bg-gray-50 border border-gray-300 rounded text-blue-600 transition-colors"
             onClick={() => setExpanded(false)}
           >
             Show less
@@ -1515,7 +1526,7 @@ export function WorkbookViewer({ workbookPath, projectRoot, autosaveEnabled = tr
   const isEngineReady = engineStatus === 'idle' || engineStatus === 'busy';
 
   return (
-    <div className="flex flex-col h-full bg-white">
+    <div className="flex flex-col h-full bg-gray-50">
       <div className="px-6 py-4 border-b border-gray-200 bg-white">
         <div className="flex items-start justify-between gap-4 mb-3">
           <h2 className="text-base font-semibold text-gray-900 flex items-center gap-2">
@@ -1547,61 +1558,74 @@ export function WorkbookViewer({ workbookPath, projectRoot, autosaveEnabled = tr
             )}
           </div>
         </div>
-        <div className="flex items-center gap-2 flex-wrap">
-          <span className="text-xs px-2 py-1 bg-gray-100 text-gray-600 rounded font-mono">Shift+Enter to run</span>
+        <div className="flex items-center gap-3 flex-wrap">
+          <span className="text-xs px-2 py-1 bg-gray-100 text-gray-600 rounded-md font-mono">Shift+Enter to run</span>
           <div className="flex-1" />
-          <div className="flex items-center gap-1.5">
+
+          {/* Execution controls group */}
+          <div className="flex items-center gap-2">
             {engineStatus === 'error' && (
               <button
                 onClick={startEngine}
-                className="px-2.5 py-1.5 text-xs font-medium text-gray-700 bg-white hover:bg-gray-50 border border-gray-300 rounded-md transition-all"
+                className="px-3 py-1.5 text-xs font-medium text-white bg-blue-600 hover:bg-blue-700 rounded-md transition-colors shadow-sm"
                 title="Retry connecting to engine"
               >
-                Reconnect Engine
+                🔌 Reconnect
               </button>
             )}
             <button
               onClick={runAllCells}
               disabled={isRunningAll || !isEngineReady}
-              className="px-2.5 py-1.5 text-xs font-medium text-gray-700 bg-white hover:bg-gray-50 border border-gray-300 rounded-md transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+              className="px-3 py-1.5 text-xs font-medium text-gray-700 bg-white hover:bg-gray-50 border border-gray-300 rounded-md transition-all disabled:opacity-50 disabled:cursor-not-allowed shadow-sm"
               title="Run all cells"
             >
-              {isRunningAll ? "Running..." : "Run All"}
+              {isRunningAll ? "⏳ Running..." : "▶ Run All"}
             </button>
             <button
               onClick={interruptExecution}
               disabled={engineStatus !== 'busy'}
-              className="px-2.5 py-1.5 text-xs font-medium text-gray-700 bg-white hover:bg-gray-50 border border-gray-300 rounded-md transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+              className="px-3 py-1.5 text-xs font-medium text-gray-700 bg-white hover:bg-gray-50 border border-gray-300 rounded-md transition-all disabled:opacity-50 disabled:cursor-not-allowed shadow-sm"
               title="Interrupt execution"
             >
-              ⬛ Interrupt
+              ⏹ Interrupt
             </button>
+          </div>
+
+          <div className="w-px h-5 bg-gray-300"></div>
+
+          {/* Kernel controls group */}
+          <div className="flex items-center gap-2">
             <button
               onClick={clearAllOutputs}
-              className="px-2.5 py-1.5 text-xs font-medium text-gray-700 bg-white hover:bg-gray-50 border border-gray-300 rounded-md transition-all"
+              className="px-3 py-1.5 text-xs font-medium text-gray-700 bg-white hover:bg-gray-50 border border-gray-300 rounded-md transition-all shadow-sm"
               title="Clear all outputs"
             >
-              Clear All
+              🗙 Clear
             </button>
             <button
               onClick={restartEngine}
               disabled={!isEngineReady}
-              className="px-2.5 py-1.5 text-xs font-medium text-gray-700 bg-white hover:bg-gray-50 border border-gray-300 rounded-md transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+              className="px-3 py-1.5 text-xs font-medium text-gray-700 bg-white hover:bg-gray-50 border border-gray-300 rounded-md transition-all disabled:opacity-50 disabled:cursor-not-allowed shadow-sm"
               title="Restart kernel"
             >
-              Restart
+              🔄 Restart
             </button>
-            <div className="w-px h-4 bg-gray-300"></div>
+          </div>
+
+          <div className="w-px h-5 bg-gray-300"></div>
+
+          {/* Add cell controls group */}
+          <div className="flex items-center gap-2">
             <button
               onClick={() => addCell("markdown")}
-              className="px-2.5 py-1.5 text-xs font-medium text-gray-700 bg-white hover:bg-gray-50 border border-gray-300 rounded-md transition-all"
+              className="px-3 py-1.5 text-xs font-medium text-gray-700 bg-white hover:bg-gray-50 border border-gray-300 rounded-md transition-all shadow-sm"
               title="Add markdown cell"
             >
               + Markdown
             </button>
             <button
               onClick={() => addCell("code")}
-              className="px-2.5 py-1.5 text-xs font-medium text-gray-700 bg-white hover:bg-gray-50 border border-gray-300 rounded-md transition-all"
+              className="px-3 py-1.5 text-xs font-medium text-gray-700 bg-white hover:bg-gray-50 border border-gray-300 rounded-md transition-all shadow-sm"
               title="Add code cell"
             >
               + Code
@@ -1610,7 +1634,7 @@ export function WorkbookViewer({ workbookPath, projectRoot, autosaveEnabled = tr
         </div>
       </div>
 
-      <div className="flex-1 overflow-y-auto px-6 py-6 custom-scrollbar">
+      <div className="flex-1 overflow-y-auto px-4 py-4 custom-scrollbar">
         {error && (
           <div className="bg-red-50 border border-red-200 rounded-lg px-4 py-3 mb-4 flex items-center justify-between text-red-800 text-sm">
             <span>{error}</span>
