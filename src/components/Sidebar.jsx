@@ -6,7 +6,7 @@ import { InputDialog } from "./InputDialog";
 import { WorkbooksTableView } from "./WorkbooksTableView";
 
 // Collapsible section component
-function SidebarSection({ title, icon, children, defaultExpanded = true, onHeaderClick }) {
+function SidebarSection({ title, children, defaultExpanded = true, onHeaderClick }) {
   const [isExpanded, setIsExpanded] = useState(defaultExpanded);
 
   const handleHeaderClick = () => {
@@ -23,12 +23,9 @@ function SidebarSection({ title, icon, children, defaultExpanded = true, onHeade
         onClick={handleHeaderClick}
         className="w-full px-4 py-3 flex items-center justify-between hover:bg-gray-100 transition-colors"
       >
-        <div className="flex items-center gap-2">
-          <span className="text-sm">{icon}</span>
-          <h3 className="text-xs font-semibold uppercase tracking-wider text-gray-700">
-            {title}
-          </h3>
-        </div>
+        <h3 className="text-xs font-semibold uppercase tracking-wider text-gray-700">
+          {title}
+        </h3>
         {!onHeaderClick && (
           <span className="text-xs text-gray-400">
             {isExpanded ? "▼" : "▶"}
@@ -82,24 +79,8 @@ function FileTreeItem({ file, level = 0, onFileClick, onFileAction, activeFilePa
     if (file.is_dir) {
       return isExpanded ? "▼" : "▶";
     }
-
-    switch (file.extension) {
-      case "py":
-        return "🐍";
-      case "md":
-        return "📝";
-      case "json":
-      case "toml":
-      case "yaml":
-      case "yml":
-        return "⚙️";
-      case "csv":
-        return "📊";
-      case "txt":
-        return "📄";
-      default:
-        return "📄";
-    }
+    // No icons for files, just show the filename
+    return "";
   };
 
   const getContextMenuItems = () => {
@@ -162,20 +143,33 @@ export function Sidebar({ projectRoot, projectName, onOpenFile, onFileDeleted, a
   const [showWorkbooksTable, setShowWorkbooksTable] = useState(false);
   const [renamingFile, setRenamingFile] = useState(null);
   const [recentWorkbooks, setRecentWorkbooks] = useState([]);
+  const [secretsCount, setSecretsCount] = useState(0);
+  const [fileSearchQuery, setFileSearchQuery] = useState("");
+  const [creatingFile, setCreatingFile] = useState(false);
+  const [creatingFolder, setCreatingFolder] = useState(false);
+  const [newItemName, setNewItemName] = useState("");
 
   useEffect(() => {
     loadProjectFiles();
     loadRecentWorkbooks();
+    loadSecretsCount();
 
     // Listen for file changes (e.g., when files are dropped)
     const handleFilesChanged = () => {
       loadProjectFiles();
     };
 
+    // Listen for secrets changes
+    const handleSecretsChanged = () => {
+      loadSecretsCount();
+    };
+
     window.addEventListener("tether:files-changed", handleFilesChanged);
+    window.addEventListener("tether:secrets-changed", handleSecretsChanged);
 
     return () => {
       window.removeEventListener("tether:files-changed", handleFilesChanged);
+      window.removeEventListener("tether:secrets-changed", handleSecretsChanged);
     };
   }, [projectRoot]);
 
@@ -223,6 +217,18 @@ export function Sidebar({ projectRoot, projectName, onOpenFile, onFileDeleted, a
     }
   };
 
+  const loadSecretsCount = async () => {
+    try {
+      const secrets = await invoke("list_secrets", {
+        projectPath: projectRoot,
+      });
+      setSecretsCount(secrets.length);
+    } catch (err) {
+      console.error("Failed to load secrets count:", err);
+      setSecretsCount(0);
+    }
+  };
+
   const updateRecentWorkbook = (workbookPath) => {
     // Update recent workbooks list
     const projectKey = `tether_recent_workbooks_${projectRoot}`;
@@ -232,6 +238,17 @@ export function Sidebar({ projectRoot, projectName, onOpenFile, onFileDeleted, a
     setRecentWorkbooks(trimmed);
     localStorage.setItem(projectKey, JSON.stringify(trimmed));
   };
+
+  const filterFiles = (fileList, query) => {
+    if (!query.trim()) return fileList;
+
+    const lowerQuery = query.toLowerCase();
+    return fileList.filter(file =>
+      file.name.toLowerCase().includes(lowerQuery)
+    );
+  };
+
+  const filteredFiles = filterFiles(files, fileSearchQuery);
 
   const handleFileClick = (file) => {
     if (file.extension === "ipynb") {
@@ -309,6 +326,43 @@ export function Sidebar({ projectRoot, projectName, onOpenFile, onFileDeleted, a
     }
   };
 
+  const handleCreateFile = async (e) => {
+    e.preventDefault();
+    if (!newItemName.trim()) return;
+
+    try {
+      await invoke("create_new_file", {
+        parentPath: projectRoot,
+        fileName: newItemName,
+        initialContent: "",
+      });
+      setCreatingFile(false);
+      setNewItemName("");
+      await loadProjectFiles();
+    } catch (err) {
+      console.error("Failed to create file:", err);
+      alert(`Failed to create file: ${err}`);
+    }
+  };
+
+  const handleCreateFolder = async (e) => {
+    e.preventDefault();
+    if (!newItemName.trim()) return;
+
+    try {
+      await invoke("create_new_folder", {
+        parentPath: projectRoot,
+        folderName: newItemName,
+      });
+      setCreatingFolder(false);
+      setNewItemName("");
+      await loadProjectFiles();
+    } catch (err) {
+      console.error("Failed to create folder:", err);
+      alert(`Failed to create folder: ${err}`);
+    }
+  };
+
   // Get workbooks ordered by recent use
   const orderedWorkbooks = [...workbooks].sort((a, b) => {
     const aIndex = recentWorkbooks.indexOf(a.path);
@@ -331,7 +385,6 @@ export function Sidebar({ projectRoot, projectName, onOpenFile, onFileDeleted, a
         {/* Workbooks Section */}
         <SidebarSection
           title="Workbooks"
-          icon="📓"
           defaultExpanded={true}
           onHeaderClick={() => setShowWorkbooksTable(true)}
         >
@@ -390,32 +443,41 @@ export function Sidebar({ projectRoot, projectName, onOpenFile, onFileDeleted, a
                       : 'text-gray-700 hover:bg-white'
                   }`}
                 >
-                  <div className="flex items-center gap-2">
-                    <span className="text-xs">📓</span>
-                    <span className="flex-1 overflow-hidden text-ellipsis whitespace-nowrap text-xs">
-                      {workbook.name.replace('.ipynb', '')}
-                    </span>
-                  </div>
+                  <span className="flex-1 overflow-hidden text-ellipsis whitespace-nowrap text-xs">
+                    {workbook.name.replace('.ipynb', '')}
+                  </span>
                 </div>
               );
             })}
           </div>
         </SidebarSection>
 
-        {/* Secrets Section (Placeholder) */}
-        <SidebarSection title="Secrets" icon="🔐" defaultExpanded={false}>
-          <div className="px-4 py-6 text-center">
-            <p className="text-xs text-gray-400 mb-3">
-              Securely store API keys and credentials
-            </p>
-            <button className="px-4 py-2 text-xs font-medium text-gray-600 bg-gray-100 hover:bg-gray-200 rounded transition-colors">
-              Add Secret
+        {/* Secrets Section */}
+        <SidebarSection
+          title="Secrets"
+          defaultExpanded={false}
+          onHeaderClick={() => onOpenFile?.('__secrets__', 'secrets')}
+        >
+          <div className="px-4 py-4">
+            <div className="text-center mb-3">
+              <p className="text-sm font-medium text-gray-700">
+                {secretsCount === 0 ? 'No secrets' : `${secretsCount} secret${secretsCount === 1 ? '' : 's'}`}
+              </p>
+              <p className="text-xs text-gray-400 mt-1">
+                Securely stored and encrypted
+              </p>
+            </div>
+            <button
+              className="w-full px-4 py-2 text-xs font-medium text-blue-600 bg-blue-50 hover:bg-blue-100 rounded transition-colors"
+              onClick={() => onOpenFile?.('__secrets__', 'secrets')}
+            >
+              Manage Secrets
             </button>
           </div>
         </SidebarSection>
 
         {/* Schedule Section (Placeholder) */}
-        <SidebarSection title="Schedule" icon="⏰" defaultExpanded={false}>
+        <SidebarSection title="Schedule" defaultExpanded={false}>
           <div className="px-4">
             <div className="flex border-b border-gray-200 mb-2">
               <button className="flex-1 px-3 py-2 text-xs font-medium text-blue-600 border-b-2 border-blue-600">
@@ -437,7 +499,91 @@ export function Sidebar({ projectRoot, projectName, onOpenFile, onFileDeleted, a
         </SidebarSection>
 
         {/* Files Section */}
-        <SidebarSection title="Files" icon="📁" defaultExpanded={true}>
+        <SidebarSection title="Files" defaultExpanded={true}>
+          <div className="px-2 pb-2">
+            <input
+              type="text"
+              placeholder="Search files..."
+              value={fileSearchQuery}
+              onChange={(e) => setFileSearchQuery(e.target.value)}
+              className="w-full px-3 py-1.5 text-xs border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500 bg-white"
+            />
+            <div className="flex gap-2 mt-2">
+              <button
+                onClick={() => { setCreatingFile(true); setNewItemName(""); }}
+                className="flex-1 px-3 py-1.5 text-xs font-medium text-gray-700 bg-white hover:bg-gray-50 border border-gray-300 rounded transition-colors"
+              >
+                + File
+              </button>
+              <button
+                onClick={() => { setCreatingFolder(true); setNewItemName(""); }}
+                className="flex-1 px-3 py-1.5 text-xs font-medium text-gray-700 bg-white hover:bg-gray-50 border border-gray-300 rounded transition-colors"
+              >
+                + Folder
+              </button>
+            </div>
+          </div>
+
+          {creatingFile && (
+            <div className="px-2 pb-2">
+              <form onSubmit={handleCreateFile} className="p-2 bg-white border border-gray-200 rounded">
+                <input
+                  type="text"
+                  value={newItemName}
+                  onChange={(e) => setNewItemName(e.target.value)}
+                  placeholder="File name (e.g., data.csv)"
+                  className="w-full px-2 py-1.5 text-sm border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500 mb-2"
+                  autoFocus
+                />
+                <div className="flex gap-1.5">
+                  <button
+                    type="submit"
+                    className="flex-1 px-3 py-1.5 text-xs font-medium text-white bg-blue-600 hover:bg-blue-700 rounded"
+                  >
+                    Create
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => { setCreatingFile(false); setNewItemName(""); }}
+                    className="flex-1 px-3 py-1.5 text-xs font-medium text-gray-700 bg-white hover:bg-gray-50 border border-gray-300 rounded"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </form>
+            </div>
+          )}
+
+          {creatingFolder && (
+            <div className="px-2 pb-2">
+              <form onSubmit={handleCreateFolder} className="p-2 bg-white border border-gray-200 rounded">
+                <input
+                  type="text"
+                  value={newItemName}
+                  onChange={(e) => setNewItemName(e.target.value)}
+                  placeholder="Folder name"
+                  className="w-full px-2 py-1.5 text-sm border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500 mb-2"
+                  autoFocus
+                />
+                <div className="flex gap-1.5">
+                  <button
+                    type="submit"
+                    className="flex-1 px-3 py-1.5 text-xs font-medium text-white bg-blue-600 hover:bg-blue-700 rounded"
+                  >
+                    Create
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => { setCreatingFolder(false); setNewItemName(""); }}
+                    className="flex-1 px-3 py-1.5 text-xs font-medium text-gray-700 bg-white hover:bg-gray-50 border border-gray-300 rounded"
+                  >
+                    Cancel
+                  </button>
+                </div>
+              </form>
+            </div>
+          )}
+
           <div className="px-1">
             {loading && <div className="px-4 py-3 text-xs text-gray-500">Loading...</div>}
 
@@ -447,7 +593,13 @@ export function Sidebar({ projectRoot, projectName, onOpenFile, onFileDeleted, a
               </div>
             )}
 
-            {!loading && files.map((file) => (
+            {!loading && filteredFiles.length === 0 && files.length > 0 && (
+              <div className="px-4 py-8 text-center text-xs text-gray-400">
+                No files match "{fileSearchQuery}"
+              </div>
+            )}
+
+            {!loading && filteredFiles.map((file) => (
               <FileTreeItem
                 key={file.path}
                 file={file}
@@ -464,11 +616,10 @@ export function Sidebar({ projectRoot, projectName, onOpenFile, onFileDeleted, a
       {/* Project Settings at Bottom */}
       <div className="border-t border-gray-200 bg-white">
         <button
-          className="w-full px-4 py-3 flex items-center gap-2 text-xs font-medium text-gray-600 hover:bg-gray-50 transition-colors"
+          className="w-full px-4 py-3 text-xs font-medium text-gray-600 hover:bg-gray-50 transition-colors text-left"
           onClick={() => alert('Project Settings - Coming Soon')}
         >
-          <span>⚙️</span>
-          <span>Project Settings</span>
+          Project Settings
         </button>
       </div>
 

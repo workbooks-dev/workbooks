@@ -2,6 +2,10 @@ mod python;
 mod project;
 mod fs;
 mod engine_http;
+mod secrets;
+
+#[cfg(target_os = "macos")]
+mod local_auth_macos;
 
 use std::path::PathBuf;
 use tauri::{Emitter, State};
@@ -15,10 +19,11 @@ pub struct ProjectInfo {
     pub root: String,
 }
 
-/// Application state to track the current project and engine server
+/// Application state to track the current project, engine server, and secrets manager
 pub struct AppState {
     pub current_project: Mutex<Option<project::TetherProject>>,
     pub engine_server: Arc<Mutex<Option<engine_http::EngineServer>>>,
+    pub secrets_manager: Arc<Mutex<Option<secrets::SecretsManager>>>,
 }
 
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
@@ -288,6 +293,12 @@ async fn read_file(file_path: String) -> Result<String, String> {
 }
 
 #[tauri::command]
+async fn read_file_binary(file_path: String) -> Result<Vec<u8>, String> {
+    let path = PathBuf::from(file_path);
+    fs::read_file_binary(&path).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 async fn save_file(
     file_path: String,
     content: String,
@@ -309,6 +320,26 @@ async fn rename_file(
 async fn delete_file(file_path: String) -> Result<(), String> {
     let path = PathBuf::from(file_path);
     fs::delete_file(&path).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn create_new_file(
+    parent_path: String,
+    file_name: String,
+    initial_content: Option<String>,
+) -> Result<String, String> {
+    let path = PathBuf::from(parent_path);
+    fs::create_new_file(&path, &file_name, initial_content.as_deref())
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn create_new_folder(
+    parent_path: String,
+    folder_name: String,
+) -> Result<String, String> {
+    let path = PathBuf::from(parent_path);
+    fs::create_new_folder(&path, &folder_name).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -547,16 +578,429 @@ async fn restart_engine(
         .map_err(|e| e.to_string())
 }
 
+// Secrets management commands
+
+/// Helper function to get or create the SecretsManager for a project
+async fn get_secrets_manager(
+    project_path: &PathBuf,
+    state: &State<'_, AppState>,
+) -> Result<Arc<Mutex<Option<secrets::SecretsManager>>>, String> {
+    let mut manager_guard = state.secrets_manager.lock().await;
+
+    // Check if we need to create a new manager or if the existing one is for a different project
+    let needs_new = match manager_guard.as_ref() {
+        None => true,
+        Some(_manager) => {
+            // For simplicity, always recreate if path changes
+            // In a more sophisticated version, we could track which project the manager is for
+            false
+        }
+    };
+
+    if needs_new {
+        let manager = secrets::SecretsManager::new(project_path)
+            .map_err(|e| e.to_string())?;
+        *manager_guard = Some(manager);
+    }
+
+    Ok(state.secrets_manager.clone())
+}
+
+#[tauri::command]
+async fn add_secret(
+    project_path: String,
+    key: String,
+    value: String,
+    state: State<'_, AppState>,
+) -> Result<secrets::Secret, String> {
+    let path = PathBuf::from(project_path);
+    let manager_arc = get_secrets_manager(&path, &state).await?;
+    let manager_guard = manager_arc.lock().await;
+    let manager = manager_guard.as_ref().ok_or("No secrets manager")?;
+
+    manager.add_secret(&key, &value)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn get_secret(
+    project_path: String,
+    key: String,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    let path = PathBuf::from(project_path);
+    let manager_arc = get_secrets_manager(&path, &state).await?;
+    let manager_guard = manager_arc.lock().await;
+    let manager = manager_guard.as_ref().ok_or("No secrets manager")?;
+
+    manager.get_secret(&key)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn get_secret_authenticated(
+    project_path: String,
+    key: String,
+    state: State<'_, AppState>,
+) -> Result<String, String> {
+    let path = PathBuf::from(project_path);
+    let manager_arc = get_secrets_manager(&path, &state).await?;
+    let manager_guard = manager_arc.lock().await;
+    let manager = manager_guard.as_ref().ok_or("No secrets manager")?;
+
+    manager.get_secret_authenticated(&key)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn list_secrets(
+    project_path: String,
+    state: State<'_, AppState>,
+) -> Result<Vec<secrets::Secret>, String> {
+    let path = PathBuf::from(project_path);
+    let manager_arc = get_secrets_manager(&path, &state).await?;
+    let manager_guard = manager_arc.lock().await;
+    let manager = manager_guard.as_ref().ok_or("No secrets manager")?;
+
+    manager.list_secrets()
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn update_secret(
+    project_path: String,
+    key: String,
+    value: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let path = PathBuf::from(project_path);
+    let manager_arc = get_secrets_manager(&path, &state).await?;
+    let manager_guard = manager_arc.lock().await;
+    let manager = manager_guard.as_ref().ok_or("No secrets manager")?;
+
+    manager.update_secret(&key, &value)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn delete_secret(
+    project_path: String,
+    key: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let path = PathBuf::from(project_path);
+    let manager_arc = get_secrets_manager(&path, &state).await?;
+    let manager_guard = manager_arc.lock().await;
+    let manager = manager_guard.as_ref().ok_or("No secrets manager")?;
+
+    manager.delete_secret(&key)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn get_all_secrets(
+    project_path: String,
+    state: State<'_, AppState>,
+) -> Result<Vec<(String, String)>, String> {
+    let path = PathBuf::from(project_path);
+    let manager_arc = get_secrets_manager(&path, &state).await?;
+    let manager_guard = manager_arc.lock().await;
+    let manager = manager_guard.as_ref().ok_or("No secrets manager")?;
+
+    manager.get_all_secrets_with_values()
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn import_secrets_from_env(
+    project_path: String,
+    env_file_path: String,
+    state: State<'_, AppState>,
+) -> Result<Vec<String>, String> {
+    let project = PathBuf::from(project_path);
+    let env_path = PathBuf::from(env_file_path);
+
+    let manager_arc = get_secrets_manager(&project, &state).await?;
+    let manager_guard = manager_arc.lock().await;
+    let manager = manager_guard.as_ref().ok_or("No secrets manager")?;
+
+    manager.import_from_env(&env_path)
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn authenticate_secrets_access(
+    project_path: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let path = PathBuf::from(project_path);
+    let manager_arc = get_secrets_manager(&path, &state).await?;
+    let manager_guard = manager_arc.lock().await;
+    let manager = manager_guard.as_ref().ok_or("No secrets manager")?;
+
+    // This will trigger Touch ID by accessing the keychain
+    // Even if there are no secrets, this will ensure the encryption key exists
+    // and can be accessed (which requires Touch ID on macOS)
+    manager.ensure_encryption_key_accessible()
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn check_secrets_session(
+    project_path: String,
+    state: State<'_, AppState>,
+) -> Result<bool, String> {
+    let path = PathBuf::from(project_path);
+    let manager_arc = get_secrets_manager(&path, &state).await?;
+    let manager_guard = manager_arc.lock().await;
+    let manager = manager_guard.as_ref().ok_or("No secrets manager")?;
+
+    Ok(manager.is_session_valid())
+}
+
+#[tauri::command]
+async fn lock_secrets_session(
+    project_path: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    let path = PathBuf::from(project_path);
+    let manager_arc = get_secrets_manager(&path, &state).await?;
+    let manager_guard = manager_arc.lock().await;
+    let manager = manager_guard.as_ref().ok_or("No secrets manager")?;
+
+    manager.lock_session();
+    Ok(())
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CellOutputScanResult {
+    pub cell_indices: Vec<usize>,
+    pub has_secrets: bool,
+}
+
+#[tauri::command]
+async fn scan_outputs_for_secrets(
+    project_path: String,
+    cells_json: String,
+    state: State<'_, AppState>,
+) -> Result<CellOutputScanResult, String> {
+    let path = PathBuf::from(project_path);
+    let manager_arc = get_secrets_manager(&path, &state).await?;
+    let manager_guard = manager_arc.lock().await;
+    let manager = manager_guard.as_ref().ok_or("No secrets manager")?;
+
+    // Get all secrets with their values
+    let secrets = manager.get_all_secrets_with_values()
+        .map_err(|e| e.to_string())?;
+
+    // If no secrets, nothing to scan for
+    if secrets.is_empty() {
+        return Ok(CellOutputScanResult {
+            cell_indices: vec![],
+            has_secrets: false,
+        });
+    }
+
+    // Parse the cells JSON
+    let cells: Vec<serde_json::Value> = serde_json::from_str(&cells_json)
+        .map_err(|e| format!("Failed to parse cells: {}", e))?;
+
+    let mut cell_indices_with_secrets = Vec::new();
+
+    // Scan each cell's outputs
+    for (index, cell) in cells.iter().enumerate() {
+        if let Some(outputs) = cell.get("outputs").and_then(|o| o.as_array()) {
+            if outputs.is_empty() {
+                continue;
+            }
+
+            // Convert outputs to JSON string for easier searching
+            let outputs_str = serde_json::to_string(outputs)
+                .map_err(|e| format!("Failed to serialize outputs: {}", e))?;
+
+            // Check if any secret value appears in the outputs
+            let mut contains_secret = false;
+            for (_key, value) in &secrets {
+                // Only check non-empty secrets
+                if !value.is_empty() && outputs_str.contains(value) {
+                    contains_secret = true;
+                    break;
+                }
+            }
+
+            if contains_secret {
+                cell_indices_with_secrets.push(index);
+            }
+        }
+    }
+
+    Ok(CellOutputScanResult {
+        cell_indices: cell_indices_with_secrets.clone(),
+        has_secrets: !cell_indices_with_secrets.is_empty(),
+    })
+}
+
+#[tauri::command]
+async fn test_secrets_loading(
+    project_path: String,
+) -> Result<String, String> {
+    let path = PathBuf::from(&project_path);
+
+    println!("=== TESTING SECRETS LOADING ===");
+    println!("Project path: {}", path.display());
+
+    match secrets::SecretsManager::new(&path) {
+        Ok(manager) => {
+            println!("✓ SecretsManager created");
+
+            match manager.list_secrets() {
+                Ok(secrets) => {
+                    println!("✓ Found {} secrets in database", secrets.len());
+                    for secret in &secrets {
+                        println!("  - {}", secret.key);
+                    }
+
+                    match manager.get_all_secrets_with_values() {
+                        Ok(values) => {
+                            println!("✓ Successfully decrypted all secrets");
+                            Ok(format!("Success! Found {} secrets: {}",
+                                values.len(),
+                                values.iter().map(|(k, _)| k.as_str()).collect::<Vec<_>>().join(", ")
+                            ))
+                        }
+                        Err(e) => {
+                            println!("✗ Failed to decrypt secrets: {}", e);
+                            Err(format!("Failed to decrypt secrets: {}", e))
+                        }
+                    }
+                }
+                Err(e) => {
+                    println!("✗ Failed to list secrets: {}", e);
+                    Err(format!("Failed to list secrets: {}", e))
+                }
+            }
+        }
+        Err(e) => {
+            println!("✗ Failed to create SecretsManager: {}", e);
+            Err(format!("Failed to create SecretsManager: {}", e))
+        }
+    }
+}
+
+#[tauri::command]
+async fn open_project_window(
+    app: tauri::AppHandle,
+    project_path: String,
+) -> Result<(), String> {
+    use tauri::Manager;
+
+    println!("Opening new window for project: {}", project_path);
+
+    // Create a unique window label
+    let window_label = format!("project-{}", std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis());
+
+    // Get the main window's URL
+    let main_window = app.get_webview_window("main")
+        .ok_or("Main window not found")?;
+
+    let current_url = main_window.url()
+        .map_err(|e| format!("Failed to get current URL: {}", e))?;
+
+    // Create URL with project path as query parameter
+    let mut url = current_url.clone();
+    url.set_query(Some(&format!("project={}", urlencoding::encode(&project_path))));
+
+    println!("Opening window with URL: {}", url);
+
+    // Create new window
+    tauri::WebviewWindowBuilder::new(
+        &app,
+        &window_label,
+        tauri::WebviewUrl::External(url),
+    )
+    .title("tether")
+    .inner_size(800.0, 600.0)
+    .build()
+    .map_err(|e| format!("Failed to create window: {}", e))?;
+
+    println!("Window created with label: {}", window_label);
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    use tauri::menu::{MenuBuilder, MenuItemBuilder, SubmenuBuilder};
+
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_window_state::Builder::default().build())
         .plugin(tauri_plugin_fs::init())
+        .setup(|app| {
+            // Create custom menu item
+            let open_new_window = MenuItemBuilder::with_id("open_new_window", "Open Project in New Window...")
+                .accelerator("Cmd+Shift+O")
+                .build(app)?;
+
+            // Build File menu with custom item
+            let file_menu = SubmenuBuilder::new(app, "File")
+                .item(&open_new_window)
+                .separator()
+                .close_window()
+                .build()?;
+
+            // Build Edit menu
+            let edit_menu = SubmenuBuilder::new(app, "Edit")
+                .undo()
+                .redo()
+                .separator()
+                .cut()
+                .copy()
+                .paste()
+                .separator()
+                .select_all()
+                .build()?;
+
+            // Build View menu
+            let view_menu = SubmenuBuilder::new(app, "View")
+                .build()?;
+
+            // Build Window menu
+            let window_menu = SubmenuBuilder::new(app, "Window")
+                .minimize()
+                .maximize()
+                .separator()
+                .build()?;
+
+            // Build the complete menu
+            let menu = MenuBuilder::new(app)
+                .item(&file_menu)
+                .item(&edit_menu)
+                .item(&view_menu)
+                .item(&window_menu)
+                .build()?;
+
+            app.set_menu(menu)?;
+
+            // Handle menu events
+            app.on_menu_event(move |app_handle, event| {
+                if event.id() == "open_new_window" {
+                    // Emit event to trigger frontend to handle the dialog
+                    if let Err(e) = app_handle.emit("menu:open-new-window", ()) {
+                        eprintln!("Failed to emit menu event: {}", e);
+                    }
+                }
+            });
+
+            Ok(())
+        })
         .manage(AppState {
             current_project: Mutex::new(None),
             engine_server: Arc::new(Mutex::new(None)),
+            secrets_manager: Arc::new(Mutex::new(None)),
         })
         .invoke_handler(tauri::generate_handler![
             greet,
@@ -579,9 +1023,12 @@ pub fn run() {
             read_workbook,
             save_workbook,
             read_file,
+            read_file_binary,
             save_file,
             rename_file,
             delete_file,
+            create_new_file,
+            create_new_folder,
             duplicate_workbook,
             save_dropped_file,
             ensure_engine_server,
@@ -592,6 +1039,20 @@ pub fn run() {
             stop_engine,
             interrupt_engine,
             restart_engine,
+            add_secret,
+            get_secret,
+            get_secret_authenticated,
+            list_secrets,
+            update_secret,
+            delete_secret,
+            get_all_secrets,
+            import_secrets_from_env,
+            scan_outputs_for_secrets,
+            authenticate_secrets_access,
+            check_secrets_session,
+            lock_secrets_session,
+            test_secrets_loading,
+            open_project_window,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

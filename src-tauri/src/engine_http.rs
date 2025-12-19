@@ -367,6 +367,36 @@ impl EngineServer {
             project_root.to_string_lossy().to_string()
         );
 
+        // Load and inject secrets from SecretsManager
+        let mut secrets_for_redaction = std::collections::HashMap::new();
+        println!("DEBUG: Loading secrets from project root: {}", project_root.display());
+        match crate::secrets::SecretsManager::new(project_root) {
+            Ok(secrets_manager) => {
+                println!("DEBUG: SecretsManager initialized successfully");
+                match secrets_manager.get_all_secrets_with_values() {
+                    Ok(secrets) => {
+                        println!("DEBUG: Loaded {} secrets from database", secrets.len());
+                        for (key, value) in secrets {
+                            println!("DEBUG: Injecting secret: {} (length: {})", key, value.len());
+                            // Add to env_vars for kernel
+                            env_vars.insert(key.clone(), value.clone());
+                            // Also store in secrets_for_redaction for output checking
+                            secrets_for_redaction.insert(key, value);
+                        }
+                        println!("DEBUG: Total env_vars after secrets: {}", env_vars.len());
+                    }
+                    Err(e) => {
+                        eprintln!("ERROR: Failed to load secrets: {}", e);
+                        // Continue without secrets
+                    }
+                }
+            }
+            Err(e) => {
+                eprintln!("ERROR: Failed to initialize SecretsManager: {}", e);
+                // Continue without secrets
+            }
+        }
+
         let response = HTTP_CLIENT
             .post(&url)
             .json(&serde_json::json!({
@@ -374,7 +404,8 @@ impl EngineServer {
                 "project_root": project_root.to_string_lossy(),
                 "venv_path": venv_path.to_string_lossy(),
                 "engine_name": "python3",
-                "env_vars": env_vars
+                "env_vars": env_vars,
+                "secrets": secrets_for_redaction  // Pass secrets separately for output redaction
             }))
             .send()
             .await?;
@@ -550,6 +581,32 @@ impl EngineServer {
             "TETHER_PROJECT_FOLDER".to_string(),
             project_root.to_string_lossy().to_string()
         );
+
+        // Load and inject secrets from SecretsManager
+        println!("DEBUG (RESTART): Loading secrets from project root: {}", project_root.display());
+        match crate::secrets::SecretsManager::new(project_root) {
+            Ok(secrets_manager) => {
+                println!("DEBUG (RESTART): SecretsManager initialized successfully");
+                match secrets_manager.get_all_secrets_with_values() {
+                    Ok(secrets) => {
+                        println!("DEBUG (RESTART): Loaded {} secrets from database", secrets.len());
+                        for (key, value) in secrets {
+                            println!("DEBUG (RESTART): Injecting secret: {} (length: {})", key, value.len());
+                            env_vars.insert(key, value);
+                        }
+                        println!("DEBUG (RESTART): Total env_vars after secrets: {}", env_vars.len());
+                    }
+                    Err(e) => {
+                        eprintln!("ERROR (RESTART): Failed to load secrets: {}", e);
+                        // Continue without secrets
+                    }
+                }
+            }
+            Err(e) => {
+                eprintln!("ERROR (RESTART): Failed to initialize SecretsManager: {}", e);
+                // Continue without secrets
+            }
+        }
 
         let response = HTTP_CLIENT
             .post(&url)

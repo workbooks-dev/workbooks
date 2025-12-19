@@ -2,59 +2,42 @@
 
 ## FileViewer Enhancements
 
-- [ ] Image viewer for PNG, JPG, SVG
-  - [ ] Display images directly
-  - [ ] Zoom functionality
-  - [ ] Basic metadata display
-
-- [ ] CSV preview/editor
-  - [ ] Table view for CSV files
-  - [ ] Sortable columns
-  - [ ] Basic filtering
-  - [ ] Edit support (future)
-
-- [ ] JSON tree viewer
-  - [ ] Expandable/collapsible tree
-  - [ ] Syntax highlighting
-  - [ ] Better than plain text view
-
 - [ ] Better file type support
   - [ ] SQLite database browser
   - [ ] Parquet file preview
   - [ ] Excel file viewer
+  - [ ] PDF viewer
+
+- [ ] Image viewer enhancements
+  - [ ] Basic metadata display (dimensions, file size)
+  - [ ] Pan/drag support for zoomed images
+
+- [ ] CSV enhancements
+  - [ ] Basic filtering
+  - [ ] Edit support (future)
+  - [ ] Show all rows option (with warning)
 
 ## File Drop Improvements
-
-- [ ] Visual drop zone indicator
-  - [ ] Show overlay when dragging files
-  - [ ] Highlight drop target
-  - [ ] Clear feedback on drop
 
 - [ ] Upload progress
   - [ ] Progress bar for large files
   - [ ] Cancel upload option
   - [ ] Success/error messages
 
-- [ ] Batch file upload
-  - [ ] Handle multiple files at once
+- [ ] Batch file upload enhancements
   - [ ] Preserve folder structure (optional)
   - [ ] Summary of uploaded files
 
 ## File Operations
 
-- [ ] Create new file from template
-  - [ ] Empty file
-  - [ ] Common file types (CSV, JSON, .py, .md)
-  - [ ] File creation dialog
+- [ ] File templates
+  - [ ] Common file types with starter content (CSV headers, JSON schema, .py template, .md template)
+  - [ ] Custom templates
 
 - [ ] Move files between folders
   - [ ] Drag and drop within tree
   - [ ] Move to folder dialog
   - [ ] Update all references (future)
-
-- [ ] Create new folders
-  - [ ] Right-click → New Folder
-  - [ ] Organize files into structure
 
 - [ ] Bulk operations
   - [ ] Multi-select files
@@ -63,10 +46,10 @@
 
 ## Search & Filter
 
-- [ ] File search
-  - [ ] Search by filename
+- [ ] Advanced search
   - [ ] Filter by file type
   - [ ] Search file contents (future)
+  - [ ] File size filters
 
 - [ ] Recent files tracking
   - [ ] Track last 20 opened files

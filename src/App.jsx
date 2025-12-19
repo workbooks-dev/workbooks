@@ -9,6 +9,7 @@ import { CreateProject } from "./components/CreateProject";
 import { Sidebar } from "./components/Sidebar";
 import { WorkbookViewer } from "./components/WorkbookViewer";
 import { FileViewer } from "./components/FileViewer";
+import { SecretsManager } from "./components/SecretsManager";
 import { TabBar } from "./components/TabBar";
 import "./App.css";
 
@@ -18,11 +19,50 @@ function App() {
   const [view, setView] = useState("loading"); // loading, welcome, create, project
   const [tabs, setTabs] = useState([]);
   const [activeTabId, setActiveTabId] = useState(null);
-  const [autosaveEnabled, setAutosaveEnabled] = useState(true);
   const [isDragging, setIsDragging] = useState(false);
 
   useEffect(() => {
-    checkCurrentProject();
+    // Check if project path is provided via URL parameter
+    const urlParams = new URLSearchParams(window.location.search);
+    const projectPath = urlParams.get('project');
+
+    if (projectPath) {
+      // Load project from URL parameter
+      loadProjectFromPath(projectPath);
+    } else {
+      // Check for current project
+      checkCurrentProject();
+    }
+  }, []);
+
+  // Listen for menu events from native menu
+  useEffect(() => {
+    let unlisten;
+
+    const setupMenuListener = async () => {
+      unlisten = await listen("menu:open-new-window", async () => {
+        try {
+          const { open } = await import("@tauri-apps/plugin-dialog");
+          const folderPath = await open({
+            directory: true,
+            multiple: false,
+            title: "Open Project in New Window",
+          });
+
+          if (folderPath) {
+            await invoke("open_project_window", { projectPath: folderPath });
+          }
+        } catch (error) {
+          console.error("Failed to open project in new window:", error);
+        }
+      });
+    };
+
+    setupMenuListener();
+
+    return () => {
+      if (unlisten) unlisten();
+    };
   }, []);
 
   // Listen for Tauri file drop events
@@ -157,6 +197,58 @@ function App() {
     };
   }, [tabs]);
 
+  // Handle Command+W to close tabs or window
+  useEffect(() => {
+    if (view !== "project") return;
+
+    const handleKeyDown = async (event) => {
+      // Command+W on macOS or Ctrl+W on other platforms
+      if ((event.metaKey || event.ctrlKey) && event.key === "w") {
+        event.preventDefault();
+
+        // If there's an active tab, close it
+        if (activeTabId) {
+          const tabToClose = tabs.find((tab) => tab.id === activeTabId);
+
+          // Check if the tab has unsaved changes
+          if (tabToClose?.hasUnsavedChanges) {
+            const shouldClose = await ask(
+              "You have unsaved changes. Close without saving?",
+              {
+                title: "Unsaved Changes",
+                kind: "warning",
+                okLabel: "Close",
+                cancelLabel: "Cancel",
+              }
+            );
+
+            if (!shouldClose) {
+              return;
+            }
+          }
+
+          handleTabClose(activeTabId);
+
+          // If this was the last tab, close the window
+          if (tabs.length === 1) {
+            const appWindow = getCurrentWindow();
+            await appWindow.close();
+          }
+        } else if (tabs.length === 0) {
+          // No tabs open, close the window
+          const appWindow = getCurrentWindow();
+          await appWindow.close();
+        }
+      }
+    };
+
+    window.addEventListener("keydown", handleKeyDown);
+
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [view, tabs, activeTabId]);
+
   async function checkCurrentProject() {
     try {
       const project = await invoke("get_current_project");
@@ -169,6 +261,20 @@ function App() {
       }
     } catch (error) {
       console.error("Failed to get current project:", error);
+      setView("welcome");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function loadProjectFromPath(projectPath) {
+    try {
+      const project = await invoke("load_project", { projectPath });
+      setCurrentProject(project);
+      restoreTabs(project);
+      setView("project");
+    } catch (error) {
+      console.error("Failed to load project:", error);
       setView("welcome");
     } finally {
       setLoading(false);
@@ -221,6 +327,8 @@ function App() {
       path: filePath,
       type: fileType,
       hasUnsavedChanges: false,
+      // For special tabs like secrets, use a friendly name
+      name: fileType === 'secrets' ? 'Secrets' : undefined,
     };
 
     setTabs([...tabs, newTab]);
@@ -309,6 +417,7 @@ function App() {
           </div>
         </div>
       )}
+
       <div className="flex flex-1 overflow-hidden">
         <aside className="w-64 border-r border-gray-200 bg-gray-50 overflow-y-auto flex-shrink-0">
           <Sidebar
@@ -325,8 +434,6 @@ function App() {
             activeTabId={activeTabId}
             onTabSelect={handleTabSelect}
             onTabClose={handleTabClose}
-            autosaveEnabled={autosaveEnabled}
-            onAutosaveToggle={setAutosaveEnabled}
           />
           <div className="h-full">
             {activeTab ? (
@@ -335,9 +442,14 @@ function App() {
                   key={activeTab.id}
                   workbookPath={activeTab.path}
                   projectRoot={currentProject.root}
-                  autosaveEnabled={autosaveEnabled}
                   onClose={() => handleTabClose(activeTab.id)}
                   onUnsavedChangesUpdate={(hasChanges) => updateTabUnsavedState(activeTab.id, hasChanges)}
+                />
+              ) : activeTab.type === "secrets" ? (
+                <SecretsManager
+                  key={activeTab.id}
+                  projectRoot={currentProject.root}
+                  onClose={() => handleTabClose(activeTab.id)}
                 />
               ) : (
                 <FileViewer

@@ -310,6 +310,25 @@ npm run tauri build
 
 6. **Keep it simple** - Use JSX, not TypeScript, unless absolutely necessary. Minimize complexity.
 
+## UI Design & Style Guide
+
+**All UI components must follow the design patterns defined in `STYLE_GUIDE.md`.**
+
+Key principles:
+- **Clean & Minimal** - Professional, understated aesthetic
+- **Grayscale + Blue accents** - Consistent color palette across all components
+- **No heavy gradients or shadows** - Flat, modern design
+- **Tailwind CSS** - Use Tailwind utility classes for all styling
+- **Consistent spacing** - Follow Tailwind's spacing scale
+- **Semantic colors** - Blue for primary, red for danger, amber for warnings
+
+Before creating or modifying UI components:
+1. Read `STYLE_GUIDE.md` to understand approved patterns
+2. Reference existing components (Sidebar, WorkbookViewer) for consistency
+3. Use the component templates in the style guide
+4. Avoid custom CSS unless absolutely necessary (prefer Tailwind utilities)
+5. Match the app's professional, minimal aesthetic
+
 ## Future Considerations
 
 - Cloud sync for state (S3/R2)

@@ -268,6 +268,14 @@ pub fn read_file(file_path: &Path) -> Result<String> {
     Ok(content)
 }
 
+/// Read a file as binary (for images, etc.)
+pub fn read_file_binary(file_path: &Path) -> Result<Vec<u8>> {
+    let content = fs::read(file_path)
+        .context("Failed to read file as binary")?;
+
+    Ok(content)
+}
+
 /// Save generic text file content
 pub fn save_file(file_path: &Path, content: &str) -> Result<()> {
     fs::write(file_path, content)
@@ -383,4 +391,47 @@ pub fn save_dropped_file(project_root: &Path, file_name: &str, file_content: &[u
         .context("Failed to write dropped file")?;
 
     Ok(target_path.to_string_lossy().to_string())
+}
+
+/// Create a new empty file
+pub fn create_new_file(parent_path: &Path, file_name: &str, initial_content: Option<&str>) -> Result<String> {
+    // Ensure parent directory exists
+    if !parent_path.exists() {
+        anyhow::bail!("Parent directory does not exist");
+    }
+
+    let file_path = parent_path.join(file_name);
+
+    // Check if file already exists
+    if file_path.exists() {
+        anyhow::bail!("A file with that name already exists");
+    }
+
+    // Write initial content (empty string if none provided)
+    let content = initial_content.unwrap_or("");
+    fs::write(&file_path, content)
+        .context("Failed to create file")?;
+
+    Ok(file_path.to_string_lossy().to_string())
+}
+
+/// Create a new folder
+pub fn create_new_folder(parent_path: &Path, folder_name: &str) -> Result<String> {
+    // Ensure parent directory exists
+    if !parent_path.exists() {
+        anyhow::bail!("Parent directory does not exist");
+    }
+
+    let folder_path = parent_path.join(folder_name);
+
+    // Check if folder already exists
+    if folder_path.exists() {
+        anyhow::bail!("A folder with that name already exists");
+    }
+
+    // Create the directory
+    fs::create_dir(&folder_path)
+        .context("Failed to create folder")?;
+
+    Ok(folder_path.to_string_lossy().to_string())
 }

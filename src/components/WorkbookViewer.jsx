@@ -6,6 +6,7 @@ import Editor from "@monaco-editor/react";
 import ReactMarkdown from "react-markdown";
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
 import { vscDarkPlus } from "react-syntax-highlighter/dist/esm/styles/prism";
+import { SecretsWarningModal } from "./SecretsWarningModal";
 
 // Hash function to match Rust implementation in lib.rs
 function hashString(s) {
@@ -368,6 +369,23 @@ function CellOutput({ output }) {
   // Check if output was truncated by the backend
   const isTruncatedByBackend = output.metadata && output.metadata.truncated === true;
 
+  // Check if output contains secrets
+  const containsSecrets = output.metadata && output.metadata.contains_secrets === true;
+
+  // If output contains secrets, show redacted message
+  if (containsSecrets) {
+    return (
+      <div className="cell-output-content p-3 bg-yellow-50 border-t border-yellow-200">
+        <div className="flex items-center gap-2 text-yellow-800 text-sm font-medium">
+          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
+          </svg>
+          <span>[secret hidden here]</span>
+        </div>
+      </div>
+    );
+  }
+
   // Strip ANSI color codes from text
   const stripAnsi = (text) => {
     if (!text) return text;
@@ -602,13 +620,16 @@ export function WorkbookViewer({ workbookPath, projectRoot, autosaveEnabled = tr
   const lastDKeyPressRef = useRef(0); // Track last 'D' key press for double-tap delete
   const executionTimerRef = useRef(null); // Timer for updating elapsed time
   const outputListenerRef = useRef(null); // Track active output listener to prevent duplicates
+  const [showSecretsWarning, setShowSecretsWarning] = useState(false);
+  const [cellsWithSecrets, setCellsWithSecrets] = useState([]);
+  const [hasSecretsInOutputs, setHasSecretsInOutputs] = useState(false);
 
   useEffect(() => {
     loadWorkbook();
     startEngine();
 
     return () => {
-      // Cleanup: stop engine and event listener when component unmounts
+      // Cleanup: stop engine when component unmounts
       if (currentUnlistenRef.current) {
         currentUnlistenRef.current();
         currentUnlistenRef.current = null;
@@ -623,6 +644,30 @@ export function WorkbookViewer({ workbookPath, projectRoot, autosaveEnabled = tr
       onUnsavedChangesUpdate(hasUnsavedChanges);
     }
   }, [hasUnsavedChanges]);
+
+  // Scan for secrets whenever notebook changes
+  useEffect(() => {
+    const scanForSecrets = async () => {
+      if (!notebook || !projectRoot) return;
+
+      try {
+        const cellsJson = JSON.stringify(notebook.cells);
+        const scanResult = await invoke("scan_outputs_for_secrets", {
+          projectPath: projectRoot,
+          cellsJson: cellsJson,
+        });
+
+        setHasSecretsInOutputs(scanResult.has_secrets);
+        setCellsWithSecrets(scanResult.cell_indices);
+      } catch (err) {
+        // On error, assume no secrets (silently fail)
+        setHasSecretsInOutputs(false);
+        setCellsWithSecrets([]);
+      }
+    };
+
+    scanForSecrets();
+  }, [notebook, projectRoot]);
 
   // Autosave removed - user must explicitly save via Cmd+S or Save button
 
@@ -810,17 +855,37 @@ export function WorkbookViewer({ workbookPath, projectRoot, autosaveEnabled = tr
     }
   };
 
-  const saveWorkbook = async () => {
+  const saveWorkbook = async (skipSecretsCheck = false) => {
     if (!notebook) return;
 
+    // If secrets are in outputs and we're not skipping the check, show modal instead of saving
+    if (!skipSecretsCheck && hasSecretsInOutputs) {
+      setShowSecretsWarning(true);
+      return; // Don't save yet - wait for user action from modal
+    }
+
     try {
-      // Make a copy to ensure we have the latest state
+
+      // No secrets detected (or check was skipped), proceed with save
       const notebookToSave = {
         ...notebook,
         cells: notebook.cells.map(cell => ({
           ...cell,
           // Ensure source is always an array of strings
           source: Array.isArray(cell.source) ? cell.source : [cell.source],
+          // Redact outputs that contain secrets (backward compatibility)
+          outputs: cell.outputs ? cell.outputs.map(output => {
+            // If output contains secrets, replace with redacted message
+            if (output.metadata && output.metadata.contains_secrets === true) {
+              return {
+                output_type: "stream",
+                name: "stdout",
+                text: "[secret hidden here]\n",
+                metadata: { contains_secrets: true }
+              };
+            }
+            return output;
+          }) : cell.outputs,
         })),
       };
 
@@ -835,6 +900,46 @@ export function WorkbookViewer({ workbookPath, projectRoot, autosaveEnabled = tr
       console.error("Failed to save notebook:", err);
       setError(err.toString());
     }
+  };
+
+  const handleClearAndSave = async () => {
+    // Clear outputs from cells that contain secrets
+    setNotebook(prevNotebook => {
+      const newCells = prevNotebook.cells.map((cell, index) => {
+        if (cellsWithSecrets.includes(index)) {
+          return {
+            ...cell,
+            outputs: [],
+          };
+        }
+        return cell;
+      });
+      return { ...prevNotebook, cells: newCells };
+    });
+
+    // Close modal
+    setShowSecretsWarning(false);
+    setCellsWithSecrets([]);
+
+    // Save with skip check since we just cleared the outputs
+    setTimeout(() => {
+      saveWorkbook(true);
+    }, 100); // Small delay to ensure state update
+  };
+
+  const handleGoBack = () => {
+    // Just close the modal and let user fix manually
+    setShowSecretsWarning(false);
+    setCellsWithSecrets([]);
+  };
+
+  const handleDangerouslySave = async () => {
+    // Close modal
+    setShowSecretsWarning(false);
+    setCellsWithSecrets([]);
+
+    // Save without secrets check
+    await saveWorkbook(true);
   };
 
   const updateCell = (index, newContent) => {
@@ -1429,11 +1534,15 @@ export function WorkbookViewer({ workbookPath, projectRoot, autosaveEnabled = tr
             </span>
             {hasUnsavedChanges && (
               <button
-                onClick={saveWorkbook}
-                className="px-3 py-1.5 text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 rounded-md transition-colors shadow-sm"
-                title="Save notebook"
+                onClick={() => saveWorkbook()}
+                className={`px-3 py-1.5 text-sm font-medium text-white rounded-md transition-colors shadow-sm ${
+                  hasSecretsInOutputs
+                    ? 'bg-amber-600 hover:bg-amber-700'
+                    : 'bg-blue-600 hover:bg-blue-700'
+                }`}
+                title={hasSecretsInOutputs ? "Secrets detected in outputs - click to review" : "Save notebook"}
               >
-                Save
+                {hasSecretsInOutputs ? '⚠ Save' : 'Save'}
               </button>
             )}
           </div>
@@ -1545,6 +1654,16 @@ export function WorkbookViewer({ workbookPath, projectRoot, autosaveEnabled = tr
           />
         ))}
       </div>
+
+      {/* Secrets Warning Modal */}
+      {showSecretsWarning && (
+        <SecretsWarningModal
+          cellIndices={cellsWithSecrets}
+          onClearAndSave={handleClearAndSave}
+          onGoBack={handleGoBack}
+          onDangerouslySave={handleDangerouslySave}
+        />
+      )}
     </div>
   );
 }

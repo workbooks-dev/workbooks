@@ -4,6 +4,7 @@ FastAPI-based Jupyter engine manager for Tether.
 Manages engine lifecycle and code execution.
 """
 import sys
+import os
 import asyncio
 from contextlib import asynccontextmanager
 from typing import Dict, List, Any
@@ -18,6 +19,9 @@ import re
 
 # Store engine managers per workbook path
 engines: Dict[str, AsyncKernelManager] = {}
+
+# Store secret values per workbook for output redaction
+secret_values: Dict[str, Dict[str, str]] = {}  # workbook_path -> {key: value}
 
 
 def slugify_kernel_name(name: str) -> str:
@@ -35,6 +39,21 @@ def slugify_kernel_name(name: str) -> str:
     return slug
 
 
+def contains_secret(text: str, secrets: Dict[str, str]) -> bool:
+    """
+    Check if text contains any secret values.
+    Returns True if any secret value is found in the text.
+    """
+    if not text or not secrets:
+        return False
+
+    for secret_value in secrets.values():
+        if secret_value and secret_value in text:
+            return True
+
+    return False
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifespan context manager for startup and shutdown events."""
@@ -47,6 +66,7 @@ async def lifespan(app: FastAPI):
         except Exception:
             pass
     engines.clear()
+    secret_values.clear()
 
 
 app = FastAPI(title="Tether Engine Server", lifespan=lifespan)
@@ -67,6 +87,7 @@ class StartEngineRequest(BaseModel):
     venv_path: str
     engine_name: str = "python3"
     env_vars: Dict[str, str] | None = None  # Optional environment variables to inject
+    secrets: Dict[str, str] | None = None  # Secret key-value pairs for output redaction
 
 
 class ExecuteRequest(BaseModel):
@@ -83,6 +104,7 @@ class Output(BaseModel):
     ename: str | None = None
     evalue: str | None = None
     traceback: List[str] | None = None
+    metadata: Dict[str, Any] | None = None  # For contains_secrets and other flags
 
 
 class ExecuteResponse(BaseModel):
@@ -211,8 +233,23 @@ async def start_engine(request: StartEngineRequest):
         print(f"Creating engine manager with engine_name='{engine_spec_name}'...")
         km = AsyncKernelManager(kernel_name=engine_spec_name)
 
-        print("Starting engine process...")
-        await km.start_kernel(cwd=project_root)
+        # Prepare environment variables for the kernel
+        # Start with the current environment and add our custom vars
+        kernel_env = os.environ.copy()
+
+        # Inject custom environment variables (secrets, project folder, etc.)
+        if request.env_vars:
+            for key, value in request.env_vars.items():
+                kernel_env[key] = value
+                # Mask secret values in logs for security
+                if len(value) > 10:
+                    masked_value = value[:4] + "..." + value[-4:]
+                else:
+                    masked_value = "***"
+                print(f"Injecting env var into kernel: {key}={masked_value}")
+
+        print("Starting engine process with environment variables...")
+        await km.start_kernel(cwd=project_root, env=kernel_env)
 
         # Wait for engine to be ready
         print("Getting engine client...")
@@ -229,6 +266,14 @@ async def start_engine(request: StartEngineRequest):
             raise HTTPException(status_code=500, detail=f"Engine failed to start: {str(e)}")
 
         engines[workbook_path] = km
+
+        # Store secret values for output redaction
+        if request.secrets:
+            secret_values[workbook_path] = request.secrets
+            print(f"Stored {len(request.secrets)} secret values for output redaction")
+        else:
+            secret_values[workbook_path] = {}
+
         print(f"Engine started successfully for {workbook_path}")
 
         return {
@@ -308,17 +353,36 @@ async def execute_code(request: ExecuteRequest):
                             truncated = True
                         continue
 
+                    # Check if output contains secrets
+                    secrets = secret_values.get(workbook_path, {})
+                    metadata = None
+                    if contains_secret(text, secrets):
+                        metadata = {"contains_secrets": True}
+
                     new_output = Output(
                         output_type="stream",
                         name=content["name"],
                         text=text,
+                        metadata=metadata,
                     )
 
                 elif msg_type == "execute_result":
+                    # Check if output contains secrets (check text/plain repr)
+                    secrets = secret_values.get(workbook_path, {})
+                    metadata = None
+                    data = content["data"]
+                    if "text/plain" in data:
+                        text_repr = data["text/plain"]
+                        if isinstance(text_repr, list):
+                            text_repr = "".join(text_repr)
+                        if contains_secret(text_repr, secrets):
+                            metadata = {"contains_secrets": True}
+
                     new_output = Output(
                         output_type="execute_result",
-                        data=content["data"],
+                        data=data,
                         execution_count=content["execution_count"],
+                        metadata=metadata,
                     )
 
                 elif msg_type == "display_data":
@@ -329,11 +393,21 @@ async def execute_code(request: ExecuteRequest):
 
                 elif msg_type == "error":
                     has_error = True
+
+                    # Check if error output contains secrets
+                    secrets = secret_values.get(workbook_path, {})
+                    metadata = None
+                    traceback_text = "\n".join(content["traceback"]) if content["traceback"] else ""
+                    error_text = f"{content['ename']}: {content['evalue']}\n{traceback_text}"
+                    if contains_secret(error_text, secrets):
+                        metadata = {"contains_secrets": True}
+
                     new_output = Output(
                         output_type="error",
                         ename=content["ename"],
                         evalue=content["evalue"],
                         traceback=content["traceback"],
+                        metadata=metadata,
                     )
 
                 elif msg_type == "status" and content["execution_state"] == "idle":
@@ -459,18 +533,40 @@ async def execute_code_stream(request: ExecuteRequest):
                     output_data = None
 
                     if msg_type == "stream":
+                        text = content["text"]
+                        # Check if output contains secrets
+                        secrets = secret_values.get(workbook_path, {})
+                        metadata = None
+                        if contains_secret(text, secrets):
+                            metadata = {"contains_secrets": True}
+
                         output_data = {
                             "output_type": "stream",
                             "name": content["name"],
-                            "text": content["text"],
+                            "text": text,
                         }
+                        if metadata:
+                            output_data["metadata"] = metadata
 
                     elif msg_type == "execute_result":
+                        # Check if output contains secrets
+                        secrets = secret_values.get(workbook_path, {})
+                        metadata = None
+                        data = content["data"]
+                        if "text/plain" in data:
+                            text_repr = data["text/plain"]
+                            if isinstance(text_repr, list):
+                                text_repr = "".join(text_repr)
+                            if contains_secret(text_repr, secrets):
+                                metadata = {"contains_secrets": True}
+
                         output_data = {
                             "output_type": "execute_result",
-                            "data": content["data"],
+                            "data": data,
                             "execution_count": content["execution_count"],
                         }
+                        if metadata:
+                            output_data["metadata"] = metadata
 
                     elif msg_type == "display_data":
                         output_data = {
@@ -479,12 +575,22 @@ async def execute_code_stream(request: ExecuteRequest):
                         }
 
                     elif msg_type == "error":
+                        # Check if error output contains secrets
+                        secrets = secret_values.get(workbook_path, {})
+                        metadata = None
+                        traceback_text = "\n".join(content["traceback"]) if content["traceback"] else ""
+                        error_text = f"{content['ename']}: {content['evalue']}\n{traceback_text}"
+                        if contains_secret(error_text, secrets):
+                            metadata = {"contains_secrets": True}
+
                         output_data = {
                             "output_type": "error",
                             "ename": content["ename"],
                             "evalue": content["evalue"],
                             "traceback": content["traceback"],
                         }
+                        if metadata:
+                            output_data["metadata"] = metadata
 
                     # Send output event
                     if output_data:
@@ -533,6 +639,8 @@ async def execute_code_stream(request: ExecuteRequest):
 async def stop_engine(workbook_path: str):
     """Stop a workbook's engine."""
     km = engines.pop(workbook_path, None)
+    secret_values.pop(workbook_path, None)  # Clean up secret values
+
     if km:
         try:
             await km.shutdown_kernel()
