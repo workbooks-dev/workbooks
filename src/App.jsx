@@ -502,6 +502,7 @@ function App() {
                 <FileViewer
                   key={activeTab.id}
                   filePath={activeTab.path}
+                  projectRoot={currentProject.root}
                   onClose={() => handleTabClose(activeTab.id)}
                   onUnsavedChangesUpdate={(hasChanges) => updateTabUnsavedState(activeTab.id, hasChanges)}
                 />

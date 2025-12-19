@@ -34,6 +34,7 @@
     - [x] Remote images from URLs (http/https)
     - [x] Local images via relative paths (e.g., `./images/plot.png`)
     - [x] Local images via absolute paths
+    - [x] Environment variable substitution ($TETHER_PROJECT_FOLDER and ${TETHER_PROJECT_FOLDER})
     - [x] Automatic conversion to Tauri asset protocol
     - [x] Error handling with fallback image
     - [x] Responsive image sizing with rounded corners
@@ -109,7 +110,7 @@
 
 - [x] Add new cells (above/below)
 - [x] Delete cells
-- [x] Move cells up/down
+- [x] Move cells up/down (with proper React key handling for UI updates)
 - [x] Change cell type (code/markdown)
 - [x] Clear cell outputs
 - [x] Prevent deleting last cell

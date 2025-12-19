@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { ask } from "@tauri-apps/plugin-dialog";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
@@ -40,12 +40,23 @@ function SidebarSection({ title, children, defaultExpanded = true, onHeaderClick
 }
 
 // File tree item for Files section (filters out .ipynb)
-function FileTreeItem({ file, level = 0, onFileClick, onFileAction, activeFilePath, projectRoot }) {
+function FileTreeItem({ file, level = 0, onFileClick, onFileAction, activeFilePath, projectRoot, showPath = false }) {
   const [isExpanded, setIsExpanded] = useState(false);
   const [children, setChildren] = useState([]);
   const [loading, setLoading] = useState(false);
   const [showContextMenu, setShowContextMenu] = useState(false);
   const [contextMenuPos, setContextMenuPos] = useState({ x: 0, y: 0 });
+
+  // Get relative path for display in search results
+  const getRelativePath = () => {
+    if (!showPath || !projectRoot) return null;
+    const relativePath = file.path.replace(projectRoot, '').replace(/^\//, '');
+    const pathParts = relativePath.split('/');
+    if (pathParts.length > 1) {
+      return pathParts.slice(0, -1).join('/');
+    }
+    return null;
+  };
 
   const handleToggle = async () => {
     if (file.is_dir) {
@@ -113,6 +124,8 @@ function FileTreeItem({ file, level = 0, onFileClick, onFileAction, activeFilePa
 
   const isActive = activeFilePath === file.path;
 
+  const relativePath = getRelativePath();
+
   return (
     <>
       <div
@@ -126,7 +139,14 @@ function FileTreeItem({ file, level = 0, onFileClick, onFileAction, activeFilePa
         onContextMenu={handleContextMenu}
       >
         <span className="text-xs opacity-60 w-4 text-center flex-shrink-0">{getFileIcon()}</span>
-        <span className="flex-1 overflow-hidden text-ellipsis whitespace-nowrap">{file.name}</span>
+        <div className="flex-1 overflow-hidden">
+          <span className="overflow-hidden text-ellipsis whitespace-nowrap block">{file.name}</span>
+          {relativePath && (
+            <span className="text-xs text-gray-500 overflow-hidden text-ellipsis whitespace-nowrap block">
+              {relativePath}
+            </span>
+          )}
+        </div>
         {loading && <span className="text-xs text-gray-400">...</span>}
       </div>
       {showContextMenu && (
@@ -167,11 +187,37 @@ export function Sidebar({ projectRoot, projectName, onOpenFile, onFileDeleted, a
   const [recentWorkbooks, setRecentWorkbooks] = useState([]);
   const [secretsCount, setSecretsCount] = useState(0);
   const [fileSearchQuery, setFileSearchQuery] = useState("");
+  const [searchResults, setSearchResults] = useState([]);
+  const [searching, setSearching] = useState(false);
   const [creatingFile, setCreatingFile] = useState(false);
   const [creatingFolder, setCreatingFolder] = useState(false);
   const [newItemName, setNewItemName] = useState("");
   const [fileInfo, setFileInfo] = useState(null);
   const [creatingInFolder, setCreatingInFolder] = useState(null);
+
+  // Refs for file/folder creation inputs to ensure focus
+  const fileInputRef = useRef(null);
+  const folderInputRef = useRef(null);
+
+  // Focus file input when creatingFile becomes true
+  useEffect(() => {
+    if (creatingFile && fileInputRef.current) {
+      // Use setTimeout to ensure DOM is ready
+      setTimeout(() => {
+        fileInputRef.current?.focus();
+      }, 0);
+    }
+  }, [creatingFile]);
+
+  // Focus folder input when creatingFolder becomes true
+  useEffect(() => {
+    if (creatingFolder && folderInputRef.current) {
+      // Use setTimeout to ensure DOM is ready
+      setTimeout(() => {
+        folderInputRef.current?.focus();
+      }, 0);
+    }
+  }, [creatingFolder]);
 
   useEffect(() => {
     loadProjectFiles();
@@ -273,7 +319,61 @@ export function Sidebar({ projectRoot, projectName, onOpenFile, onFileDeleted, a
     );
   };
 
+  // Recursively collect all files from a folder tree
+  const getAllFilesRecursive = async (dirPath) => {
+    try {
+      const fileList = await invoke("list_files", {
+        directoryPath: dirPath,
+      });
+
+      const allFiles = [];
+      for (const file of fileList) {
+        allFiles.push(file);
+        if (file.is_dir) {
+          const subFiles = await getAllFilesRecursive(file.path);
+          allFiles.push(...subFiles);
+        }
+      }
+      return allFiles;
+    } catch (err) {
+      console.error("Failed to load folder contents:", err);
+      return [];
+    }
+  };
+
+  // Handle file search - debounce and search recursively
+  useEffect(() => {
+    const performSearch = async () => {
+      if (!fileSearchQuery.trim()) {
+        setSearching(false);
+        setSearchResults([]);
+        return;
+      }
+
+      setSearching(true);
+      try {
+        // Get all files recursively
+        const allFiles = await getAllFilesRecursive(projectRoot);
+        // Filter files (not folders)
+        const filesOnly = allFiles.filter(f => !f.is_dir && f.extension !== "ipynb");
+        // Filter by search query
+        const results = filterFiles(filesOnly, fileSearchQuery);
+        setSearchResults(results);
+      } catch (err) {
+        console.error("Search failed:", err);
+        setSearchResults([]);
+      } finally {
+        setSearching(false);
+      }
+    };
+
+    // Debounce search
+    const timeoutId = setTimeout(performSearch, 300);
+    return () => clearTimeout(timeoutId);
+  }, [fileSearchQuery, projectRoot]);
+
   const filteredFiles = filterFiles(files, fileSearchQuery);
+  const displayFiles = fileSearchQuery.trim() ? searchResults : files;
 
   const handleFileClick = (file) => {
     if (file.extension === "ipynb") {
@@ -612,12 +712,12 @@ export function Sidebar({ projectRoot, projectName, onOpenFile, onFileDeleted, a
             <div className="px-2 pb-2">
               <form onSubmit={handleCreateFile} className="p-2 bg-white border border-gray-200 rounded">
                 <input
+                  ref={fileInputRef}
                   type="text"
                   value={newItemName}
                   onChange={(e) => setNewItemName(e.target.value)}
                   placeholder="File name (e.g., data.csv)"
                   className="w-full px-2 py-1.5 text-sm border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500 mb-2"
-                  autoFocus
                 />
                 <div className="flex gap-1.5">
                   <button
@@ -642,12 +742,12 @@ export function Sidebar({ projectRoot, projectName, onOpenFile, onFileDeleted, a
             <div className="px-2 pb-2">
               <form onSubmit={handleCreateFolder} className="p-2 bg-white border border-gray-200 rounded">
                 <input
+                  ref={folderInputRef}
                   type="text"
                   value={newItemName}
                   onChange={(e) => setNewItemName(e.target.value)}
                   placeholder="Folder name"
                   className="w-full px-2 py-1.5 text-sm border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500 mb-2"
-                  autoFocus
                 />
                 <div className="flex gap-1.5">
                   <button
@@ -670,6 +770,7 @@ export function Sidebar({ projectRoot, projectName, onOpenFile, onFileDeleted, a
 
           <div className="px-1">
             {loading && <div className="px-4 py-3 text-xs text-gray-500">Loading...</div>}
+            {searching && <div className="px-4 py-3 text-xs text-gray-500">Searching...</div>}
 
             {!loading && files.length === 0 && (
               <div className="px-4 py-8 text-center text-xs text-gray-400">
@@ -677,13 +778,33 @@ export function Sidebar({ projectRoot, projectName, onOpenFile, onFileDeleted, a
               </div>
             )}
 
-            {!loading && filteredFiles.length === 0 && files.length > 0 && (
+            {!loading && !searching && fileSearchQuery.trim() && searchResults.length === 0 && (
               <div className="px-4 py-8 text-center text-xs text-gray-400">
                 No files match "{fileSearchQuery}"
               </div>
             )}
 
-            {!loading && filteredFiles.map((file) => (
+            {!loading && !searching && fileSearchQuery.trim() && searchResults.length > 0 && (
+              <>
+                <div className="px-4 py-2 text-xs text-gray-500">
+                  Found {searchResults.length} file{searchResults.length !== 1 ? 's' : ''}
+                </div>
+                {searchResults.map((file) => (
+                  <FileTreeItem
+                    key={file.path}
+                    file={file}
+                    level={0}
+                    onFileClick={handleFileClick}
+                    onFileAction={handleFileAction}
+                    activeFilePath={activeFilePath}
+                    projectRoot={projectRoot}
+                    showPath={true}
+                  />
+                ))}
+              </>
+            )}
+
+            {!loading && !fileSearchQuery.trim() && files.map((file) => (
               <FileTreeItem
                 key={file.path}
                 file={file}

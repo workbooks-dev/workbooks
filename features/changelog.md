@@ -6,6 +6,47 @@ This file tracks major features and improvements as they're completed.
 
 ### December 2024
 
+**Files Section UX Improvements (Dec 19, 2024)**
+- **Breadcrumb Navigation**: Added VS Code-style breadcrumb navigation to FileViewer
+  - Shows full file path with folder hierarchy instead of just filename
+  - Path separator (`/`) between folders
+  - Last item (filename) highlighted with bold text
+  - Handles text overflow with ellipsis
+  - Works in both regular file editor and image viewer headers
+  - Graceful fallback to simple filename when project root not available
+  - Files: `src/components/FileViewer.jsx`, `src/App.jsx`
+
+- **Focus Retention Fix**: Fixed input focus loss for file/folder creation
+  - "+ New File" button now properly retains input focus when clicked
+  - "+ New Folder" button now properly retains input focus when clicked
+  - Implemented using refs and useEffect for reliable focus management
+  - Prevents frustrating focus loss during file creation workflow
+  - Files: `src/components/Sidebar.jsx`
+
+**Critical Bug Fixes (Dec 19, 2024)**
+- **Cell Movement UI Fix**: Fixed React rendering issue with cell reordering
+  - Cells now properly update in the UI when moved up or down
+  - Added stable, unique IDs for each cell in metadata
+  - Changed from index-based keys to ID-based keys for proper React reconciliation
+  - Cells are assigned unique IDs on creation and when loading existing notebooks
+  - Files: `src/components/WorkbookViewer.jsx`
+
+- **Markdown Image Display**: Added environment variable support in markdown images
+  - Supports `$TETHER_PROJECT_FOLDER` and `${TETHER_PROJECT_FOLDER}` in image paths
+  - Example: `![plot]($TETHER_PROJECT_FOLDER/images/plot.png)`
+  - Automatically replaces variable with actual project root path
+  - Works with relative paths, absolute paths, and HTTP/HTTPS URLs
+  - Files: `src/components/WorkbookViewer.jsx`
+
+- **Recursive File Search**: Enhanced Files section with subfolder support
+  - Search now works recursively through all subfolders
+  - Debounced search (300ms) for better performance
+  - Shows file count in search results
+  - Displays file path in search results for context
+  - Flat list view in search mode shows all matching files with their locations
+  - Tree view preserved when not searching
+  - Files: `src/components/Sidebar.jsx`
+
 **Native macOS Menu Bar (Dec 19, 2024)**
 - **File Menu Fix**: Resolved missing File menu on macOS
   - Added explicit app menu ("tether") as first submenu to satisfy macOS requirements

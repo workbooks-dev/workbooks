@@ -143,6 +143,22 @@ function hashString(s) {
   return Math.abs(hash);
 }
 
+// Generate a unique ID for cells
+function generateCellId() {
+  return `cell-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+}
+
+// Ensure all cells have IDs
+function ensureCellIds(cells) {
+  return cells.map(cell => ({
+    ...cell,
+    metadata: {
+      ...cell.metadata,
+      cell_id: cell.metadata?.cell_id || generateCellId()
+    }
+  }));
+}
+
 function WorkbookCell({ cell, index, workbookPath, onUpdate, onDelete, onExecute, onMoveUp, onMoveDown, onClearOutput, isSelected, isEditMode, isRunning, executionElapsed, onSelect, onEnterEditMode, onInsertBelow, autosaveEnabled }) {
   // Initialize content from cell source ONCE on mount - don't sync after that
   const [content, setContent] = useState(cell.source.join(""));
@@ -284,12 +300,18 @@ function WorkbookCell({ cell, index, workbookPath, onUpdate, onDelete, onExecute
 
                       // If it's a relative path or absolute local path, convert it
                       if (src && !src.startsWith('http://') && !src.startsWith('https://') && !src.startsWith('data:')) {
-                        // Check if it's a relative path
-                        if (!src.startsWith('/')) {
-                          // Relative to project root
-                          const projectPath = workbookPath.substring(0, workbookPath.lastIndexOf('/'));
-                          imgSrc = `${projectPath}/${src}`;
+                        // Replace $TETHER_PROJECT_FOLDER with actual project root
+                        // This supports both $TETHER_PROJECT_FOLDER and ${TETHER_PROJECT_FOLDER}
+                        const projectRootPath = workbookPath.substring(0, workbookPath.lastIndexOf('/notebooks'));
+                        imgSrc = imgSrc.replace(/\$\{?TETHER_PROJECT_FOLDER\}?/g, projectRootPath);
+
+                        // Check if it's a relative path (after variable replacement)
+                        if (!imgSrc.startsWith('/')) {
+                          // Relative to workbook's directory (notebooks folder)
+                          const workbookDir = workbookPath.substring(0, workbookPath.lastIndexOf('/'));
+                          imgSrc = `${workbookDir}/${imgSrc}`;
                         }
+
                         // Convert to Tauri asset protocol
                         imgSrc = convertFileSrc(imgSrc);
                       }
@@ -1113,7 +1135,12 @@ export function WorkbookViewer({ workbookPath, projectRoot, autosaveEnabled = tr
         workbookPath: workbookPath,
       });
       const parsed = JSON.parse(content);
-      setNotebook(parsed);
+      // Ensure all cells have unique IDs for proper React rendering
+      const notebookWithIds = {
+        ...parsed,
+        cells: ensureCellIds(parsed.cells)
+      };
+      setNotebook(notebookWithIds);
       setHasUnsavedChanges(false);
     } catch (err) {
       console.error("Failed to load notebook:", err);
@@ -1296,7 +1323,9 @@ export function WorkbookViewer({ workbookPath, projectRoot, autosaveEnabled = tr
   const addCellAt = (index, type) => {
     const newCell = {
       cell_type: type,
-      metadata: {},
+      metadata: {
+        cell_id: generateCellId()
+      },
       source: [],
     };
 
@@ -1328,7 +1357,9 @@ export function WorkbookViewer({ workbookPath, projectRoot, autosaveEnabled = tr
         // Alt+Enter: insert new cell below and move to it
         const newCell = {
           cell_type: "code",
-          metadata: {},
+          metadata: {
+            cell_id: generateCellId()
+          },
           source: [],
           execution_count: null,
           outputs: [],
@@ -1346,7 +1377,9 @@ export function WorkbookViewer({ workbookPath, projectRoot, autosaveEnabled = tr
         } else {
           const newCell = {
             cell_type: "code",
-            metadata: {},
+            metadata: {
+              cell_id: generateCellId()
+            },
             source: [],
             execution_count: null,
             outputs: [],
@@ -1372,7 +1405,9 @@ export function WorkbookViewer({ workbookPath, projectRoot, autosaveEnabled = tr
         // Alt+Enter: insert new cell below and move to it
         const newCell = {
           cell_type: "code",
-          metadata: {},
+          metadata: {
+            cell_id: generateCellId()
+          },
           source: [],
           execution_count: null,
           outputs: [],
@@ -1391,7 +1426,9 @@ export function WorkbookViewer({ workbookPath, projectRoot, autosaveEnabled = tr
           // We're at the last cell, create a new code cell
           const newCell = {
             cell_type: "code",
-            metadata: {},
+            metadata: {
+              cell_id: generateCellId()
+            },
             source: [],
             execution_count: null,
             outputs: [],
@@ -1519,7 +1556,9 @@ export function WorkbookViewer({ workbookPath, projectRoot, autosaveEnabled = tr
         // Alt+Enter: insert new cell below and move to it
         const newCell = {
           cell_type: "code",
-          metadata: {},
+          metadata: {
+            cell_id: generateCellId()
+          },
           source: [],
           execution_count: null,
           outputs: [],
@@ -1541,7 +1580,9 @@ export function WorkbookViewer({ workbookPath, projectRoot, autosaveEnabled = tr
           // We're at the last cell, create a new code cell
           const newCell = {
             cell_type: "code",
-            metadata: {},
+            metadata: {
+              cell_id: generateCellId()
+            },
             source: [],
             execution_count: null,
             outputs: [],
@@ -1706,7 +1747,9 @@ export function WorkbookViewer({ workbookPath, projectRoot, autosaveEnabled = tr
   const addCell = (type) => {
     const newCell = {
       cell_type: type,
-      metadata: {},
+      metadata: {
+        cell_id: generateCellId()
+      },
       source: [],
     };
 
@@ -1911,7 +1954,7 @@ export function WorkbookViewer({ workbookPath, projectRoot, autosaveEnabled = tr
         )}
         {notebook.cells.map((cell, index) => (
           <WorkbookCell
-            key={index}
+            key={cell.metadata?.cell_id || index}
             cell={cell}
             index={index}
             workbookPath={workbookPath}

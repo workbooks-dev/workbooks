@@ -134,8 +134,22 @@
 
 - [x] Search files by name
 - [x] Real-time filtering
+- [x] Recursive search through all subfolders
+- [x] Debounced search for better performance
 - [x] Shows "no matches" message when search returns nothing
 - [x] Search input in Files section header
+- [x] Search results show file count
+- [x] Path display in search results (shows folder location)
+
+## Subfolder Support
+
+- [x] Tree view with expand/collapse for folders
+- [x] Lazy loading of folder contents on expand
+- [x] Recursive file tree rendering
+- [x] Indentation based on nesting level
+- [x] Folder icons (▶/▼) to indicate state
+- [x] Search works recursively through all subfolders
+- [x] File path display in search results
 
 ## File Creation
 
@@ -152,3 +166,20 @@
 - [x] Opens files in tabs via navigation system
 - [x] Context menu integrated
 - [x] Autosave support (shared with workbooks)
+
+## UX Improvements
+
+- [x] Breadcrumb navigation in FileViewer
+  - [x] Shows full file path with folder hierarchy
+  - [x] VS Code-style breadcrumb display
+  - [x] Path separators between folders
+  - [x] Last item (filename) highlighted with bold text
+  - [x] Ellipsis overflow handling for long paths
+  - [x] Works in both regular FileViewer and Image viewer headers
+  - [x] Graceful fallback to simple filename when projectRoot not available
+
+- [x] Focus retention for file/folder creation inputs
+  - [x] "+ New File" input retains focus when clicked
+  - [x] "+ New Folder" input retains focus when clicked
+  - [x] Uses refs and useEffect for reliable focus management
+  - [x] Prevents focus loss on button press

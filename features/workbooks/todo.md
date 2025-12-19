@@ -2,8 +2,8 @@
 
 
 ## High Priority
-- [ ] Moving cells has an issue. Moving a cell up or down does not update the ui display, the cell is techincally moving (verified by saving + reload the page) but the UI is broken and not showing the element actually move.
-- [ ] Markdown image display, is `![image.png]($TETHER_PROJECT_FOLDER / “image.png”)` possible? If not, how do we show images in markdown from a local folder?
+
+None - core functionality is complete!
 
 ## Medium Priority
 

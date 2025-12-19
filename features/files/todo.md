@@ -2,11 +2,10 @@
 
 ## Priority
 
-- [ ] + New Folder needs to retain focus (the input loses focus when the button is pressed)
-- [ ] Sub folder support
-- [ ] Files need to able to be dragged into folders and subfolders
-- [ ] File path support (like vs code)
-- [ ] File search needs to do subfolders
+- [ ] Files need to able to be dragged into folders and subfolders (drag and drop to move files)
+- [ ] Renaming files or folders should happen inline (just like vscode)
+- [x] + New Folder needs to retain focus (the input loses focus when the button is pressed)
+- [x] Breadcrumb navigation in FileViewer (like VS Code)
 - [x] control+click (or right click) should have a menu like vscode and styles matching the other menu in the main viewport with
   - [x] New file (if folder)
   - [x] New folder (if folder)
@@ -104,9 +103,6 @@
 
 ## UX Improvements
 
-
-
 - [ ] File icons for more types
 - [ ] Better context menu positioning
 - [ ] Keyboard shortcuts for file operations
-- [ ] Breadcrumb navigation in FileViewer

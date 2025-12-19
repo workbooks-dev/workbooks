@@ -3,7 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import Editor from "@monaco-editor/react";
 import { marked } from "marked";
 
-export function FileViewer({ filePath, onClose, onUnsavedChangesUpdate }) {
+export function FileViewer({ filePath, projectRoot, onClose, onUnsavedChangesUpdate }) {
   const [content, setContent] = useState("");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
@@ -184,6 +184,27 @@ export function FileViewer({ filePath, onClose, onUnsavedChangesUpdate }) {
     return filePath.split("/").pop();
   };
 
+  const getBreadcrumbs = (projectRoot) => {
+    // Get the relative path from project root
+    const relativePath = filePath.replace(projectRoot, '').replace(/^\//, '');
+    const parts = relativePath.split('/');
+
+    // Create breadcrumb items with paths
+    const breadcrumbs = [];
+    let currentPath = projectRoot;
+
+    parts.forEach((part, index) => {
+      currentPath = index === 0 ? `${projectRoot}/${part}` : `${currentPath}/${part}`;
+      breadcrumbs.push({
+        label: part,
+        path: currentPath,
+        isLast: index === parts.length - 1
+      });
+    });
+
+    return breadcrumbs;
+  };
+
   const renderMarkdownPreview = () => {
     const html = marked.parse(content);
     return <div className="markdown-preview" dangerouslySetInnerHTML={{ __html: html }} />;
@@ -202,8 +223,30 @@ export function FileViewer({ filePath, onClose, onUnsavedChangesUpdate }) {
       <div className="flex flex-col h-full bg-gray-50">
         {/* Image metadata and controls bar */}
         <div className="border-b border-gray-200 bg-white px-4 py-3 flex items-center justify-between">
-          <div className="flex items-center gap-6">
-            <span className="text-sm font-medium text-gray-900">{getFileName()}</span>
+          <div className="flex items-center gap-6 min-w-0 flex-1">
+            {projectRoot ? (
+              <div className="flex items-center gap-1 text-sm min-w-0">
+                {getBreadcrumbs(projectRoot).map((crumb, index) => (
+                  <div key={index} className="flex items-center gap-1 min-w-0">
+                    <span
+                      className={`overflow-hidden text-ellipsis whitespace-nowrap ${
+                        crumb.isLast
+                          ? 'font-medium text-gray-900'
+                          : 'text-gray-500'
+                      }`}
+                      title={crumb.label}
+                    >
+                      {crumb.label}
+                    </span>
+                    {!crumb.isLast && (
+                      <span className="text-gray-400 flex-shrink-0">/</span>
+                    )}
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <span className="text-sm font-medium text-gray-900">{getFileName()}</span>
+            )}
             {imageDimensions.width > 0 && (
               <span className="text-sm text-gray-600">
                 {imageDimensions.width} × {imageDimensions.height} px
@@ -463,10 +506,29 @@ export function FileViewer({ filePath, onClose, onUnsavedChangesUpdate }) {
       {/* Header for images is built into the viewer */}
       {!isImage && (
         <div className="border-b border-gray-200 bg-white px-4 py-3 flex items-center justify-between flex-shrink-0">
-          <h2 className="text-sm font-medium text-gray-900">
-            {getFileName()}
-            {hasUnsavedChanges && <span className="text-blue-600 ml-1">•</span>}
-          </h2>
+          <div className="flex items-center gap-1 text-sm min-w-0 flex-1">
+            {projectRoot && getBreadcrumbs(projectRoot).map((crumb, index, arr) => (
+              <div key={index} className="flex items-center gap-1 min-w-0">
+                <span
+                  className={`overflow-hidden text-ellipsis whitespace-nowrap ${
+                    crumb.isLast
+                      ? 'font-medium text-gray-900'
+                      : 'text-gray-500'
+                  }`}
+                  title={crumb.label}
+                >
+                  {crumb.label}
+                </span>
+                {!crumb.isLast && (
+                  <span className="text-gray-400 flex-shrink-0">/</span>
+                )}
+              </div>
+            ))}
+            {!projectRoot && (
+              <span className="font-medium text-gray-900">{getFileName()}</span>
+            )}
+            {hasUnsavedChanges && <span className="text-blue-600 ml-1 flex-shrink-0">•</span>}
+          </div>
           <div className="flex items-center gap-2">
             {isMarkdown && (
               <button
