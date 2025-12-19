@@ -56,11 +56,13 @@ The CLI serves three primary purposes:
   - [ ] Validate config after editing
   - [ ] Show errors if malformed
 
-### `tether run` subcommand
+### `tether run` subcommand ✅ CORE COMPLETED
 - [x] Implement `run <path-to-ipynb>`
   - [x] Automatically load a project by walking up to find `.tether` directory
   - [x] Falls back to basic mode if no project found
   - [x] Runs entire notebook just like "Run all" in the app UI
+  - [x] Automatically installs ipykernel if needed
+  - [x] Handles pyproject.toml with or without tether dependency group
 - [ ] Secrets integration
   - [ ] Load secrets from project's SecretsManager if available
   - [ ] Inject secrets as environment variables into engine
@@ -216,47 +218,50 @@ The CLI serves three primary purposes:
 - [ ] Add `--verbose` flag for detailed diagnostics
 - [ ] Add `--fix` flag to automatically repair common issues
 
-## Phase 3: Installation & Distribution
+## Phase 3: Installation & Distribution ✅ CORE COMPLETED
 
-### Silent CLI Installation
-**Philosophy: Zero friction, happens automatically during app install**
+### Silent CLI Installation ✅ IMPLEMENTED
+**Philosophy: Zero friction, happens automatically on first app launch**
 
-- [ ] Add Tauri installer post-install script
-  - [ ] Detect OS (macOS, Windows, Linux)
-  - [ ] **Automatically** copy binary to appropriate location (no prompts):
-    - [ ] macOS/Linux: `/usr/local/bin/tether` (or `~/.local/bin/tether` if no sudo)
-    - [ ] Windows: `%LOCALAPPDATA%\Programs\Tether\bin\`
-  - [ ] Set executable permissions (Unix)
-  - [ ] Add to PATH automatically:
-    - [ ] macOS/Linux: Append to `.zshrc` / `.bashrc` if not already present
-    - [ ] Windows: Update user PATH environment variable (no admin required)
-  - [ ] Verify installation silently with `tether --version`
-  - [ ] Log installation status to app logs (for troubleshooting)
-  - [ ] Show subtle success notification on first app launch: "✓ CLI tools ready"
+- [x] Automatic installation on first app launch
+  - [x] Detect OS (macOS, Windows, Linux)
+  - [x] **Automatically** copy binary to appropriate location (no prompts):
+    - [x] macOS/Linux: `~/.local/bin/tether`
+    - [x] Windows: `%LOCALAPPDATA%\Programs\Tether\bin\`
+  - [x] Set executable permissions (Unix)
+  - [x] Add to PATH automatically:
+    - [x] macOS/Linux: Append to `.zshrc` / `.bashrc` if not already present
+    - [x] Check for existing PATH entry to avoid duplicates
+  - [x] Frontend hook checks CLI on app startup
+  - [x] Installs silently in background if not found
+  - [x] Logs status to browser console
+- [ ] Windows PATH modification (not yet implemented)
+  - [ ] Update user PATH environment variable (no admin required)
+  - [ ] Verify PATH update works on Windows
 
-### Manual Installation Helper (Edge Cases)
-**For users who install app in non-standard ways or need to reinstall CLI**
-
-- [ ] Implement `tether install-cli` helper command
-  - [ ] Can be run from bundled app binary
-  - [ ] Same logic as installer post-install
-  - [ ] Used if automatic install failed or CLI was removed
-  - [ ] Show progress and clear success/error messages
-- [ ] Add "Install CLI Tools" button in Tauri app settings
-  - [ ] Only show if CLI not detected in PATH
-  - [ ] Calls bundled binary's install-cli function
-  - [ ] Shows installation progress
-  - [ ] Verifies success with `tether --version`
-  - [ ] Updates UI to show ✓ when successful
+### Installation Commands ✅ IMPLEMENTED
+- [x] `install_cli` Tauri command
+  - [x] Copies CLI binary from app bundle to system PATH
+  - [x] Smart path detection (checks multiple bundle locations)
+  - [x] Automatic PATH updating on Unix systems
+- [x] `check_cli_installed` Tauri command
+  - [x] Checks if `tether` is in PATH using `which`
+- [x] `get_path_instructions` Tauri command
+  - [x] Returns shell-specific instructions for manual PATH setup
 
 ### Build & Release
-- [ ] Update build scripts to compile both binaries
-  - [ ] `cargo build --bin tether-gui` (GUI app)
-  - [ ] `cargo build --bin tether` (CLI)
-  - [ ] Ensure CLI is statically linked (minimal dependencies)
-- [ ] Package CLI binary with Tauri app bundle
-  - [ ] Include in app bundle resources
-  - [ ] Post-install script extracts and installs to PATH
+- [x] Update build scripts to compile both binaries
+  - [x] Added `npm run prebuild:cli` script
+  - [x] `app:build` now compiles CLI before bundling app
+  - [x] CLI built in release mode for production
+- [x] Package CLI binary with Tauri app bundle
+  - [x] Included in app bundle resources via tauri.conf.json
+- [x] Automatic CLI updates ✅ COMPLETED
+  - [x] Version detection (compares installed vs bundled)
+  - [x] Auto-update on app launch
+  - [x] Silent updates in background
+  - [x] CLI stays in sync with app version
+- [ ] Code signing
   - [ ] macOS: Sign CLI binary for Gatekeeper
   - [ ] Windows: Code sign CLI binary
 - [ ] Add standalone CLI binary to GitHub releases

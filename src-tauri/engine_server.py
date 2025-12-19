@@ -199,7 +199,7 @@ async def start_engine(request: StartEngineRequest):
         project_name = os.path.basename(project_root)
         slugified_name = slugify_kernel_name(project_name)
         engine_spec_name = f"tether_{slugified_name}"
-        print(f"DEBUG: project_name = '{project_name}', slugified = '{slugified_name}', engine_spec_name = '{engine_spec_name}'")
+        # print(f"DEBUG: project_name = '{project_name}', slugified = '{slugified_name}', engine_spec_name = '{engine_spec_name}'")
 
         # First install the basic kernel spec
         install_result = subprocess.run(

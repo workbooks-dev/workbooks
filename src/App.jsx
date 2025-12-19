@@ -96,6 +96,46 @@ function App() {
     };
   }, []);
 
+  // Automatically install/update CLI on app launch
+  useEffect(() => {
+    const ensureCliUpToDate = async () => {
+      try {
+        // Get bundled CLI version
+        const bundledVersion = await invoke("get_bundled_cli_version");
+
+        // Check if CLI is installed
+        const isInstalled = await invoke("check_cli_installed");
+
+        if (!isInstalled) {
+          // Not installed - install it
+          console.log("CLI not found, installing version", bundledVersion);
+          const result = await invoke("install_cli");
+          console.log("✓ CLI installed:", result);
+
+          // Get PATH instructions
+          const instructions = await invoke("get_path_instructions");
+          console.log("To use 'tether' from terminal:", instructions);
+        } else {
+          // Already installed - check if version matches
+          const installedVersion = await invoke("get_installed_cli_version");
+
+          if (installedVersion !== bundledVersion) {
+            console.log(`CLI update available: ${installedVersion} → ${bundledVersion}`);
+            const result = await invoke("install_cli");
+            console.log("✓ CLI updated:", result);
+          } else {
+            console.log(`✓ CLI up to date (v${installedVersion})`);
+          }
+        }
+      } catch (error) {
+        // Silent failure - don't block app startup for CLI installation
+        console.error("Failed to check/install CLI:", error);
+      }
+    };
+
+    ensureCliUpToDate();
+  }, []);
+
   // Listen for Tauri file drop events
   useEffect(() => {
     console.log("Setting up file drop listener, currentProject:", currentProject);

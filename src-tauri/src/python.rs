@@ -149,11 +149,11 @@ async fn install_uv_windows() -> Result<PathBuf> {
 pub async fn ensure_uv() -> Result<PathBuf> {
     match check_uv_available() {
         Ok(path) => {
-            println!("uv found at {:?}", path);
+            // println!("uv found at {:?}", path);
             Ok(path)
         }
         Err(_) => {
-            println!("uv not found, installing...");
+            // println!("uv not found, installing...");
             install_uv().await
         }
     }
@@ -195,13 +195,46 @@ pub async fn ensure_venv(project_root: &Path, project_name: &str) -> Result<Path
     let venv_path = get_venv_path(project_root, project_name)?;
 
     if !venv_path.exists() {
-        println!("Creating virtual environment at {:?}", venv_path);
+        // println!("Creating virtual environment at {:?}", venv_path);
         create_venv_at_path(&venv_path).await?;
     } else {
-        println!("Virtual environment already exists at {:?}", venv_path);
+        // println!("Virtual environment already exists at {:?}", venv_path);
     }
 
     Ok(venv_path)
+}
+
+/// Ensure ipykernel is installed in the venv (needed for notebook execution)
+pub async fn ensure_ipykernel(venv_path: &Path) -> Result<()> {
+    let uv_path = ensure_uv().await?;
+
+    // Check if ipykernel is installed
+    let python_path = venv_path.join("bin").join("python");
+    let check_output = Command::new(&python_path)
+        .args(["-c", "import ipykernel"])
+        .output();
+
+    if let Ok(output) = check_output {
+        if output.status.success() {
+            return Ok(());
+        }
+    }
+
+    // ipykernel not installed, install it
+    // println!("Installing ipykernel...");
+    let output = Command::new(uv_path)
+        .args(["pip", "install", "ipykernel"])
+        .env("VIRTUAL_ENV", venv_path)
+        .output()
+        .context("Failed to install ipykernel")?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!("Failed to install ipykernel: {}", stderr);
+    }
+
+    // println!("✓ ipykernel installed");
+    Ok(())
 }
 
 /// Create a new virtual environment at a specific path using uv
@@ -224,7 +257,7 @@ async fn create_venv_at_path(venv_path: &Path) -> Result<()> {
         anyhow::bail!("Failed to create venv: {}", stderr);
     }
 
-    println!("Virtual environment created successfully at {:?}", venv_path);
+    // println!("Virtual environment created successfully at {:?}", venv_path);
     Ok(())
 }
 
@@ -273,22 +306,41 @@ pub async fn install_packages(project_root: &Path, packages: &[&str]) -> Result<
     Ok(())
 }
 
-/// Sync dependencies from pyproject.toml using uv with tether group
+/// Sync dependencies from pyproject.toml using uv, optionally with a specific group
 pub async fn sync_dependencies(project_root: &Path, venv_path: &Path) -> Result<()> {
+    sync_dependencies_with_group(project_root, venv_path, Some("tether")).await
+}
+
+/// Sync dependencies from pyproject.toml using uv with optional group
+pub async fn sync_dependencies_with_group(
+    project_root: &Path,
+    venv_path: &Path,
+    group: Option<&str>
+) -> Result<()> {
     let uv_path = ensure_uv().await?;
     let pyproject_path = project_root.join("pyproject.toml");
 
     if !pyproject_path.exists() {
-        println!("No pyproject.toml found, skipping sync");
+        // println!("No pyproject.toml found, skipping sync");
         return Ok(());
     }
 
-    println!("Syncing dependencies with tether group to venv at {:?}", venv_path);
+    // if let Some(group_name) = group {
+    //     println!("Syncing dependencies with {} group to venv at {:?}", group_name, venv_path);
+    // } else {
+    //     println!("Syncing dependencies to venv at {:?}", venv_path);
+    // }
 
     // Use UV_PROJECT_ENVIRONMENT to tell uv where to install packages
     // This is the correct way to use a custom venv location with uv sync
-    let output = Command::new(uv_path)
-        .args(["sync", "--group", "tether"])
+    let mut cmd = Command::new(uv_path);
+    cmd.arg("sync");
+
+    if let Some(group_name) = group {
+        cmd.args(["--group", group_name]);
+    }
+
+    let output = cmd
         .current_dir(project_root)
         .env("UV_PROJECT_ENVIRONMENT", venv_path)
         .output()
@@ -297,12 +349,12 @@ pub async fn sync_dependencies(project_root: &Path, venv_path: &Path) -> Result<
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         let stdout = String::from_utf8_lossy(&output.stdout);
-        println!("Sync stderr: {}", stderr);
-        println!("Sync stdout: {}", stdout);
+        // println!("Sync stderr: {}", stderr);
+        // println!("Sync stdout: {}", stdout);
         anyhow::bail!("Failed to sync dependencies: {}", stderr);
     }
 
-    println!("Dependencies synced successfully");
+    // println!("Dependencies synced successfully");
     Ok(())
 }
 

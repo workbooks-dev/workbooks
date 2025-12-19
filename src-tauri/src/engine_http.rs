@@ -6,6 +6,9 @@ use std::process::{Child, Command, Stdio};
 use futures_util::StreamExt;
 use once_cell::sync::Lazy;
 
+// Embed engine_pyproject.toml content directly in binary
+const ENGINE_PYPROJECT_TOML: &str = include_str!("../engine_pyproject.toml");
+
 // Global HTTP client reused across all requests
 static HTTP_CLIENT: Lazy<reqwest::Client> = Lazy::new(|| {
     reqwest::Client::builder()
@@ -119,7 +122,7 @@ unsafe impl Send for EngineServer {}
 impl EngineServer {
     /// Kill any orphaned engine_server.py processes ONLY on our candidate ports
     fn cleanup_orphaned_processes() -> Result<()> {
-        println!("Checking for orphaned engine_server.py processes on Tether ports...");
+        // println!("Checking for orphaned engine_server.py processes on Tether ports...");
 
         #[cfg(target_os = "windows")]
         {
@@ -180,7 +183,7 @@ impl EngineServer {
                                 if let Ok(ps) = ps_output {
                                     let command = String::from_utf8_lossy(&ps.stdout);
                                     if command.contains("engine_server.py") {
-                                        println!("Found orphaned engine_server.py on port {} with PID {}, killing...", port, pid_str);
+                                        // println!("Found orphaned engine_server.py on port {} with PID {}, killing...", port, pid_str);
                                         let _ = std::process::Command::new("kill")
                                             .args(&["-9", pid_str])
                                             .output();
@@ -251,7 +254,7 @@ impl EngineServer {
         // Give the OS time to free up the ports
         std::thread::sleep(std::time::Duration::from_millis(500));
 
-        println!("Orphaned process cleanup complete");
+        // println!("Orphaned process cleanup complete");
         Ok(())
     }
 
@@ -316,8 +319,8 @@ impl EngineServer {
         if log_files.len() > MAX_LOG_FILES {
             let files_to_remove = log_files.len() - MAX_LOG_FILES;
             for entry in log_files.iter().take(files_to_remove) {
-                println!("Removing excess log file: {:?} (keeping only {} most recent)",
-                    entry.path(), MAX_LOG_FILES);
+                // println!("Removing excess log file: {:?} (keeping only {} most recent)",
+                //     entry.path(), MAX_LOG_FILES);
                 let _ = std::fs::remove_file(entry.path());
             }
         }
@@ -327,7 +330,7 @@ impl EngineServer {
 
     /// Ensure the engine venv exists at ~/.tether/engine/.venv and is synced
     async fn ensure_engine_venv() -> Result<PathBuf> {
-        println!("Ensuring engine venv exists and is up to date...");
+        // println!("Ensuring engine venv exists and is up to date...");
 
         // Get ~/.tether/engine directory
         let home_dir = dirs::home_dir().context("Failed to get home directory")?;
@@ -338,31 +341,10 @@ impl EngineServer {
         std::fs::create_dir_all(&engine_dir)
             .context("Failed to create ~/.tether/engine directory")?;
 
-        // Find and copy engine_pyproject.toml to engine directory
-        let cwd = std::env::current_dir()?;
-        let exe_path = std::env::current_exe()?;
-        let exe_dir = exe_path.parent().context("Failed to get executable directory")?;
-
-        let possible_pyproject_paths = vec![
-            // Dev mode
-            cwd.join("src-tauri/engine_pyproject.toml"),
-            // Production - macOS
-            exe_dir.join("../Resources/engine_pyproject.toml"),
-            // Production - Windows/Linux
-            exe_dir.join("engine_pyproject.toml"),
-        ];
-
-        let source_pyproject = possible_pyproject_paths
-            .iter()
-            .find(|p| p.exists())
-            .ok_or_else(|| anyhow::anyhow!("Could not find engine_pyproject.toml. Searched: {:?}", possible_pyproject_paths))?;
-
-        println!("Found engine_pyproject.toml at: {:?}", source_pyproject);
-
-        // Copy to engine directory as pyproject.toml
+        // Write embedded engine_pyproject.toml to engine directory
         let dest_pyproject = engine_dir.join("pyproject.toml");
-        std::fs::copy(source_pyproject, &dest_pyproject)
-            .context("Failed to copy engine_pyproject.toml to ~/.tether/engine")?;
+        std::fs::write(&dest_pyproject, ENGINE_PYPROJECT_TOML)
+            .context("Failed to write engine pyproject.toml to ~/.tether/engine")?;
 
         // Get uv path
         let uv_path = crate::python::check_uv_available()
@@ -370,7 +352,7 @@ impl EngineServer {
 
         // Create venv if it doesn't exist
         if !venv_path.exists() {
-            println!("Creating engine venv at {:?}", venv_path);
+            // println!("Creating engine venv at {:?}", venv_path);
             let output = Command::new(&uv_path)
                 .args(["venv", ".venv"])
                 .current_dir(&engine_dir)
@@ -381,13 +363,13 @@ impl EngineServer {
                 let stderr = String::from_utf8_lossy(&output.stderr);
                 anyhow::bail!("Failed to create engine venv: {}", stderr);
             }
-            println!("Engine venv created successfully");
+            // println!("Engine venv created successfully");
         } else {
-            println!("Engine venv already exists at {:?}", venv_path);
+            // println!("Engine venv already exists at {:?}", venv_path);
         }
 
         // Always sync dependencies on startup
-        println!("Syncing engine dependencies...");
+        // println!("Syncing engine dependencies...");
         let output = Command::new(&uv_path)
             .args(["sync"])
             .current_dir(&engine_dir)
@@ -397,12 +379,12 @@ impl EngineServer {
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             let stdout = String::from_utf8_lossy(&output.stdout);
-            println!("Sync stderr: {}", stderr);
-            println!("Sync stdout: {}", stdout);
+            // println!("Sync stderr: {}", stderr);
+            // println!("Sync stdout: {}", stdout);
             anyhow::bail!("Failed to sync engine dependencies: {}", stderr);
         }
 
-        println!("Engine dependencies synced successfully");
+        // println!("Engine dependencies synced successfully");
 
         // Return the Python executable path
         #[cfg(target_os = "windows")]
@@ -437,34 +419,64 @@ impl EngineServer {
         let log_file = std::fs::File::create(&log_file_path)
             .context(format!("Failed to create log file: {:?}", log_file_path))?;
 
-        println!("Engine server logs will be written to: {:?}", log_file_path);
-        println!("Log retention: 7 days, max 10 files");
+        // println!("Engine server logs will be written to: {:?}", log_file_path);
+        // println!("Log retention: 7 days, max 10 files");
 
         // Find the engine_server.py script
-        let cwd = std::env::current_dir()?;
+        // NOTE: engine_server.py is part of the Tether app, NOT user projects!
+        // It should only exist in the Tether app installation or development directory.
         let exe_path = std::env::current_exe()?;
         let exe_dir = exe_path.parent().context("Failed to get executable directory")?;
 
-        let possible_paths = vec![
-            // Dev mode
-            cwd.join("src-tauri/engine_server.py"),
-            // Production - macOS
+        let mut possible_paths = vec![];
+
+        // FIRST: Production - If running as installed CLI, look for the Tauri app bundle
+        #[cfg(target_os = "macos")]
+        {
+            if exe_path.to_str().map_or(false, |s| s.contains(".local/bin")) {
+                // CLI mode - the app should be installed
+                possible_paths.extend(vec![
+                    PathBuf::from("/Applications/tether.app/Contents/Resources/engine_server.py"),
+                    dirs::home_dir().map(|h| h.join("Applications/tether.app/Contents/Resources/engine_server.py")).unwrap_or_default(),
+                ]);
+            }
+        }
+
+        // SECOND: If running as GUI app bundle
+        possible_paths.extend(vec![
+            // Production - macOS (GUI app)
             exe_dir.join("../Resources/engine_server.py"),
-            // Production - Windows/Linux
+            // Production - Windows/Linux (GUI app)
             exe_dir.join("engine_server.py"),
-        ];
+        ]);
+
+        // THIRD: Development - Walk up from exe location to find Tether dev project
+        // This is ONLY for development when running from target/debug/tether
+        let mut current_dir = exe_dir;
+        loop {
+            let candidate = current_dir.join("src-tauri/engine_server.py");
+            if candidate.exists() {
+                possible_paths.push(candidate);
+                break;
+            }
+
+            if let Some(parent) = current_dir.parent() {
+                current_dir = parent;
+            } else {
+                break;
+            }
+        }
 
         let engine_script = possible_paths
             .iter()
+            .filter(|p| p.as_os_str().len() > 0) // Filter out empty paths
             .find(|p| p.exists())
-            .ok_or_else(|| anyhow::anyhow!("Could not find engine_server.py. Searched: {:?}", possible_paths))?;
-
-        println!("Found engine_server.py at: {:?}", engine_script);
+            .ok_or_else(|| anyhow::anyhow!("Could not find engine_server.py. Is the Tether app installed at /Applications/tether.app?"))?;
 
         // Ensure engine venv exists and is synced, get Python path
         let tether_python = Self::ensure_engine_venv().await?;
 
-        println!("Using engine Python: {:?}", tether_python);
+        // println!("Using engine Python: {:?}", tether_python);
 
         if !tether_python.exists() {
             anyhow::bail!("Engine Python executable not found at {:?}", tether_python);
@@ -478,7 +490,7 @@ impl EngineServer {
                 continue;
             }
 
-            println!("Attempting to start engine server on port {}...", port);
+            // println!("Attempting to start engine server on port {}...", port);
 
             // Clone the log file handle for stdout and stderr
             let stdout_file = log_file.try_clone()
@@ -495,8 +507,8 @@ impl EngineServer {
                 .spawn()
                 .context("Failed to start engine server")?;
 
-            println!("Engine server started with PID: {} on port {}", process.id(), port);
-            println!("Logs: {:?}", log_file_path);
+            // println!("Engine server started with PID: {} on port {}", process.id(), port);
+            // println!("Logs: {:?}", log_file_path);
 
             // Poll for server readiness with exponential backoff
             let url = format!("http://127.0.0.1:{}/health", port);
@@ -508,7 +520,7 @@ impl EngineServer {
 
                 match HTTP_CLIENT.get(&url).timeout(std::time::Duration::from_secs(3)).send().await {
                     Ok(response) if response.status().is_success() => {
-                        println!("Engine server is healthy on port {} (attempt {}/{})", port, attempt + 1, max_retries);
+                        // println!("Engine server is healthy on port {} (attempt {}/{})", port, attempt + 1, max_retries);
                         return Ok(Self {
                             process: Some(process),
                             port,
@@ -516,19 +528,20 @@ impl EngineServer {
                     }
                     Ok(response) => {
                         let error_msg = format!("Engine server returned status: {}", response.status());
-                        println!("Attempt {}/{}: {}", attempt + 1, max_retries, error_msg);
+                        // println!("Attempt {}/{}: {}", attempt + 1, max_retries, error_msg);
                         last_error = Some(error_msg);
                     }
                     Err(e) => {
                         let error_msg = format!("Engine server health check failed: {}", e);
                         if attempt == max_retries - 1 {
                             // Log error on final attempt
-                            println!("Final attempt {}/{} failed: {}", attempt + 1, max_retries, error_msg);
-                            println!("Check logs at: {:?}", log_file_path);
-                        } else if attempt % 5 == 0 {
-                            // Log every 5th attempt to show progress
-                            println!("Attempt {}/{}: Still waiting for engine server...", attempt + 1, max_retries);
+                            eprintln!("Final attempt {}/{} failed: {}", attempt + 1, max_retries, error_msg);
+                            eprintln!("Check logs at: {:?}", log_file_path);
                         }
+                        // else if attempt % 5 == 0 {
+                        //     // Log every 5th attempt to show progress
+                        //     println!("Attempt {}/{}: Still waiting for engine server...", attempt + 1, max_retries);
+                        // }
                         last_error = Some(error_msg);
                     }
                 }
@@ -563,21 +576,21 @@ impl EngineServer {
 
         // Load and inject secrets from SecretsManager
         let mut secrets_for_redaction = std::collections::HashMap::new();
-        println!("DEBUG: Loading secrets from project root: {}", project_root.display());
+        // println!("DEBUG: Loading secrets from project root: {}", project_root.display());
         match crate::secrets::SecretsManager::new(project_root) {
             Ok(secrets_manager) => {
-                println!("DEBUG: SecretsManager initialized successfully");
+                // println!("DEBUG: SecretsManager initialized successfully");
                 match secrets_manager.get_all_secrets_with_values() {
                     Ok(secrets) => {
-                        println!("DEBUG: Loaded {} secrets from database", secrets.len());
+                        // println!("DEBUG: Loaded {} secrets from database", secrets.len());
                         for (key, value) in secrets {
-                            println!("DEBUG: Injecting secret: {} (length: {})", key, value.len());
+                            // println!("DEBUG: Injecting secret: {} (length: {})", key, value.len());
                             // Add to env_vars for kernel
                             env_vars.insert(key.clone(), value.clone());
                             // Also store in secrets_for_redaction for output checking
                             secrets_for_redaction.insert(key, value);
                         }
-                        println!("DEBUG: Total env_vars after secrets: {}", env_vars.len());
+                        // println!("DEBUG: Total env_vars after secrets: {}", env_vars.len());
                     }
                     Err(e) => {
                         eprintln!("ERROR: Failed to load secrets: {}", e);
@@ -609,8 +622,8 @@ impl EngineServer {
             anyhow::bail!("Failed to start engine: {}", error_text);
         }
 
-        println!("Engine started for workbook: {} with TETHER_PROJECT_FOLDER={}",
-                 workbook_path, project_root.display());
+        // println!("Engine started for workbook: {} with TETHER_PROJECT_FOLDER={}",
+        //          workbook_path, project_root.display());
         Ok(())
     }
 
@@ -741,7 +754,7 @@ impl EngineServer {
             .send()
             .await?;
 
-        println!("Engine stopped for workbook: {}", workbook_path);
+        // println!("Engine stopped for workbook: {}", workbook_path);
         Ok(())
     }
 
@@ -848,7 +861,7 @@ impl EngineServer {
 
     /// Shutdown the server
     pub fn shutdown(mut self) -> Result<()> {
-        println!("Shutting down engine server");
+        // println!("Shutting down engine server");
         if let Some(mut process) = self.process.take() {
             let _ = process.kill();
             let _ = process.wait();
@@ -860,11 +873,11 @@ impl EngineServer {
 // Implement Drop to ensure the process is killed when EngineServer is dropped
 impl Drop for EngineServer {
     fn drop(&mut self) {
-        println!("EngineServer being dropped, cleaning up process...");
+        // println!("EngineServer being dropped, cleaning up process...");
         if let Some(mut process) = self.process.take() {
             let _ = process.kill();
             let _ = process.wait();
-            println!("Engine server process killed");
+            // println!("Engine server process killed");
         }
     }
 }

@@ -35,7 +35,8 @@
     ],
     "resources": [
       "engine_server.py",
-      "engine_pyproject.toml"
+      "engine_pyproject.toml",
+      "target/release/tether-cli"
     ]
   }
 }

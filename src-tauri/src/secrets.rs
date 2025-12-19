@@ -99,8 +99,8 @@ impl SecretsManager {
         }
 
         let key_file_path = project_secrets_dir.join("encryption.key");
-        println!("DEBUG: Secrets stored at: {}", db_path.display());
-        println!("DEBUG: Encryption key stored at: {}", key_file_path.display());
+        // println!("DEBUG: Secrets stored at: {}", db_path.display());
+        // println!("DEBUG: Encryption key stored at: {}", key_file_path.display());
 
         let manager = Self {
             db_path,
@@ -158,7 +158,7 @@ impl SecretsManager {
                     .context("Failed to set encryption key file permissions")?;
             }
 
-            println!("DEBUG: Generated and stored new encryption key");
+            // println!("DEBUG: Generated and stored new encryption key");
             Ok(())
         }
     }
@@ -173,19 +173,19 @@ impl SecretsManager {
     pub fn lock_session(&self) {
         let mut session = self.session.lock().unwrap();
         session.lock();
-        println!("DEBUG: Session manually locked");
+        // println!("DEBUG: Session manually locked");
     }
 
     /// Authenticate with Touch ID and create a session
     fn authenticate_and_create_session(&self, reason: &str) -> Result<()> {
-        println!("DEBUG: Requesting Touch ID authentication");
+        // println!("DEBUG: Requesting Touch ID authentication");
 
         // Request Touch ID authentication on macOS
         #[cfg(target_os = "macos")]
         {
             crate::local_auth_macos::authenticate_with_touch_id(reason)
                 .map_err(|e| anyhow::anyhow!("Touch ID authentication failed: {}", e))?;
-            println!("DEBUG: Touch ID authentication successful");
+            // println!("DEBUG: Touch ID authentication successful");
         }
 
         // Verify we can access the encryption key
@@ -195,7 +195,7 @@ impl SecretsManager {
         // Mark session as authenticated
         let mut session = self.session.lock().unwrap();
         session.authenticate();
-        println!("DEBUG: Session created, valid for {} seconds", SESSION_TIMEOUT.as_secs());
+        // println!("DEBUG: Session created, valid for {} seconds", SESSION_TIMEOUT.as_secs());
 
         Ok(())
     }
@@ -206,7 +206,7 @@ impl SecretsManager {
         if !is_valid {
             self.authenticate_and_create_session(reason)?;
         } else {
-            println!("DEBUG: Using existing valid session");
+            // println!("DEBUG: Using existing valid session");
         }
         Ok(())
     }

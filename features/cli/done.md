@@ -76,3 +76,81 @@
 - [x] Implemented `schedule remove` subcommand
   - [x] Deletes schedule by ID
   - [x] Shows confirmation message
+
+## Phase 1: Enhanced `tether run` (December 2024)
+
+### Dependency Management Improvements
+- [x] Fixed `sync_dependencies` to work with or without tether group
+  - [x] Created `sync_dependencies_with_group()` function
+  - [x] Made `--group` parameter optional
+  - [x] CLI detects if running in Tether project vs basic mode
+  - [x] Only applies `--group tether` for actual Tether projects
+- [x] Added automatic ipykernel installation
+  - [x] Created `ensure_ipykernel()` function in python.rs
+  - [x] Checks if ipykernel is installed before notebook execution
+  - [x] Automatically installs ipykernel via uv if missing
+  - [x] CLI now works out-of-the-box for notebook execution
+
+### Testing & Verification
+- [x] Created test notebook and verified full execution flow
+- [x] Confirmed `tether run` works in basic mode (no Tether project)
+- [x] Confirmed `tether run` works with Tether projects
+- [x] Verified cell output display (stdout, stderr, errors)
+- [x] Verified execution summary and exit codes
+
+## Phase 2: Automatic CLI Installation (December 2024)
+
+### Installation Infrastructure
+- [x] Created `cli_install.rs` module with Tauri commands
+  - [x] `install_cli()` - Copies CLI binary to system PATH
+  - [x] `check_cli_installed()` - Checks if tether is in PATH
+  - [x] `get_path_instructions()` - Returns shell-specific setup instructions
+- [x] Implemented smart binary location detection
+  - [x] Checks multiple possible resource paths
+  - [x] Works in different bundle configurations
+- [x] Added automatic PATH modification (Unix)
+  - [x] Detects user's shell (zsh, bash, etc.)
+  - [x] Appends to appropriate rc file (.zshrc, .bashrc, .profile)
+  - [x] Checks for existing PATH entry to avoid duplicates
+  - [x] Adds "# Added by Tether" comment for clarity
+- [x] Cross-platform installation paths
+  - [x] macOS/Linux: `~/.local/bin/tether`
+  - [x] Windows: `%LOCALAPPDATA%\Programs\Tether\bin\tether.exe`
+- [x] Set executable permissions on Unix systems
+
+### Frontend Integration
+- [x] Added automatic installation hook in App.jsx
+  - [x] Runs on first app launch
+  - [x] Checks if CLI is installed using `check_cli_installed()`
+  - [x] Silently installs CLI if not found
+  - [x] Logs installation status to console
+  - [x] Non-blocking - doesn't interrupt app startup
+
+### Build System
+- [x] Updated package.json build scripts
+  - [x] Added `prebuild:cli` script to compile CLI in release mode
+  - [x] Modified `app:build` to run prebuild:cli before bundling
+- [x] Updated tauri.conf.json to bundle CLI binary
+  - [x] Added target/release/tether to resources
+- [x] Registered CLI install commands in invoke_handler
+
+### User Experience
+- [x] Zero-configuration installation
+- [x] Silent installation in background
+- [x] Automatic PATH updating (no manual steps required)
+- [x] Works on first app launch
+- [x] Graceful failure handling (logs errors, doesn't block app)
+
+### Automatic CLI Updates (December 2024)
+- [x] Version detection system
+  - [x] `get_bundled_cli_version()` - Returns version from Cargo.toml
+  - [x] `get_installed_cli_version()` - Checks installed CLI version via `tether --version`
+- [x] Automatic update on app launch
+  - [x] Compares installed version with bundled version
+  - [x] Auto-installs if CLI not found
+  - [x] Auto-updates if versions don't match
+  - [x] Logs update activity to console
+- [x] Zero user intervention required
+  - [x] Updates happen silently in background
+  - [x] CLI stays in sync with app version
+  - [x] No manual reinstallation needed

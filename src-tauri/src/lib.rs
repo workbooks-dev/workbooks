@@ -4,6 +4,7 @@ mod fs;
 pub mod engine_http;
 mod secrets;
 pub mod scheduler;
+pub mod cli_install;
 
 #[cfg(target_os = "macos")]
 mod local_auth_macos;
@@ -1250,6 +1251,11 @@ pub fn run() {
             get_logs_directory,
             open_logs_folder,
             get_recent_logs,
+            cli_install::install_cli,
+            cli_install::check_cli_installed,
+            cli_install::get_path_instructions,
+            cli_install::get_bundled_cli_version,
+            cli_install::get_installed_cli_version,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
