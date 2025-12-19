@@ -1,8 +1,9 @@
-mod python;
-mod project;
+pub mod python;
+pub mod project;
 mod fs;
-mod engine_http;
+pub mod engine_http;
 mod secrets;
+pub mod scheduler;
 
 #[cfg(target_os = "macos")]
 mod local_auth_macos;

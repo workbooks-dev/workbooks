@@ -80,6 +80,33 @@ pub struct CompletionResult {
     pub cursor_end: i32,
 }
 
+/// A single cell for execute-all request
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Cell {
+    pub source: String,
+    pub cell_type: String,
+}
+
+/// Result of executing a single cell
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CellExecutionResult {
+    pub cell_index: usize,
+    pub success: bool,
+    pub outputs: Vec<CellOutput>,
+    pub execution_count: Option<i32>,
+    pub error: Option<String>,
+}
+
+/// Response from execute-all endpoint
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ExecuteAllResponse {
+    pub success: bool,
+    pub cell_results: Vec<CellExecutionResult>,
+    pub total_cells: usize,
+    pub successful_cells: usize,
+    pub failed_cells: usize,
+}
+
 /// Manages the FastAPI engine server process
 pub struct EngineServer {
     process: Option<Child>,
@@ -680,6 +707,28 @@ impl EngineServer {
         }
 
         Ok((success, execution_count))
+    }
+
+    /// Execute all cells in a workbook sequentially
+    pub async fn execute_all_http(port: u16, workbook_path: &str, cells: Vec<Cell>) -> Result<ExecuteAllResponse> {
+        let url = format!("http://127.0.0.1:{}/engine/execute-all", port);
+
+        let response = HTTP_CLIENT
+            .post(&url)
+            .json(&serde_json::json!({
+                "workbook_path": workbook_path,
+                "cells": cells
+            }))
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            let error_text = response.text().await?;
+            anyhow::bail!("Execute-all failed: {}", error_text);
+        }
+
+        let result: ExecuteAllResponse = response.json().await?;
+        Ok(result)
     }
 
     /// Stop a workbook's engine (static method to avoid Send issues)

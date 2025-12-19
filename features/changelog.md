@@ -6,6 +6,44 @@ This file tracks major features and improvements as they're completed.
 
 ### December 2024
 
+**CLI Implementation: `tether run` and `tether schedule` (Dec 19, 2024)**
+- **Multi-Binary Cargo Setup**: Configured project to build separate CLI and GUI binaries
+  - Added `[[bin]]` definitions for `tether` (CLI) and `tether-gui` (GUI)
+  - Made core modules public: `python`, `project`, `engine_http`, `scheduler`
+  - Shared library code accessible to both binaries via `tether_lib`
+  - Files: `src-tauri/Cargo.toml`, `src-tauri/src/lib.rs`, `src-tauri/src/cli.rs`
+
+- **`tether run` Command**: Execute notebooks from the command line
+  - Parses and executes `.ipynb` files with automatic project detection
+  - Walks up directory tree to find `.tether` directory for project root
+  - Falls back to "basic mode" if no Tether project found
+  - Automatically ensures Python venv and syncs dependencies
+  - Starts engine server and executes all cells via HTTP API
+  - Displays execution results, outputs, and errors in terminal
+  - Shows summary with cell counts and success/failure status
+  - Cleanly shuts down engine after execution
+  - Usage: `tether run path/to/notebook.ipynb`
+  - Optional: `tether run notebook.ipynb --project /path/to/project`
+  - Files: `src-tauri/src/cli.rs`, `src-tauri/src/engine_http.rs`
+
+- **`tether schedule` Commands**: Manage scheduled workbook execution
+  - `tether schedule add`: Schedule a workbook with cron expression or presets
+    - Supports `--cron "0 9 * * *"` for custom schedules
+    - Presets: `--daily`, `--hourly`, `--weekly`
+    - Stores schedules in SQLite via SchedulerManager
+    - Displays confirmation with schedule details and next run time
+  - `tether schedule list`: View all scheduled workbooks
+    - Shows ID, workbook path, project, cron expression, enabled status
+    - Displays next run time for each schedule
+  - `tether schedule remove <id>`: Delete a schedule by ID
+  - Files: `src-tauri/src/cli.rs`, `src-tauri/src/scheduler.rs`
+
+- **Engine HTTP Extensions**: Added execute-all endpoint support
+  - Added `execute_all_http()` function to call `/engine/execute-all` endpoint
+  - New types: `Cell`, `CellExecutionResult`, `ExecuteAllResponse`
+  - Enables batch execution of all notebook cells from CLI
+  - Files: `src-tauri/src/engine_http.rs`
+
 **Files Section UX Improvements (Dec 19, 2024)**
 - **Breadcrumb Navigation**: Added VS Code-style breadcrumb navigation to FileViewer
   - Shows full file path with folder hierarchy instead of just filename

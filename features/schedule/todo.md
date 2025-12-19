@@ -1,28 +1,46 @@
 # Schedule - To Do
 
+## 🎯 Current Status (Dec 19, 2025)
+
+**✅ Foundational Backend Complete:**
+- Scheduler module with SQLite database (`~/.tether/schedules.db`)
+- CLI commands for managing schedules
+- Engine server endpoint for executing all cells
+- Run tracking and cleanup functions
+
+**🚧 Next Steps:**
+- Implement background scheduler task runner
+- Add Tauri commands for GUI integration
+- Build frontend Schedule tab UI
+- Complete `tether run` command with full engine integration
+
+**📝 See `features/schedule/done.md` for detailed implementation notes.**
+
+---
+
 ## Backend (Rust)
 
-- [ ] Scheduler system
-  - [ ] Cron parsing and evaluation
-  - [ ] Background task runner (tokio tasks)
-  - [ ] Schedule storage (SQLite)
-  - [ ] Next run calculation
-  - [ ] Scheduler lifecycle (start/stop/pause)
+- [x] Scheduler system ✅ **(Completed Dec 19, 2025)**
+  - [x] Cron parsing and evaluation (via tokio-cron-scheduler)
+  - [ ] Background task runner (tokio tasks) - **NEEDS IMPLEMENTATION**
+  - [x] Schedule storage (SQLite) - Global database at `~/.tether/schedules.db`
+  - [x] Next run calculation (framework in place, needs full implementation)
+  - [x] Scheduler lifecycle (start/stop/pause)
 
-- [ ] Run tracking
-  - [ ] Runs database (SQLite)
-  - [ ] Run metadata storage
-  - [ ] Report file management
-  - [ ] Auto-cleanup old runs (keep last 30)
+- [x] Run tracking ✅ **(Completed Dec 19, 2025)**
+  - [x] Runs database (SQLite)
+  - [x] Run metadata storage
+  - [ ] Report file management - **NEEDS IMPLEMENTATION**
+  - [x] Auto-cleanup old runs (keep last 30)
 
-- [ ] Execution engine
-  - [ ] Execute all cells in workbook sequentially
-  - [ ] Capture outputs for each cell
-  - [ ] Handle errors gracefully
-  - [ ] Save notebook with outputs to .tether/runs/
-  - [ ] Update run status (success/failed)
+- [x] Execution engine ✅ **(Completed Dec 19, 2025)**
+  - [x] Execute all cells in workbook sequentially - `/engine/execute-all` endpoint
+  - [x] Capture outputs for each cell
+  - [x] Handle errors gracefully - Stops on first error
+  - [ ] Save notebook with outputs to .tether/runs/ - **NEEDS IMPLEMENTATION**
+  - [x] Update run status (success/failed) - `complete_run()` function exists
 
-- [ ] Tauri commands
+- [ ] Tauri commands - **NEEDS IMPLEMENTATION**
   - [ ] `add_schedule(workbook_path, cron, enabled)` - Create schedule
   - [ ] `list_schedules()` - Get all schedules
   - [ ] `update_schedule(id, cron, enabled)` - Update schedule
@@ -31,6 +49,18 @@
   - [ ] `list_runs(limit)` - Get recent runs
   - [ ] `get_run_report(run_id)` - Load run report notebook
   - [ ] `run_now(workbook_path)` - Manual execution (for testing)
+
+## CLI Commands ✅ **(Completed Dec 19, 2025)**
+
+- [x] `tether run <notebook>` - Run workbook (placeholder, needs engine integration)
+- [x] `tether schedule add <notebook> --cron <expr>` - Add custom cron schedule
+- [x] `tether schedule add <notebook> --daily` - Daily at 9am preset
+- [x] `tether schedule add <notebook> --hourly` - Hourly preset
+- [x] `tether schedule add <notebook> --weekly` - Weekly on Monday preset
+- [x] `tether schedule list` - List all schedules
+- [x] `tether schedule remove <id>` - Remove a schedule
+
+**Files:** `src-tauri/src/cli.rs`, `src-tauri/Cargo.toml`
 
 ## Frontend (React)
 
@@ -89,19 +119,19 @@
 
 ## Cron Handling
 
-- [ ] Cron expression parser
-- [ ] Presets:
-  - [ ] Daily at specific time
-  - [ ] Hourly
-  - [ ] Weekly on specific days
-- [ ] Custom expression validator
-- [ ] Next run calculator
-- [ ] Human-readable description generator
+- [x] Cron expression parser ✅ (via tokio-cron-scheduler)
+- [x] Presets: ✅ **(Completed Dec 19, 2025)**
+  - [x] Daily at specific time (9am)
+  - [x] Hourly
+  - [x] Weekly on specific days (Monday 9am)
+- [x] Custom expression validator ✅
+- [ ] Next run calculator - **NEEDS FULL IMPLEMENTATION** (framework exists)
+- [ ] Human-readable description generator - **NEEDS IMPLEMENTATION**
 
 ## Run Cleanup
 
-- [ ] Auto-delete runs older than 30th
-- [ ] Clean up orphaned report files
+- [x] Auto-delete runs older than 30th ✅ **(Completed Dec 19, 2025)** - `cleanup_old_runs()` function
+- [ ] Clean up orphaned report files - **NEEDS IMPLEMENTATION**
 - [ ] Configurable retention (future)
 
 ## Notifications (Future)

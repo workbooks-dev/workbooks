@@ -700,6 +700,219 @@ async def restart_engine(request: StartEngineRequest):
     return await start_engine(request)
 
 
+class Cell(BaseModel):
+    """A single cell from a notebook."""
+    source: str  # Cell source code
+    cell_type: str = "code"  # code or markdown
+
+
+class ExecuteAllRequest(BaseModel):
+    """Request to execute all cells in a workbook."""
+    workbook_path: str
+    cells: List[Cell]
+
+
+class CellExecutionResult(BaseModel):
+    """Result of executing a single cell."""
+    cell_index: int
+    success: bool
+    outputs: List[Output]
+    execution_count: int | None = None
+    error: str | None = None
+
+
+class ExecuteAllResponse(BaseModel):
+    """Response with results from executing all cells."""
+    success: bool  # True if all cells succeeded
+    cell_results: List[CellExecutionResult]
+    total_cells: int
+    successful_cells: int
+    failed_cells: int
+
+
+@app.post("/engine/execute-all", response_model=ExecuteAllResponse)
+async def execute_all_cells(request: ExecuteAllRequest):
+    """Execute all cells in a workbook sequentially."""
+    workbook_path = request.workbook_path
+    cells = request.cells
+
+    km = engines.get(workbook_path)
+    if not km:
+        raise HTTPException(status_code=404, detail="No engine found for this workbook")
+
+    logger.info(f"Executing {len(cells)} cells for {workbook_path}")
+
+    cell_results = []
+    successful_cells = 0
+    failed_cells = 0
+
+    for cell_index, cell in enumerate(cells):
+        # Skip markdown cells
+        if cell.cell_type != "code":
+            continue
+
+        # Skip empty cells
+        if not cell.source or not cell.source.strip():
+            continue
+
+        logger.info(f"Executing cell {cell_index + 1}/{len(cells)}")
+
+        try:
+            kc = km.client()
+
+            # Execute code
+            msg_id = kc.execute(cell.source, store_history=True, silent=False)
+
+            # Collect outputs
+            outputs: List[Output] = []
+            has_error = False
+            exec_count = None
+
+            while True:
+                try:
+                    msg = await asyncio.wait_for(kc.get_iopub_msg(), timeout=300.0)
+
+                    # Only process messages for our execution
+                    if msg.get("parent_header", {}).get("msg_id") != msg_id:
+                        continue
+
+                    msg_type = msg["msg_type"]
+                    content = msg["content"]
+
+                    new_output = None
+
+                    if msg_type == "stream":
+                        text = content["text"]
+                        secrets = secret_values.get(workbook_path, {})
+                        metadata = None
+                        if contains_secret(text, secrets):
+                            metadata = {"contains_secrets": True}
+
+                        new_output = Output(
+                            output_type="stream",
+                            name=content["name"],
+                            text=text,
+                            metadata=metadata,
+                        )
+
+                    elif msg_type == "execute_result":
+                        secrets = secret_values.get(workbook_path, {})
+                        metadata = None
+                        data = content["data"]
+                        if "text/plain" in data:
+                            text_repr = data["text/plain"]
+                            if isinstance(text_repr, list):
+                                text_repr = "".join(text_repr)
+                            if contains_secret(text_repr, secrets):
+                                metadata = {"contains_secrets": True}
+
+                        new_output = Output(
+                            output_type="execute_result",
+                            data=data,
+                            execution_count=content["execution_count"],
+                            metadata=metadata,
+                        )
+
+                    elif msg_type == "display_data":
+                        new_output = Output(
+                            output_type="display_data",
+                            data=content["data"],
+                        )
+
+                    elif msg_type == "error":
+                        has_error = True
+                        secrets = secret_values.get(workbook_path, {})
+                        metadata = None
+                        traceback_text = "\n".join(content["traceback"]) if content["traceback"] else ""
+                        error_text = f"{content['ename']}: {content['evalue']}\n{traceback_text}"
+                        if contains_secret(error_text, secrets):
+                            metadata = {"contains_secrets": True}
+
+                        new_output = Output(
+                            output_type="error",
+                            ename=content["ename"],
+                            evalue=content["evalue"],
+                            traceback=content["traceback"],
+                            metadata=metadata,
+                        )
+
+                    elif msg_type == "status" and content["execution_state"] == "idle":
+                        break
+
+                    if new_output:
+                        outputs.append(new_output)
+
+                except asyncio.TimeoutError:
+                    outputs.append(
+                        Output(
+                            output_type="stream",
+                            name="stderr",
+                            text="\n... Cell execution timeout (300s) ...\n",
+                        )
+                    )
+                    has_error = True
+                    break
+
+            # Get execution count
+            try:
+                reply = await asyncio.wait_for(kc.get_shell_msg(), timeout=1.0)
+                if reply.get("parent_header", {}).get("msg_id") == msg_id:
+                    exec_count = reply.get("content", {}).get("execution_count")
+            except asyncio.TimeoutError:
+                pass
+
+            # Create result for this cell
+            error_message = None
+            if has_error and outputs:
+                # Extract error message from error output
+                for output in outputs:
+                    if output.output_type == "error":
+                        error_message = f"{output.ename}: {output.evalue}"
+                        break
+
+            cell_result = CellExecutionResult(
+                cell_index=cell_index,
+                success=not has_error,
+                outputs=outputs,
+                execution_count=exec_count,
+                error=error_message,
+            )
+
+            cell_results.append(cell_result)
+
+            if has_error:
+                failed_cells += 1
+                logger.warning(f"Cell {cell_index + 1} failed: {error_message}")
+                # Stop execution on first error
+                break
+            else:
+                successful_cells += 1
+                logger.info(f"Cell {cell_index + 1} succeeded")
+
+        except Exception as e:
+            logger.error(f"Error executing cell {cell_index + 1}: {e}")
+            cell_result = CellExecutionResult(
+                cell_index=cell_index,
+                success=False,
+                outputs=[],
+                error=str(e),
+            )
+            cell_results.append(cell_result)
+            failed_cells += 1
+            # Stop on error
+            break
+
+    logger.info(f"Execution complete: {successful_cells} successful, {failed_cells} failed")
+
+    return ExecuteAllResponse(
+        success=(failed_cells == 0),
+        cell_results=cell_results,
+        total_cells=len(cells),
+        successful_cells=successful_cells,
+        failed_cells=failed_cells,
+    )
+
+
 class CompleteRequest(BaseModel):
     workbook_path: str
     code: str
