@@ -6,6 +6,37 @@ This file tracks major features and improvements as they're completed.
 
 ### December 2024
 
+**Workbook Execution Enhancements (Dec 18, 2024)**
+- **Execution Metadata Tracking**: Cell-level performance metrics
+  - Last run timestamp stored in cell metadata
+  - Execution duration tracked and displayed
+  - Duration shown below execution count ([3] 0.25s)
+  - Metadata persisted in notebook file for history
+- **Cell Execution Status Indicators**: Visual feedback system
+  - Error indicator (✗ symbol) with red highlighting on failed cells
+  - Running indicator with blue text and live timer
+  - Execution count display matching Jupyter style [3]
+  - Duration displayed after completion
+- **Execution Queue Controls**: Batch cell execution
+  - "Run All Above" button to execute cells above selected
+  - "Run All Below" button to execute cells below selected
+  - Enhanced "Run All" with metadata tracking
+  - Queue progress tracking with cell highlighting
+- **Enhanced DataFrame Rendering**: Production-grade table styling
+  - Sticky headers that stay visible when scrolling
+  - Max height (600px) with scroll for large DataFrames
+  - Cleaner borders (bottom-only instead of full grid)
+  - Gradient headers with subtle shadows
+  - Improved hover effects with smooth transitions
+  - Tabular numeric formatting for better number alignment
+  - Sticky left column for row indices
+- **Image Lightbox/Zoom Feature**: Click-to-zoom functionality
+  - Click any PNG/JPEG image to view full-size
+  - Dark overlay with centered image
+  - Close button and click-outside-to-close behavior
+  - Hover effects on thumbnails (cursor change, opacity)
+  - Supports images up to 90vh height
+
 **Workbook UI Polish (Dec 18, 2024)**
 - **Cell Visual Improvements**: Complete redesign of cell appearance
   - Added clear borders with rounded corners and hover states

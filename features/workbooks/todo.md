@@ -1,44 +1,29 @@
 # Workbooks - To Do
 
+
 ## High Priority
 
-- [ ] Lock icon when secrets are active
-  - [ ] Show lock icon in WorkbookViewer when secrets system is enabled
-  - [ ] Indicate which secrets are available to current workbook
+- [ ] Markdown does not render or persist
+  - [ ] Do we need a robust markdown editor? we might
+  - [ ] We need basic markdown formatting within a markdown cell - bold, underline, italics, alignment, bullets/lists, link something
+  - [ ] We need to be able to link a file and render a link or preview (such as an image or video) inline assuming the file is either (a relative link on the system or b) a url
 
-- [ ] Secret detection dialog
-  - [ ] Scan cell code before execution for hardcoded secrets
-  - [ ] Prompt user to move to secrets manager
-  - [ ] Auto-rewrite cell to use `os.environ["SECRET_NAME"]`
-
-- [ ] Output redaction integration
-  - [ ] Scan outputs for secret values before saving
-  - [ ] Replace with `[REDACTED]` or similar
-  - [ ] Prevent accidental secret commits
 
 ## Medium Priority
 
-- [ ] Persist execution metadata:
-  - [ ] Last run time per cell
-  - [ ] Execution duration per cell
-  - [ ] Total workbook run time
-  - [ ] Store in `.tether/` metadata database
-
-- [ ] Cell execution status indicators:
-  - [ ] Show execution count `[3]` like Jupyter
-  - [ ] Show running indicator during execution
-  - [ ] Show error indicator on failed cells
-
 - [ ] Output improvements:
-  - [ ] Better HTML/DataFrame rendering
-  - [ ] Interactive widget support
+  - [ ] Interactive widget support (ipywidgets)
   - [ ] Plotly/Bokeh chart support
-  - [ ] Image zoom/lightbox
 
-- [ ] Execution queue:
-  - [ ] "Run All" button to execute all cells sequentially
-  - [ ] "Run All Above" / "Run All Below" options
-  - [ ] Queue visualization
+- [ ] Cell profiling and performance:
+  - [ ] Memory usage tracking per cell
+  - [ ] CPU time profiling
+  - [ ] Performance breakdown visualization
+
+- [ ] Execution state on tab changes should persist (it currently reverts to saved state)
+
+- [ ] Hovering above or below cells should prompt the option to add a cell (code or markdown)
+
 
 ## Low Priority
 

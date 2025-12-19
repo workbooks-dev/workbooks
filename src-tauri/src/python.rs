@@ -7,9 +7,31 @@ use std::os::unix::fs::PermissionsExt;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::{Hash, Hasher};
 
-/// Check if uv is available in PATH
+/// Check if uv is available in PATH or common installation locations
 pub fn check_uv_available() -> Result<PathBuf> {
-    which("uv").context("uv not found in PATH")
+    // First try to find uv in PATH
+    if let Ok(path) = which("uv") {
+        return Ok(path);
+    }
+
+    // If not in PATH, check common installation locations
+    let home_dir = dirs::home_dir()
+        .context("Failed to get home directory")?;
+
+    let common_locations = vec![
+        home_dir.join(".cargo").join("bin").join("uv"),
+        home_dir.join(".local").join("bin").join("uv"),
+        PathBuf::from("/usr/local/bin/uv"),
+    ];
+
+    for location in common_locations {
+        if location.exists() && location.is_file() {
+            println!("Found uv at {:?}", location);
+            return Ok(location);
+        }
+    }
+
+    anyhow::bail!("uv not found in PATH or common installation locations (~/.cargo/bin, ~/.local/bin, /usr/local/bin)")
 }
 
 /// Install uv using the official installer
@@ -73,8 +95,8 @@ async fn install_uv_unix() -> Result<PathBuf> {
 
     println!("uv installed successfully");
 
-    // Return the path to uv
-    which("uv").context("uv was installed but not found in PATH. You may need to restart your terminal or add ~/.cargo/bin to your PATH")
+    // Return the path to uv (checks PATH and common locations)
+    check_uv_available().context("uv was installed but not found. You may need to restart your terminal or add ~/.cargo/bin or ~/.local/bin to your PATH")
 }
 
 #[cfg(target_os = "windows")]
@@ -119,8 +141,8 @@ async fn install_uv_windows() -> Result<PathBuf> {
 
     println!("uv installed successfully");
 
-    // Return the path to uv
-    which("uv").context("uv was installed but not found in PATH. You may need to restart your terminal")
+    // Return the path to uv (checks PATH and common locations)
+    check_uv_available().context("uv was installed but not found. You may need to restart your terminal")
 }
 
 /// Ensure uv is available, installing it if necessary

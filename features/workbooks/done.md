@@ -28,12 +28,30 @@
   - [x] Handles long-running cells
 
 - [x] Rich output rendering
-  - [x] PNG images
-  - [x] JPEG images
+  - [x] PNG images (with click-to-zoom lightbox)
+  - [x] JPEG images (with click-to-zoom lightbox)
   - [x] SVG graphics
   - [x] HTML content (DataFrames, tables)
   - [x] Error tracebacks
   - [x] Text output (stdout, stderr, execute_result)
+
+- [x] Execution metadata tracking
+  - [x] Last run timestamp stored in cell metadata
+  - [x] Execution duration per cell
+  - [x] Metadata displayed below execution count
+  - [x] Persisted in notebook file
+
+- [x] Cell execution status indicators
+  - [x] Execution count display `[3]` like Jupyter
+  - [x] Running indicator (blue text, live timer)
+  - [x] Error indicator (✗ symbol, red highlighting)
+  - [x] Execution duration shown after completion
+
+- [x] Execution queue controls
+  - [x] "Run All" button to execute all cells sequentially
+  - [x] "Run All Above" to execute cells above selected
+  - [x] "Run All Below" to execute cells below selected
+  - [x] Queue progress tracking with cell highlighting
 
 ### Engine Management
 
@@ -91,6 +109,19 @@
 - [x] Expand/collapse for truncated output
 - [x] Multiple outputs per cell
 - [x] Clear formatting
+- [x] Enhanced DataFrame rendering
+  - [x] Sticky headers for scrollable tables
+  - [x] Max height with scroll for large DataFrames
+  - [x] Improved border styling and spacing
+  - [x] Zebra striping with hover effects
+  - [x] Gradient headers with subtle shadows
+  - [x] Tabular numeric formatting
+- [x] Image lightbox/zoom
+  - [x] Click to zoom on PNG images
+  - [x] Click to zoom on JPEG images
+  - [x] Dark overlay with centered image
+  - [x] Close button and click-outside-to-close
+  - [x] Hover effects on thumbnails
 
 ### Integration
 

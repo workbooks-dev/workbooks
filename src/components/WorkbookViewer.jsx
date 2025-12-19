@@ -8,6 +8,126 @@ import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
 import { vscDarkPlus } from "react-syntax-highlighter/dist/esm/styles/prism";
 import { SecretsWarningModal } from "./SecretsWarningModal";
 
+// ============================================
+// STYLING CONSTANTS - DO NOT MODIFY
+// All className strings are defined here
+// Any style changes will be clearly visible in git diff
+// ============================================
+const STYLES = {
+  // Cell container styles
+  cell: {
+    markdownContainer: "relative mb-4 px-2 py-2 pl-3 border-l-2 transition-all",
+    markdownSelected: "bg-gray-50/30 border-l-blue-500",
+    markdownUnselected: "border-l-transparent",
+    codeContainer: "relative mb-4 pl-3 border-l-2 transition-all",
+    codeSelected: "bg-gray-50/30 border-l-blue-500",
+    codeUnselected: "border-l-transparent",
+  },
+
+  // Cell action buttons
+  button: {
+    actionBar: "absolute top-2 right-2 flex gap-1 z-10",
+    actionBarCode: "absolute -top-2 right-0 flex gap-1 z-10",
+    action: "px-2 py-1 text-xs bg-white hover:bg-gray-100 border border-gray-300 rounded shadow-sm transition-colors",
+  },
+
+  // Markdown cell
+  markdown: {
+    container: "w-full",
+    textarea: "w-full p-3 border-none resize-y font-sans text-sm leading-relaxed focus:outline-none bg-transparent",
+    content: "markdown-content px-3 py-2",
+    placeholder: "text-gray-400 italic px-3 py-2",
+  },
+
+  // Code cell execution area
+  execution: {
+    container: "flex gap-2",
+    countContainer: "font-mono text-xs min-w-[20px] pt-2 pr-1 text-right flex-shrink-0",
+    countError: "text-red-600 font-semibold",
+    countRunning: "text-blue-600 font-semibold",
+    countNormal: "text-gray-500",
+    countText: "font-medium",
+    errorIndicator: "text-red-600 mr-0.5",
+    timer: "text-[10px] text-blue-600 font-medium mt-0.5",
+    metadata: "text-[10px] text-gray-500 mt-0.5",
+  },
+
+  // Code editor
+  editor: {
+    container: "flex-1 flex flex-col min-w-0",
+    input: "cell-input rounded-lg bg-white border transition-all px-2",
+    inputSelected: "border-blue-400 shadow-sm",
+    inputUnselected: "border-gray-300",
+  },
+
+  // Output area
+  output: {
+    container: "mt-2",
+    secretsWarning: "cell-output-content p-3 bg-yellow-50 border-t border-yellow-200",
+    secretsText: "flex items-center gap-2 text-yellow-800 text-sm font-medium",
+    secretsIcon: "w-4 h-4",
+
+    // Stream output
+    streamContainer: "rounded-lg border border-red-200 bg-red-50/30",
+    streamNormal: "bg-gray-50",
+    streamContent: "p-2 max-h-[300px] overflow-auto",
+    streamPre: "m-0 whitespace-pre-wrap break-words font-mono text-xs",
+    streamStderr: "text-red-700",
+    streamStdout: "text-gray-900",
+    truncateWarning: "px-2 py-1 mb-2 bg-amber-50 border border-amber-200 rounded text-amber-800 text-xs",
+    expandButton: "block mx-2 mb-2 px-2 py-1 text-xs font-medium bg-white hover:bg-gray-50 border border-gray-300 rounded text-blue-600 transition-colors",
+
+    // Rich output
+    imageContainer: "py-3",
+    image: "max-w-full h-auto rounded-lg",
+    svgContainer: "py-3",
+    dataframeWrapper: "rounded-lg bg-gray-50 overflow-hidden",
+    dataframe: "dataframe-output",
+    plainWrapper: "bg-gray-50",
+    plainContent: "p-2 max-h-[300px] overflow-auto",
+    plainPre: "m-0 whitespace-pre-wrap break-words font-mono text-xs text-gray-900",
+    rawData: "rounded-lg bg-gray-50 px-5 py-3",
+
+    // Error output
+    errorContainer: "rounded-lg border border-red-200 bg-red-50/30",
+    errorContent: "p-2 max-h-[300px] overflow-auto",
+    errorPre: "m-0 whitespace-pre-wrap break-words font-mono text-xs text-red-700",
+  },
+
+  // Main viewer
+  viewer: {
+    container: "flex flex-col h-full bg-gray-50",
+    header: "px-6 py-4 border-b border-gray-200 bg-white",
+    headerTop: "flex items-start justify-between gap-4 mb-3",
+    title: "text-base font-semibold text-gray-900 flex items-center gap-2",
+    unsavedDot: "text-amber-500 text-lg",
+    headerControls: "flex items-center gap-2",
+    statusBadge: "text-xs px-2 py-1 rounded-md font-medium",
+    statusStarting: "bg-amber-50 text-amber-700",
+    statusIdle: "bg-emerald-50 text-emerald-700",
+    statusBusy: "bg-blue-50 text-blue-700 animate-pulse-subtle",
+    statusRestarting: "bg-amber-50 text-amber-700",
+    statusError: "bg-red-50 text-red-700",
+    saveButton: "px-3 py-1.5 text-sm font-medium text-white rounded-md transition-colors shadow-sm",
+    saveNormal: "bg-blue-600 hover:bg-blue-700",
+    saveWarning: "bg-amber-600 hover:bg-amber-700",
+
+    toolbar: "flex items-center gap-3 flex-wrap",
+    hint: "text-xs px-2 py-1 bg-gray-100 text-gray-600 rounded-md font-mono",
+    spacer: "flex-1",
+    buttonGroup: "flex items-center gap-2",
+    separator: "w-px h-5 bg-gray-300",
+
+    button: "px-3 py-1.5 text-xs font-medium text-gray-700 bg-white hover:bg-gray-50 border border-gray-300 rounded-md transition-all disabled:opacity-50 disabled:cursor-not-allowed shadow-sm",
+    buttonPrimary: "px-3 py-1.5 text-xs font-medium text-white bg-blue-600 hover:bg-blue-700 rounded-md transition-colors shadow-sm",
+
+    content: "flex-1 overflow-y-auto px-4 py-4 custom-scrollbar",
+    error: "bg-red-50 border border-red-200 rounded-lg px-4 py-3 mb-4 flex items-center justify-between text-red-800 text-sm",
+    errorClose: "text-red-600 hover:bg-red-100 rounded px-2 py-1 transition-colors text-lg font-bold",
+    emptyState: "text-center py-16 text-gray-400",
+  },
+};
+
 // Hash function to match Rust implementation in lib.rs
 function hashString(s) {
   let hash = 0;
@@ -76,8 +196,8 @@ function WorkbookCell({ cell, index, workbookPath, onUpdate, onDelete, onExecute
   if (cell.cell_type === "markdown") {
     return (
       <div
-        className={`relative mb-4 px-2 py-2 pl-3 border-l-2 transition-all ${
-          isSelected ? 'bg-gray-50/30 border-l-blue-500' : 'border-l-transparent'
+        className={`${STYLES.cell.markdownContainer} ${
+          isSelected ? STYLES.cell.markdownSelected : STYLES.cell.markdownUnselected
         }`}
         onClick={() => onSelect(index)}
         onDoubleClick={() => {
@@ -86,51 +206,51 @@ function WorkbookCell({ cell, index, workbookPath, onUpdate, onDelete, onExecute
         }}
       >
         {isSelected && (
-          <div className="absolute top-2 right-2 flex gap-1 z-10">
+          <div className={STYLES.button.actionBar}>
             <button
               onClick={(e) => { e.stopPropagation(); handleExecute(); }}
-              className="px-2 py-1 text-xs bg-white hover:bg-gray-100 border border-gray-300 rounded shadow-sm transition-colors"
+              className={STYLES.button.action}
               title="Run cell (render)"
             >
               ▶
             </button>
             <button
               onClick={(e) => { e.stopPropagation(); onMoveUp(index); }}
-              className="px-2 py-1 text-xs bg-white hover:bg-gray-100 border border-gray-300 rounded shadow-sm transition-colors"
+              className={STYLES.button.action}
               title="Move up"
             >
               ↑
             </button>
             <button
               onClick={(e) => { e.stopPropagation(); onMoveDown(index); }}
-              className="px-2 py-1 text-xs bg-white hover:bg-gray-100 border border-gray-300 rounded shadow-sm transition-colors"
+              className={STYLES.button.action}
               title="Move down"
             >
               ↓
             </button>
             <button
               onClick={(e) => { e.stopPropagation(); onDelete(index); }}
-              className="px-2 py-1 text-xs bg-white hover:bg-gray-100 border border-gray-300 rounded shadow-sm transition-colors"
+              className={STYLES.button.action}
               title="Delete"
             >
               🗑
             </button>
           </div>
         )}
-        <div className="w-full">
+        <div className={STYLES.markdown.container}>
           {isEditMode ? (
             <textarea
               value={content}
               onChange={(e) => handleEditorChange(e.target.value)}
               onKeyDown={handleKeyDown}
               onBlur={handleBlur}
-              className="w-full p-3 border-none resize-y font-sans text-sm leading-relaxed focus:outline-none bg-transparent"
+              className={STYLES.markdown.textarea}
               placeholder="Enter markdown..."
               rows={Math.max(3, content.split("\n").length)}
               autoFocus
             />
           ) : (
-            <div className="markdown-content px-3 py-2">
+            <div className={STYLES.markdown.content}>
               {content ? (
                 <ReactMarkdown
                   components={{
@@ -156,7 +276,7 @@ function WorkbookCell({ cell, index, workbookPath, onUpdate, onDelete, onExecute
                   {content}
                 </ReactMarkdown>
               ) : (
-                <div className="text-gray-400 italic px-3 py-2">Double-click to edit markdown</div>
+                <div className={STYLES.markdown.placeholder}>Double-click to edit markdown</div>
               )}
             </div>
           )}
@@ -168,6 +288,7 @@ function WorkbookCell({ cell, index, workbookPath, onUpdate, onDelete, onExecute
   if (cell.cell_type === "code") {
     const outputs = cell.outputs || [];
     const hasOutput = outputs.length > 0;
+    const hasError = outputs.some(output => output.output_type === "error");
 
     return (
       <div
@@ -219,12 +340,21 @@ function WorkbookCell({ cell, index, workbookPath, onUpdate, onDelete, onExecute
         )}
         <div className="flex gap-2">
           <div className={`font-mono text-xs min-w-[20px] pt-2 pr-1 text-right flex-shrink-0 ${
+            hasError ? 'text-red-600 font-semibold' :
             isRunning ? 'text-blue-600 font-semibold' : 'text-gray-500'
           }`}>
-            <div className="font-medium">[{cell.execution_count || " "}]</div>
+            <div className="font-medium">
+              {hasError && <span className="text-red-600 mr-0.5" title="Cell execution failed">✗</span>}
+              [{cell.execution_count || " "}]
+            </div>
             {isRunning && executionElapsed > 0 && (
               <div className="text-[10px] text-blue-600 font-medium mt-0.5" title="Execution time">
                 {(executionElapsed / 1000).toFixed(1)}s
+              </div>
+            )}
+            {!isRunning && cell.metadata?.tether?.duration_ms && (
+              <div className="text-[10px] text-gray-500 mt-0.5" title={`Last run: ${cell.metadata.tether.last_run ? new Date(cell.metadata.tether.last_run).toLocaleString() : 'Unknown'}`}>
+                {(cell.metadata.tether.duration_ms / 1000).toFixed(2)}s
               </div>
             )}
           </div>
@@ -381,6 +511,7 @@ function WorkbookCell({ cell, index, workbookPath, onUpdate, onDelete, onExecute
 
 function CellOutput({ output }) {
   const [expanded, setExpanded] = useState(false);
+  const [zoomedImage, setZoomedImage] = useState(null);
   const MAX_LINES = 20; // Show first 20 lines by default
 
   // Check if output was truncated by the backend

@@ -1,22 +1,6 @@
 # Tether App Issues
-Go through available issues. When completed, mark checklist item with [x]. For completed files, be sure to run `git add <filepath>` and `git commit -m "fix <issue name>"`
-
-## Tether App
-- [ ] Save before closing has strange behavior. Files were all saved but user was still prompted, on "cancel" button, the user was prompted again and again on loop. App eventually crashed.
-
-## Notebooks
-- [ ] If cell is selected, and "+ new workbook" is selected, the user starts typing to name the workbook but the data goes into the cell, it should go into the + new workbook section.
 
 
-
-## App Sidebar
-- [ ] Workbook ordering is a bit wonky, it resorts the workbooks every time one is open. Let's just keep them in alphabetical order
-
-
-## Autocomplete
-
-
-## Notebook Engine (Jupyter Kernel)
-
-
-## Virtual environments
+## Build issues
+- [x] Tether should open 600 x 600 if first open and it's possible.
+- [x] shouldn't tether automatically solve issues like this? in some cases uv will be found in `.local/bin/uv` in other cases tether will need to fix it. uv was installed but not found in PATH. You may need to restart your terminal or add ~/.cargo/bin to your PATH
