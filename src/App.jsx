@@ -312,7 +312,16 @@ function App() {
 
   async function loadProjectFromPath(projectPath) {
     try {
-      const project = await invoke("load_project", { projectPath });
+      // Use open_folder instead of load_project to ensure project is initialized
+      const project = await invoke("open_folder", { folderPath: projectPath });
+
+      // Initialize Python environment and sync dependencies
+      console.log("Initializing Python environment...");
+      await invoke("init_python_env", {
+        projectPath: project.root,
+      });
+      console.log("Python environment initialized");
+
       setCurrentProject(project);
       restoreTabs(project);
       setView("project");

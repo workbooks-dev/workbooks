@@ -265,8 +265,11 @@ async def start_engine(request: StartEngineRequest):
                 kernel_env[key] = value
             # Note: Not logging env var injection for security (secrets may be present)
 
-        print("Starting engine process with environment variables...")
-        await km.start_kernel(cwd=project_root, env=kernel_env)
+        # Set kernel working directory to notebook's directory (standard Jupyter behavior)
+        # This allows local imports from the same directory as the notebook
+        notebook_dir = os.path.dirname(workbook_path)
+        print(f"Starting engine process with cwd={notebook_dir}...")
+        await km.start_kernel(cwd=notebook_dir, env=kernel_env)
 
         # Wait for engine to be ready
         print("Getting engine client...")
