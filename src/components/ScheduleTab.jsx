@@ -29,11 +29,12 @@ export function ScheduleTab({ projectRoot, onClose }) {
       const schedulesList = await invoke("list_schedules");
       // Filter schedules based on view mode
       const filteredSchedules = showAllProjects
-        ? schedulesList
-        : schedulesList.filter(s => s.project_root === projectRoot);
+        ? (schedulesList || [])
+        : (schedulesList || []).filter(s => s && s.project_root === projectRoot);
       setSchedules(filteredSchedules);
     } catch (err) {
       console.error("Failed to load schedules:", err);
+      setSchedules([]);
     } finally {
       setLoading(false);
     }
@@ -47,11 +48,12 @@ export function ScheduleTab({ projectRoot, onClose }) {
       const runsList = await invoke("list_runs", { limit: 30 });
       // Filter runs based on view mode
       const filteredRuns = showAllProjects
-        ? runsList
-        : runsList.filter(r => r.project_root === projectRoot);
+        ? (runsList || [])
+        : (runsList || []).filter(r => r && r.project_root === projectRoot);
       setRuns(filteredRuns);
     } catch (err) {
       console.error("Failed to load runs:", err);
+      setRuns([]);
     } finally {
       if (!silent) {
         setLoading(false);
@@ -114,11 +116,14 @@ export function ScheduleTab({ projectRoot, onClose }) {
   };
 
   const getWorkbookName = (path) => {
+    if (!path) return "Unknown";
     return path.split("/").pop().replace(".ipynb", "");
   };
 
   const getProjectName = (projectPath) => {
-    return projectPath.split("/").pop() || projectPath;
+    if (!projectPath) return "Unknown Project";
+    const name = projectPath.split("/").pop();
+    return name || projectPath;
   };
 
   const formatCronExpression = (cron) => {
@@ -387,6 +392,7 @@ export function ScheduleTab({ projectRoot, onClose }) {
                 <table className="w-full">
                   <thead>
                     <tr className="bg-gray-50 border-b border-gray-200">
+                      <th className="w-8"></th>
                       <th className="text-left px-4 py-3 text-gray-700 text-xs font-semibold uppercase tracking-wider">
                         Workbook
                       </th>
@@ -405,34 +411,22 @@ export function ScheduleTab({ projectRoot, onClose }) {
                         Status
                       </th>
                       <th className="text-left px-4 py-3 text-gray-700 text-xs font-semibold uppercase tracking-wider">
-                        Error
+                        Cells
                       </th>
                     </tr>
                   </thead>
                   <tbody>
                     {runs.map((run) => (
-                      <tr key={run.id} className="border-b border-gray-100 hover:bg-gray-50">
-                        <td className="px-4 py-3 text-sm text-gray-900">
-                          {getWorkbookName(run.workbook_path)}
-                        </td>
-                        {showAllProjects && (
-                          <td className="px-4 py-3 text-sm text-gray-600">
-                            {getProjectName(run.project_root)}
-                          </td>
-                        )}
-                        <td className="px-4 py-3 text-sm text-gray-700">
-                          {formatTimestamp(run.started_at)}
-                        </td>
-                        <td className="px-4 py-3 text-sm text-gray-700">
-                          {formatDuration(run.duration)}
-                        </td>
-                        <td className="px-4 py-3">{getStatusBadge(run.status)}</td>
-                        <td className="px-4 py-3 text-sm text-gray-700">
-                          {run.error_message && (
-                            <span className="text-red-600 text-xs">{run.error_message}</span>
-                          )}
-                        </td>
-                      </tr>
+                      <RunRow
+                        key={run.id}
+                        run={run}
+                        showAllProjects={showAllProjects}
+                        getWorkbookName={getWorkbookName}
+                        getProjectName={getProjectName}
+                        formatTimestamp={formatTimestamp}
+                        formatDuration={formatDuration}
+                        getStatusBadge={getStatusBadge}
+                      />
                     ))}
                   </tbody>
                 </table>
@@ -459,6 +453,122 @@ export function ScheduleTab({ projectRoot, onClose }) {
         />
       )}
     </div>
+  );
+}
+
+// Run Row Component with Expandable Details
+function RunRow({ run, showAllProjects, getWorkbookName, getProjectName, formatTimestamp, formatDuration, getStatusBadge }) {
+  const [expanded, setExpanded] = useState(false);
+
+  // Parse metadata JSON
+  const metadata = run.metadata ? JSON.parse(run.metadata) : null;
+
+  return (
+    <>
+      <tr
+        className="border-b border-gray-100 hover:bg-gray-50 cursor-pointer"
+        onClick={() => metadata && setExpanded(!expanded)}
+      >
+        <td className="px-2 py-3 text-center">
+          {metadata && (
+            <span className="text-gray-400 text-xs">
+              {expanded ? "▼" : "▶"}
+            </span>
+          )}
+        </td>
+        <td className="px-4 py-3 text-sm text-gray-900">
+          {getWorkbookName(run.workbook_path)}
+        </td>
+        {showAllProjects && (
+          <td className="px-4 py-3 text-sm text-gray-600">
+            {getProjectName(run.project_root)}
+          </td>
+        )}
+        <td className="px-4 py-3 text-sm text-gray-700">
+          {formatTimestamp(run.started_at)}
+        </td>
+        <td className="px-4 py-3 text-sm text-gray-700">
+          {formatDuration(run.duration)}
+        </td>
+        <td className="px-4 py-3">{getStatusBadge(run.status)}</td>
+        <td className="px-4 py-3">
+          {metadata ? (
+            <span className="text-xs text-gray-600">
+              {metadata.cells_succeeded}/{metadata.cells_executed}
+            </span>
+          ) : (
+            <span className="text-xs text-gray-400">—</span>
+          )}
+        </td>
+      </tr>
+
+      {/* Expanded Details */}
+      {expanded && metadata && (
+        <tr className="bg-gray-50">
+          <td colSpan={showAllProjects ? 7 : 6} className="px-12 py-4">
+            <div className="space-y-3">
+              {/* Execution Summary */}
+              <div>
+                <h4 className="text-xs font-semibold text-gray-700 uppercase tracking-wider mb-2">
+                  Execution Summary
+                </h4>
+                <div className="grid grid-cols-3 gap-4">
+                  <div className="bg-white rounded-md px-3 py-2 border border-gray-200">
+                    <div className="text-xs text-gray-500">Cells Executed</div>
+                    <div className="text-lg font-semibold text-gray-900">{metadata.cells_executed}</div>
+                  </div>
+                  <div className="bg-white rounded-md px-3 py-2 border border-gray-200">
+                    <div className="text-xs text-gray-500">Succeeded</div>
+                    <div className="text-lg font-semibold text-emerald-600">{metadata.cells_succeeded}</div>
+                  </div>
+                  <div className="bg-white rounded-md px-3 py-2 border border-gray-200">
+                    <div className="text-xs text-gray-500">Failed</div>
+                    <div className="text-lg font-semibold text-red-600">{metadata.cells_failed}</div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Final Outputs */}
+              {metadata.final_outputs && metadata.final_outputs.length > 0 && (
+                <div>
+                  <h4 className="text-xs font-semibold text-gray-700 uppercase tracking-wider mb-2">
+                    Final Cell Outputs
+                  </h4>
+                  <div className="bg-white rounded-md border border-gray-200 overflow-hidden">
+                    <div className="max-h-48 overflow-y-auto">
+                      {metadata.final_outputs.map((output, idx) => (
+                        <div
+                          key={idx}
+                          className={`px-3 py-2 text-xs font-mono text-gray-700 ${
+                            idx < metadata.final_outputs.length - 1 ? "border-b border-gray-100" : ""
+                          }`}
+                        >
+                          {output}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* Error Message */}
+              {run.error_message && (
+                <div>
+                  <h4 className="text-xs font-semibold text-gray-700 uppercase tracking-wider mb-2">
+                    Error Message
+                  </h4>
+                  <div className="bg-red-50 rounded-md px-3 py-2 border border-red-200">
+                    <pre className="text-xs font-mono text-red-700 whitespace-pre-wrap">
+                      {run.error_message}
+                    </pre>
+                  </div>
+                </div>
+              )}
+            </div>
+          </td>
+        </tr>
+      )}
+    </>
   );
 }
 

@@ -32,9 +32,20 @@ pub struct Run {
     pub started_at: i64,
     pub finished_at: Option<i64>,
     pub duration: Option<i64>,
-    pub status: String, // "success", "failed", "interrupted"
+    pub status: String, // "success", "failed", "interrupted", "running"
     pub error_message: Option<String>,
     pub report_path: Option<String>,
+    pub metadata: Option<String>, // JSON blob with execution metadata
+}
+
+/// Execution metadata for a run
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExecutionMetadata {
+    pub cells_executed: usize,
+    pub cells_succeeded: usize,
+    pub cells_failed: usize,
+    pub variables_created: Option<Vec<String>>,
+    pub final_outputs: Option<Vec<String>>, // Last few cell outputs as text
 }
 
 /// Cron presets for common scheduling patterns
@@ -125,6 +136,7 @@ impl SchedulerManager {
                 status TEXT NOT NULL,
                 error_message TEXT,
                 report_path TEXT,
+                metadata TEXT,
                 FOREIGN KEY (schedule_id) REFERENCES schedules(id)
             )",
             [],
@@ -347,12 +359,13 @@ impl SchedulerManager {
             status: "running".to_string(),
             error_message: None,
             report_path: None,
+            metadata: None,
         };
 
         let conn = self.get_connection()?;
         conn.execute(
-            "INSERT INTO runs (id, schedule_id, workbook_path, project_root, started_at, finished_at, duration, status, error_message, report_path)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            "INSERT INTO runs (id, schedule_id, workbook_path, project_root, started_at, finished_at, duration, status, error_message, report_path, metadata)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
             params![
                 run.id,
                 run.schedule_id,
@@ -364,6 +377,7 @@ impl SchedulerManager {
                 run.status,
                 run.error_message,
                 run.report_path,
+                run.metadata,
             ],
         )?;
 
@@ -377,6 +391,7 @@ impl SchedulerManager {
         status: &str,
         error_message: Option<&str>,
         report_path: Option<&str>,
+        metadata: Option<&str>,
     ) -> Result<()> {
         let now = Utc::now().timestamp();
         let conn = self.get_connection()?;
@@ -388,12 +403,12 @@ impl SchedulerManager {
             |row| row.get(0),
         )?;
 
-        let duration = now - started_at;
+        let duration = (now - started_at) * 1000; // Convert to milliseconds
 
         conn.execute(
-            "UPDATE runs SET finished_at = ?1, duration = ?2, status = ?3, error_message = ?4, report_path = ?5
-             WHERE id = ?6",
-            params![now, duration, status, error_message, report_path, run_id],
+            "UPDATE runs SET finished_at = ?1, duration = ?2, status = ?3, error_message = ?4, report_path = ?5, metadata = ?6
+             WHERE id = ?7",
+            params![now, duration, status, error_message, report_path, metadata, run_id],
         )?;
 
         Ok(())
@@ -403,7 +418,7 @@ impl SchedulerManager {
     pub fn list_runs(&self, limit: usize) -> Result<Vec<Run>> {
         let conn = self.get_connection()?;
         let mut stmt = conn.prepare(
-            "SELECT id, schedule_id, workbook_path, project_root, started_at, finished_at, duration, status, error_message, report_path
+            "SELECT id, schedule_id, workbook_path, project_root, started_at, finished_at, duration, status, error_message, report_path, metadata
              FROM runs
              ORDER BY started_at DESC
              LIMIT ?1"
@@ -421,6 +436,7 @@ impl SchedulerManager {
                 status: row.get(7)?,
                 error_message: row.get(8)?,
                 report_path: row.get(9)?,
+                metadata: row.get(10)?,
             })
         })?
         .collect::<Result<Vec<_>, _>>()?;
@@ -518,13 +534,13 @@ impl SchedulerManager {
         let workbook_full_path = PathBuf::from(workbook_path);
 
         // Helper to always complete the run, even on error
-        let complete_run_always = |status: &str, error_message: Option<String>| {
+        let complete_run_always = |status: &str, error_message: Option<String>, report_path: Option<String>, metadata: Option<String>| {
             let temp_manager = SchedulerManager {
                 db_path: db_path.to_path_buf(),
                 scheduler: None,
                 job_map: Arc::new(Mutex::new(HashMap::new()))
             };
-            if let Err(e) = temp_manager.complete_run(run_id, status, error_message.as_deref(), None) {
+            if let Err(e) = temp_manager.complete_run(run_id, status, error_message.as_deref(), report_path.as_deref(), metadata.as_deref()) {
                 eprintln!("Failed to complete run: {}", e);
             }
         };
@@ -595,27 +611,59 @@ impl SchedulerManager {
             result
         }.await;
 
-        // Determine status and error message based on execution result
-        let (status, error_message) = match execution_result {
+        // Determine status, error message, and metadata based on execution result
+        let (status, error_message, metadata_json) = match &execution_result {
             Ok(response) => {
+                // Build execution metadata
+                let metadata = ExecutionMetadata {
+                    cells_executed: response.cell_results.len(),
+                    cells_succeeded: response.successful_cells,
+                    cells_failed: response.failed_cells,
+                    variables_created: None, // Will be implemented later
+                    final_outputs: Some(
+                        response.cell_results.iter()
+                            .rev()
+                            .take(3) // Last 3 cells
+                            .filter_map(|r| {
+                                r.outputs.iter()
+                                    .find(|o| o.output_type == "stream" && o.text.is_some())
+                                    .and_then(|o| o.text.clone())
+                                    .or_else(|| {
+                                        r.outputs.iter()
+                                            .find(|o| o.output_type == "execute_result")
+                                            .and_then(|o| o.data.as_ref())
+                                            .and_then(|d| d.get("text/plain"))
+                                            .and_then(|v| v.as_str().map(String::from))
+                                    })
+                            })
+                            .collect()
+                    ),
+                };
+
+                let metadata_str = serde_json::to_string(&metadata).ok();
+
                 if response.success {
-                    ("success", None)
+                    ("success", None, metadata_str)
                 } else {
                     let errors: Vec<String> = response.cell_results.iter()
                         .filter(|r| !r.success)
                         .filter_map(|r| r.error.clone())
                         .collect();
-                    ("failed", Some(errors.join("\n")))
+                    ("failed", Some(errors.join("\n")), metadata_str)
                 }
             }
             Err(e) => {
                 eprintln!("Execution error: {}", e);
-                ("failed", Some(e.to_string()))
+                ("failed", Some(e.to_string()), None)
             }
         };
 
+        // Save report file (notebook with outputs) - TODO: Implement this
+        // For now, report_path is None
+        let report_path: Option<String> = None;
+
         // Always complete the run
-        complete_run_always(status, error_message);
+        complete_run_always(status, error_message, report_path, metadata_json);
 
         // Clean up old runs
         {

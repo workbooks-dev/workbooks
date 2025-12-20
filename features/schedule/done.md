@@ -275,3 +275,87 @@ Still needed (future enhancements):
 - Cron expression validation with user feedback
 - Filter recent runs by status
 - Show schedule count and next run in sidebar
+
+## Execution Insights (December 20, 2025)
+
+**✅ Complete**: Scheduler now tracks and displays detailed execution metadata for each run
+
+### Backend Implementation
+
+**Database Schema Updates:**
+- [x] Added `metadata` column to `runs` table (TEXT/JSON)
+- [x] Created `ExecutionMetadata` struct in Rust with fields:
+  - `cells_executed` - Total number of code cells executed
+  - `cells_succeeded` - Number of cells that completed successfully
+  - `cells_failed` - Number of cells that encountered errors
+  - `final_outputs` - Last 3 cell outputs as text array
+  - `variables_created` - (Optional, for future implementation)
+
+**Execution Tracking:**
+- [x] Updated `execute_workbook_internal()` to capture execution metadata
+- [x] Extract cell execution stats from engine server response
+- [x] Capture last 3 cell outputs (stream or execute_result)
+- [x] Serialize metadata to JSON and store in database
+- [x] Updated `complete_run()` to accept metadata parameter
+- [x] Changed duration from seconds to milliseconds for better precision
+
+**Files Modified:**
+- `src-tauri/src/scheduler.rs` - Schema updates, metadata extraction
+
+### Frontend Implementation
+
+**Enhanced Recent Runs UI:**
+- [x] Added expandable run rows (click to expand/collapse)
+- [x] Arrow indicator (▶/▼) shows expandable state
+- [x] New "Cells" column showing "X/Y" (succeeded/executed) summary
+- [x] Removed standalone "Error" column (errors shown in expanded view)
+
+**Execution Summary Cards:**
+- [x] Three-card layout showing:
+  - Cells Executed (total count)
+  - Succeeded (green badge)
+  - Failed (red badge)
+- [x] Color-coded metrics for quick status understanding
+- [x] Clean, minimal card design with borders
+
+**Final Outputs Display:**
+- [x] Shows last 3 cell outputs in monospace font
+- [x] Scrollable view with max-height for long outputs
+- [x] Handles both stream outputs and execute_result data
+- [x] Border-separated output blocks
+
+**Error Details:**
+- [x] Full error message and traceback in red-tinted panel
+- [x] Monospace font for readability
+- [x] Pre-formatted with proper whitespace handling
+- [x] Only shown when errors exist
+
+**Files Modified:**
+- `src/components/ScheduleTab.jsx` - RunRow component, metadata parsing, expandable UI
+
+### User Experience
+
+**What Users See:**
+1. **Recent Runs table** - Compact view with basic info + cell summary
+2. **Click to expand** - Any row with metadata can be clicked to reveal details
+3. **Execution summary** - Visual cards showing cell execution statistics
+4. **Final outputs** - Quick preview of what the workbook produced
+5. **Error details** - Full traceback when failures occur
+
+**Metadata Storage:**
+- Stored in `~/.tether/schedules.db` (runs table, metadata column)
+- Not committed to git (local execution history only)
+- Auto-cleanup after 30 runs (same as other run data)
+- JSON format allows future expansion
+
+### Future Enhancements
+
+**Variables Inspection (Future):**
+- Capture variables created during execution from kernel namespace
+- Display variable names, types, and sizes
+- Requires querying Jupyter kernel after execution
+
+**Report Files (Future):**
+- Save executed notebook with outputs to `.tether/runs/{run_id}.ipynb`
+- Add "View Report" button to open saved notebook
+- Implement read-only notebook viewer in UI

@@ -4,6 +4,21 @@ This file tracks major features and improvements as they're completed.
 
 ## Recent Completions
 
+### December 2025
+
+**Execution Insights for Scheduler (Dec 20, 2025)**
+- **Enhanced Run History**: Recent Runs now shows detailed execution metadata for each workbook run
+  - Expandable run rows with click-to-expand/collapse functionality
+  - Execution summary cards showing cells executed, succeeded, and failed
+  - Final cell outputs display (last 3 outputs) for quick preview
+  - Full error messages and tracebacks in expandable view
+  - New "Cells" column showing "X/Y" (succeeded/executed) summary
+  - Arrow indicators (▶/▼) show expandable state
+  - Metadata stored as JSON in runs table (not in git)
+  - Backend: `src-tauri/src/scheduler.rs` - Added metadata column, ExecutionMetadata struct, metadata extraction
+  - Frontend: `src/components/ScheduleTab.jsx` - RunRow component, expandable UI, metadata parsing
+  - Future: Variable inspection, report file saving
+
 ### December 2024
 
 **System Tray for Background Scheduling (Dec 20, 2024)**

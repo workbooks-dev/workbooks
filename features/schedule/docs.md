@@ -79,11 +79,46 @@ Tether allows workbooks to run on automated schedules (cron-style) and tracks ex
 - Oldest automatically deleted
 - Per-workbook and global limits
 
-**Run Reports:**
+**Execution Insights (✅ Implemented Dec 20, 2025):**
+- **Expandable Run Rows:**
+  - Click any run row to expand and see detailed execution insights
+  - Collapse to hide details and keep the table compact
+  - Arrow indicator (▶/▼) shows expandable state
+
+- **Execution Summary Cards:**
+  - **Cells Executed:** Total number of code cells that ran
+  - **Cells Succeeded:** How many completed successfully (green)
+  - **Cells Failed:** How many encountered errors (red)
+  - Displayed as cards with color-coded metrics
+
+- **Final Cell Outputs:**
+  - Shows the last 3 cell outputs as text
+  - Helps quickly understand what the workbook produced
+  - Scrollable view for longer outputs
+  - Displays both stream outputs (print statements) and execute_result data (return values)
+
+- **Error Details:**
+  - Full error message and traceback in expandable section
+  - Color-coded error display (red background) for easy identification
+  - Monospace font for readability
+
+- **Cell Summary Column:**
+  - New "Cells" column shows "X/Y" (succeeded/executed)
+  - Quick at-a-glance status without expanding row
+
+**Metadata Storage:**
+- Execution insights stored as JSON in `metadata` column in runs table
+- Includes: cells_executed, cells_succeeded, cells_failed, final_outputs
+- Stored in `~/.tether/schedules.db` (not in project files)
+- Not included in project history (won't be committed to git)
+- Auto-cleanup after 30 runs (same as other run data)
+
+**Run Reports (Future):**
 - Click "View Report" to see saved notebook output
 - Shows exactly what happened during run
 - Outputs, errors, full execution trace
 - Opens in read-only mode
+- Stored in `.tether/runs/{run_id}.ipynb`
 
 ### From Workbook Table
 

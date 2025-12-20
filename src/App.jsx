@@ -3,6 +3,8 @@ import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { listen } from "@tauri-apps/api/event";
 import { ask } from "@tauri-apps/plugin-dialog";
+import { getWindowScreenshot, getScreenshotableWindows } from "tauri-plugin-screenshots-api";
+import { writeImage } from "@tauri-apps/plugin-clipboard-manager";
 import { Welcome } from "./components/Welcome";
 import { CreateProject } from "./components/CreateProject";
 import { Sidebar } from "./components/Sidebar";
@@ -91,9 +93,35 @@ function App() {
       // Take screenshot
       unlistenTakeScreenshot = await listen("menu:take-screenshot", async () => {
         try {
-          alert("Screenshot feature coming soon! For now, use your system screenshot tool (Cmd+Shift+4 on macOS)");
+          // Get all screenshotable windows
+          const windows = await getScreenshotableWindows();
+          console.log("Available windows:", windows);
+
+          // Find the Tether window
+          const tetherWindow = windows.find(w =>
+            w.title?.toLowerCase().includes("tether") ||
+            w.appName?.toLowerCase().includes("tether")
+          );
+
+          if (!tetherWindow) {
+            alert("Could not find Tether window. Available windows: " + windows.map(w => w.title).join(", "));
+            return;
+          }
+
+          console.log("Taking screenshot of window:", tetherWindow);
+
+          // Take screenshot
+          const screenshot = await getWindowScreenshot(tetherWindow);
+
+          // Copy to clipboard
+          await writeImage(screenshot);
+
+          console.log("Screenshot copied to clipboard!");
+          alert("Screenshot copied to clipboard!");
+
         } catch (error) {
           console.error("Failed to take screenshot:", error);
+          alert(`Failed to take screenshot: ${error.message || error}`);
         }
       });
     };

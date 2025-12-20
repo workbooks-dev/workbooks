@@ -9,6 +9,9 @@
     "opener:default",
     "dialog:default",
     "dialog:allow-open",
+    "screenshots:default",
+    "clipboard-manager:default",
+    "clipboard-manager:allow-write-image",
     {
       "identifier": "fs:scope",
       "allow": [

@@ -34,6 +34,7 @@ tauri-plugin-window-state = "2"
 tauri-plugin-fs = "2"
 tauri-plugin-log = "2"
 tauri-plugin-clipboard-manager = "2"
+tauri-plugin-screenshots = "2"
 log = "0.4"
 env_logger = "0.11"
 serde = { version = "1", features = ["derive"] }
