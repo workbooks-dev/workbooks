@@ -52,6 +52,9 @@
   - [x] Ctrl/Cmd+Enter (execute, stay)
   - [x] Alt+Enter (execute, insert below)
 
+- [x] Code preprocessing before execution
+  - [x] Automatic `!cd` to `%cd` conversion (makes directory changes persist across cells)
+
 - [x] Streaming output via Server-Sent Events
   - [x] Real-time stdout/stderr
   - [x] Progressive output rendering

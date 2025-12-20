@@ -61,6 +61,33 @@ def mask_secret_value(value: str) -> str:
         return "***"
 
 
+def preprocess_code(code: str) -> str:
+    """
+    Preprocess code before execution to fix common issues.
+
+    Currently handles:
+    - Converting `!cd` to `%cd` so directory changes persist across cells
+    """
+    if not code:
+        return code
+
+    lines = code.split('\n')
+    processed_lines = []
+
+    for line in lines:
+        # Convert !cd to %cd so directory changes persist
+        # Match: !cd followed by space or end of line
+        # This preserves other shell commands like !ls, !pwd, etc.
+        if re.match(r'^\s*!cd(\s|$)', line):
+            # Replace !cd with %cd
+            processed_line = re.sub(r'^(\s*)!cd(\s|$)', r'\1%cd\2', line)
+            processed_lines.append(processed_line)
+        else:
+            processed_lines.append(line)
+
+    return '\n'.join(processed_lines)
+
+
 def contains_secret(text: str, secrets: Dict[str, str]) -> bool:
     """
     Check if text contains any secret values.
@@ -235,7 +262,9 @@ async def start_engine(request: StartEngineRequest):
 
                 # Prepend venv bin directory to PATH
                 # This ensures shell commands like !pip use the venv's executables
-                kernel_spec['env']['PATH'] = f"{venv_bin}:{{PATH}}"
+                # Use actual system PATH instead of {PATH} placeholder which doesn't always expand
+                current_path = os.environ.get('PATH', '/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin')
+                kernel_spec['env']['PATH'] = f"{venv_bin}:{current_path}"
 
                 # Inject custom environment variables (like TETHER_PROJECT_FOLDER)
                 if request.env_vars:
@@ -328,6 +357,9 @@ async def execute_code(request: ExecuteRequest):
 
     try:
         kc = km.client()
+
+        # Preprocess code (e.g., convert !cd to %cd)
+        code = preprocess_code(code)
 
         # Execute code
         msg_id = kc.execute(code, store_history=True, silent=False)
@@ -507,8 +539,11 @@ async def execute_code_stream(request: ExecuteRequest):
         try:
             kc = km.client()
 
+            # Preprocess code (e.g., convert !cd to %cd)
+            processed_code = preprocess_code(code)
+
             # Execute code
-            msg_id = kc.execute(code, store_history=True, silent=False)
+            msg_id = kc.execute(processed_code, store_history=True, silent=False)
 
             output_count = 0
             truncated = False
@@ -763,8 +798,11 @@ async def execute_all_cells(request: ExecuteAllRequest):
         try:
             kc = km.client()
 
+            # Preprocess code (e.g., convert !cd to %cd)
+            processed_code = preprocess_code(cell.source)
+
             # Execute code
-            msg_id = kc.execute(cell.source, store_history=True, silent=False)
+            msg_id = kc.execute(processed_code, store_history=True, silent=False)
 
             # Collect outputs
             outputs: List[Output] = []

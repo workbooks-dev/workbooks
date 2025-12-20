@@ -6,6 +6,16 @@ This file tracks major features and improvements as they're completed.
 
 ### December 2024
 
+**Code Preprocessing for Directory Persistence (Dec 20, 2024)**
+- **Automatic `!cd` to `%cd` Conversion**: Shell directory changes now persist across cells
+  - Added `preprocess_code()` function to engine_server.py
+  - Automatically converts `!cd` commands to `%cd` magic before execution
+  - Fixes common issue where `!cd some/dir` doesn't persist to next cell
+  - Applied to all execution endpoints: `/execute`, `/execute_stream`, `/execute-all`
+  - Transparent to users - works without requiring knowledge of IPython magic commands
+  - Other shell commands (e.g., `!ls`, `!pwd`) remain unchanged
+  - Files: `src-tauri/engine_server.py`
+
 **CLI Implementation: `tether run` and `tether schedule` (Dec 19, 2024)**
 - **Multi-Binary Cargo Setup**: Configured project to build separate CLI and GUI binaries
   - Added `[[bin]]` definitions for `tether` (CLI) and `tether-gui` (GUI)

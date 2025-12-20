@@ -1,5 +1,6 @@
 pub mod python;
 pub mod project;
+pub mod config;
 mod fs;
 pub mod engine_http;
 mod secrets;

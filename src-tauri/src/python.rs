@@ -162,6 +162,23 @@ pub async fn ensure_uv() -> Result<PathBuf> {
 /// Get the centralized venv path for a project
 /// Format: ~/.tether/venvs/<project-name>-<hash>
 pub fn get_venv_path(project_root: &Path, project_name: &str) -> Result<PathBuf> {
+    // First, check if project has a local .venv directory (standard Python convention)
+    let local_venv = project_root.join(".venv");
+    if local_venv.exists() && local_venv.is_dir() {
+        // Verify it's a valid venv by checking for bin/python or Scripts/python.exe
+        let python_path = if cfg!(target_os = "windows") {
+            local_venv.join("Scripts").join("python.exe")
+        } else {
+            local_venv.join("bin").join("python")
+        };
+
+        if python_path.exists() {
+            // println!("Using local .venv at {:?}", local_venv);
+            return Ok(local_venv);
+        }
+    }
+
+    // Fall back to centralized venv at ~/.tether/venvs/
     // Get home directory
     let home_dir = dirs::home_dir()
         .context("Failed to get home directory")?;
@@ -192,13 +209,29 @@ pub fn get_venv_path(project_root: &Path, project_name: &str) -> Result<PathBuf>
 
 /// Ensure Python virtual environment exists for a project
 pub async fn ensure_venv(project_root: &Path, project_name: &str) -> Result<PathBuf> {
-    let venv_path = get_venv_path(project_root, project_name)?;
+    // Use new intelligent venv resolution
+    let venv_path = determine_venv_path(project_root, project_name).await?;
 
+    // For UV-managed projects, run uv sync --group tether
+    if is_uv_managed_project(project_root) {
+        println!("Running uv sync --group tether...");
+        let uv_path = ensure_uv().await?;
+        let output = Command::new(uv_path)
+            .args(["sync", "--group", "tether"])
+            .current_dir(project_root)
+            .output()
+            .context("Failed to run uv sync")?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            eprintln!("Warning: uv sync failed: {}", stderr);
+        }
+    }
+
+    // If venv doesn't exist yet (tether-managed), create it
     if !venv_path.exists() {
-        // println!("Creating virtual environment at {:?}", venv_path);
+        println!("Creating virtual environment at {:?}", venv_path);
         create_venv_at_path(&venv_path).await?;
-    } else {
-        // println!("Virtual environment already exists at {:?}", venv_path);
     }
 
     Ok(venv_path)
@@ -414,5 +447,166 @@ pub async fn run_python_command(project_root: &Path, project_name: &str, args: &
 
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     Ok(stdout)
+}
+
+/// Check if project is UV-managed (has uv.lock file)
+pub fn is_uv_managed_project(project_root: &Path) -> bool {
+    project_root.join("uv.lock").exists()
+}
+
+/// Detect if project has Python environment markers
+/// Returns true if project has: requirements.txt, Pipfile.lock, venv, .venv, or pyproject.toml (without uv.lock)
+pub fn has_user_python_environment(project_root: &Path) -> bool {
+    // Check for UV-managed first (if uv.lock exists, it's not a "user" env in the prompt sense)
+    if is_uv_managed_project(project_root) {
+        return false;
+    }
+
+    // Check for various Python environment markers
+    let markers = [
+        "requirements.txt",
+        "Pipfile.lock",
+        "venv",
+        ".venv",
+        "pyproject.toml",
+    ];
+
+    markers.iter().any(|marker| project_root.join(marker).exists())
+}
+
+/// Find user's existing virtual environment path
+/// Checks common locations: .venv, venv, env, .env
+pub fn find_user_venv(project_root: &Path) -> Option<PathBuf> {
+    let venv_candidates = [".venv", "venv", "env", ".env"];
+
+    for candidate in &venv_candidates {
+        let venv_path = project_root.join(candidate);
+        if venv_path.exists() && venv_path.is_dir() {
+            // Verify it's a valid venv by checking for bin/python or Scripts/python.exe
+            let python_path = if cfg!(target_os = "windows") {
+                venv_path.join("Scripts").join("python.exe")
+            } else {
+                venv_path.join("bin").join("python")
+            };
+
+            if python_path.exists() {
+                return Some(venv_path);
+            }
+        }
+    }
+
+    None
+}
+
+/// Prompt user to choose venv strategy (CLI only)
+/// Returns the chosen strategy and optional venv path
+pub fn prompt_venv_strategy(project_root: &Path) -> Result<(crate::config::VenvStrategy, Option<PathBuf>)> {
+    use std::io::{self, Write};
+
+    println!("\n📦 Python Environment Setup");
+    println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
+    println!("Tether detected an existing Python environment in this project.");
+    println!("\nHow would you like Tether to manage the virtual environment?\n");
+    println!("  1. Let Tether manage it (recommended)");
+    println!("     → Tether creates a centralized venv and handles dependencies");
+    println!("\n  2. Use my own virtual environment");
+    println!("     → You manage packages with pip/poetry/pipenv");
+    println!("     → Tether only installs minimal requirements (ipykernel)");
+    println!("     → Can be error-prone if dependencies conflict\n");
+
+    print!("Choose [1/2] (default: 1): ");
+    io::stdout().flush()?;
+
+    let mut input = String::new();
+    io::stdin().read_line(&mut input)?;
+    let choice = input.trim();
+
+    match choice {
+        "2" => {
+            // User-managed: find their venv
+            if let Some(venv_path) = find_user_venv(project_root) {
+                println!("\n✓ Using virtual environment at: {}", venv_path.display());
+                Ok((crate::config::VenvStrategy::UserManaged, Some(venv_path)))
+            } else {
+                println!("\n⚠ No valid virtual environment found in project.");
+                println!("Falling back to Tether-managed virtual environment.");
+                Ok((crate::config::VenvStrategy::TetherManaged, None))
+            }
+        }
+        _ => {
+            // Tether-managed (default)
+            println!("\n✓ Using Tether-managed virtual environment");
+            Ok((crate::config::VenvStrategy::TetherManaged, None))
+        }
+    }
+}
+
+/// Determine which venv to use based on project markers and user preferences
+/// This is the main entry point for venv resolution
+pub async fn determine_venv_path(project_root: &Path, project_name: &str) -> Result<PathBuf> {
+    // 1. Check if UV-managed project (has uv.lock)
+    if is_uv_managed_project(project_root) {
+        let local_venv = project_root.join(".venv");
+        if local_venv.exists() {
+            return Ok(local_venv);
+        }
+    }
+
+    // 2. Check saved preference in config
+    let config = crate::config::load_config(project_root).unwrap_or_default();
+
+    match config.python.venv_strategy {
+        crate::config::VenvStrategy::UserManaged => {
+            // Use saved user venv path or try to find it
+            if let Some(ref venv_path_str) = config.python.venv_path {
+                let venv_path = PathBuf::from(venv_path_str);
+                if venv_path.exists() {
+                    println!("Using saved user-managed venv at {}", venv_path.display());
+                    return Ok(venv_path);
+                }
+            }
+
+            // Saved path doesn't exist, try to find user venv
+            if let Some(venv_path) = find_user_venv(project_root) {
+                println!("Using user-managed venv at {}", venv_path.display());
+                return Ok(venv_path);
+            }
+
+            // Can't find user venv, fall back to tether-managed
+            println!("⚠ Saved user venv not found, falling back to Tether-managed");
+        }
+
+        crate::config::VenvStrategy::TetherManaged => {
+            // Use centralized Tether venv
+            return get_venv_path(project_root, project_name);
+        }
+
+        crate::config::VenvStrategy::Auto => {
+            // Auto-detect: prompt user if needed
+            if has_user_python_environment(project_root) {
+                // Prompt user for preference (CLI only, GUI will handle separately)
+                if std::env::var("TETHER_CLI").is_ok() {
+                    let (strategy, venv_path) = prompt_venv_strategy(project_root)?;
+
+                    // Save preference
+                    let venv_path_str = venv_path.as_ref().map(|p| p.to_string_lossy().to_string());
+                    crate::config::set_venv_strategy(project_root, strategy.clone(), venv_path_str)?;
+
+                    // Return appropriate venv
+                    match strategy {
+                        crate::config::VenvStrategy::UserManaged => {
+                            if let Some(venv) = venv_path {
+                                return Ok(venv);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+    }
+
+    // Default: Tether-managed centralized venv
+    get_venv_path(project_root, project_name)
 }
 

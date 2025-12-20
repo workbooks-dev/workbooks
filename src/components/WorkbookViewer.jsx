@@ -159,10 +159,16 @@ function ensureCellIds(cells) {
   }));
 }
 
-function WorkbookCell({ cell, index, workbookPath, onUpdate, onDelete, onExecute, onMoveUp, onMoveDown, onClearOutput, isSelected, isEditMode, isRunning, executionElapsed, onSelect, onEnterEditMode, onInsertBelow, autosaveEnabled }) {
+function WorkbookCell({ cell, index, workbookPath, onUpdate, onDelete, onExecute, onMoveUp, onMoveDown, onClearOutput, isSelected, isEditMode, isRunning, executionElapsed, onSelect, onEnterEditMode, onInsertBelow, autosaveEnabled, swappingCells }) {
   // Initialize content from cell source ONCE on mount - don't sync after that
   const [content, setContent] = useState(cell.source.join(""));
   const editorRef = useRef(null);
+
+  // Check if this cell is being swapped
+  const isSwapping = swappingCells && (
+    cell.metadata?.cell_id === swappingCells.cellId1 ||
+    cell.metadata?.cell_id === swappingCells.cellId2
+  );
 
   // Auto-focus editor when cell enters edit mode
   useEffect(() => {
@@ -483,12 +489,15 @@ function WorkbookCell({ cell, index, workbookPath, onUpdate, onDelete, onExecute
             <div className={`${STYLES.editor.input} ${
               isSelected ? STYLES.editor.inputSelected : STYLES.editor.inputUnselected
             }`}>
-            <Editor
-              height={`${Math.max(60, content.split("\n").length * 19 + 24)}px`}
-              defaultLanguage="python"
-              value={content}
-              onChange={handleEditorChange}
-              onMount={(editor, monaco) => {
+            {!isSwapping && (
+              <Editor
+                key={cell.metadata?.cell_id}
+                height={`${Math.max(60, content.split("\n").length * 19 + 24)}px`}
+                defaultLanguage="python"
+                value={content}
+                onChange={handleEditorChange}
+                loading=""
+                onMount={(editor, monaco) => {
                 editorRef.current = editor;
 
                 // Focus editor if cell is in edit mode when it mounts
@@ -613,6 +622,13 @@ function WorkbookCell({ cell, index, workbookPath, onUpdate, onDelete, onExecute
                 },
               }}
             />
+            )}
+            {isSwapping && (
+              <div style={{
+                height: `${Math.max(60, content.split("\n").length * 19 + 24)}px`,
+                backgroundColor: '#f9fafb'
+              }} />
+            )}
             </div>
             {hasOutput && (
               <div className={STYLES.output.container}>
@@ -871,7 +887,7 @@ export function WorkbookViewer({ workbookPath, projectRoot, autosaveEnabled = tr
   const [selectedCell, setSelectedCell] = useState(0);
   const [editMode, setEditMode] = useState(false);
   const [isRunningAll, setIsRunningAll] = useState(false);
-  const [runningCellIndex, setRunningCellIndex] = useState(null);
+  const [runningCellId, setRunningCellId] = useState(null);
   const [cellExecutionStartTime, setCellExecutionStartTime] = useState(null); // Track when cell execution started
   const [cellExecutionElapsed, setCellExecutionElapsed] = useState(0); // Track elapsed time in ms
   const [engineStatus, setEngineStatus] = useState('starting'); // 'starting', 'idle', 'busy', 'error', 'restarting'
@@ -886,6 +902,8 @@ export function WorkbookViewer({ workbookPath, projectRoot, autosaveEnabled = tr
   const [showSecretsWarning, setShowSecretsWarning] = useState(false);
   const [cellsWithSecrets, setCellsWithSecrets] = useState([]);
   const [hasSecretsInOutputs, setHasSecretsInOutputs] = useState(false);
+  const contentScrollRef = useRef(null); // Ref for scroll container
+  const [swappingCells, setSwappingCells] = useState(null); // Track cells being swapped { from, to }
 
   useEffect(() => {
     loadWorkbook();
@@ -1119,7 +1137,7 @@ export function WorkbookViewer({ workbookPath, projectRoot, autosaveEnabled = tr
         workbookPath: workbookPath,
       });
       setEngineStatus('idle');
-      setRunningCellIndex(null);
+      setRunningCellId(null);
     } catch (err) {
       console.error("Failed to interrupt kernel:", err);
       setError(`Failed to interrupt: ${err}`);
@@ -1276,28 +1294,115 @@ export function WorkbookViewer({ workbookPath, projectRoot, autosaveEnabled = tr
 
   const moveCellUp = (index) => {
     if (index === 0) return;
+    if (!notebook || !notebook.cells || index >= notebook.cells.length) {
+      console.error("Invalid index or notebook state in moveCellUp", { index, cellCount: notebook?.cells?.length });
+      return;
+    }
 
-    setNotebook(prevNotebook => {
-      const newCells = [...prevNotebook.cells];
-      [newCells[index - 1], newCells[index]] = [newCells[index], newCells[index - 1]];
-      return { ...prevNotebook, cells: newCells };
-    });
+    // Prevent cell movement while code is running
+    if (runningCellId) {
+      console.warn("Cannot move cells while code is executing");
+      return;
+    }
 
-    setSelectedCell(index - 1);
-    setHasUnsavedChanges(true);
+    try {
+      // Capture scroll position before swapping
+      const scrollY = contentScrollRef.current?.scrollTop || 0;
+
+      // Mark cells as swapping to hide their editors
+      const cellId1 = notebook.cells[index - 1]?.metadata?.cell_id;
+      const cellId2 = notebook.cells[index]?.metadata?.cell_id;
+      setSwappingCells({ cellId1, cellId2 });
+
+      // Small delay to let CSS hide the editors
+      setTimeout(() => {
+        // Batch all state updates together
+        setNotebook(prevNotebook => {
+          if (!prevNotebook || !prevNotebook.cells || index === 0 || index >= prevNotebook.cells.length) {
+            console.error("Invalid state in moveCellUp");
+            return prevNotebook;
+          }
+
+          const newCells = [...prevNotebook.cells];
+          // Swap cells
+          const temp = newCells[index];
+          newCells[index] = newCells[index - 1];
+          newCells[index - 1] = temp;
+          return { ...prevNotebook, cells: newCells };
+        });
+
+        // Update selected cell to follow the moved cell
+        setSelectedCell(prev => index === prev ? index - 1 : prev);
+        setHasUnsavedChanges(true);
+
+        // Restore scroll and unhide editors after swap completes
+        requestAnimationFrame(() => {
+          if (contentScrollRef.current) {
+            contentScrollRef.current.scrollTop = scrollY;
+          }
+          setSwappingCells(null);
+        });
+      }, 10);
+    } catch (error) {
+      console.error("Error in moveCellUp:", error);
+      setSwappingCells(null);
+    }
   };
 
   const moveCellDown = (index) => {
-    setNotebook(prevNotebook => {
-      if (index === prevNotebook.cells.length - 1) return prevNotebook;
+    if (!notebook || !notebook.cells || index < 0 || index >= notebook.cells.length - 1) {
+      console.error("Invalid index or notebook state in moveCellDown", { index, cellCount: notebook?.cells?.length });
+      return;
+    }
 
-      const newCells = [...prevNotebook.cells];
-      [newCells[index], newCells[index + 1]] = [newCells[index + 1], newCells[index]];
-      return { ...prevNotebook, cells: newCells };
-    });
+    // Prevent cell movement while code is running
+    if (runningCellId) {
+      console.warn("Cannot move cells while code is executing");
+      return;
+    }
 
-    setSelectedCell(index + 1);
-    setHasUnsavedChanges(true);
+    try {
+      // Capture scroll position before swapping
+      const scrollY = contentScrollRef.current?.scrollTop || 0;
+
+      // Mark cells as swapping to hide their editors
+      const cellId1 = notebook.cells[index]?.metadata?.cell_id;
+      const cellId2 = notebook.cells[index + 1]?.metadata?.cell_id;
+      setSwappingCells({ cellId1, cellId2 });
+
+      // Small delay to let CSS hide the editors
+      setTimeout(() => {
+        // Batch all state updates together
+        setNotebook(prevNotebook => {
+          if (!prevNotebook || !prevNotebook.cells || index < 0 || index >= prevNotebook.cells.length - 1) {
+            console.error("Invalid state in moveCellDown");
+            return prevNotebook;
+          }
+
+          const newCells = [...prevNotebook.cells];
+          // Swap cells
+          const temp = newCells[index];
+          newCells[index] = newCells[index + 1];
+          newCells[index + 1] = temp;
+          return { ...prevNotebook, cells: newCells };
+        });
+
+        // Update selected cell to follow the moved cell
+        setSelectedCell(prev => index === prev ? index + 1 : prev);
+        setHasUnsavedChanges(true);
+
+        // Restore scroll and unhide editors after swap completes
+        requestAnimationFrame(() => {
+          if (contentScrollRef.current) {
+            contentScrollRef.current.scrollTop = scrollY;
+          }
+          setSwappingCells(null);
+        });
+      }, 10);
+    } catch (error) {
+      console.error("Error in moveCellDown:", error);
+      setSwappingCells(null);
+    }
   };
 
   const changeCellType = (index, newType) => {
@@ -1452,7 +1557,7 @@ export function WorkbookViewer({ workbookPath, projectRoot, autosaveEnabled = tr
     try {
       // Set kernel status to busy
       setEngineStatus('busy');
-      setRunningCellIndex(index);
+      setRunningCellId(cell.metadata?.cell_id || null);
 
       // Start execution timer
       const startTime = Date.now();
@@ -1491,13 +1596,21 @@ export function WorkbookViewer({ workbookPath, projectRoot, autosaveEnabled = tr
       const eventName = `cell-output-${hashString(workbookPath)}`;
 
       // Set up listener for streaming outputs
+      // Store cell ID to find the correct cell even if cells are reordered
+      const executingCellId = cell.metadata.cell_id;
       const unlisten = await listen(eventName, (event) => {
         const output = event.payload;
 
         // Add output to cell progressively
         setNotebook(prevNotebook => {
           const newCells = [...prevNotebook.cells];
-          const currentCell = newCells[index];
+          // Find cell by ID instead of index to handle cell reordering
+          const cellIndex = newCells.findIndex(c => c.metadata?.cell_id === executingCellId);
+          if (cellIndex === -1) {
+            console.warn("Could not find executing cell - it may have been deleted");
+            return prevNotebook;
+          }
+          const currentCell = newCells[cellIndex];
 
           // Check if this output was already added (React Strict Mode calls setState twice)
           // Compare with the last output to avoid duplicates
@@ -1599,7 +1712,7 @@ export function WorkbookViewer({ workbookPath, projectRoot, autosaveEnabled = tr
 
       // Set kernel status back to idle after execution
       setEngineStatus('idle');
-      setRunningCellIndex(null);
+      setRunningCellId(null);
 
       // Stop execution timer
       if (executionTimerRef.current) {
@@ -1629,7 +1742,7 @@ export function WorkbookViewer({ workbookPath, projectRoot, autosaveEnabled = tr
         setEngineStatus('idle');
         setError(errorMsg);
       }
-      setRunningCellIndex(null);
+      setRunningCellId(null);
     }
   };
 
@@ -1644,48 +1757,49 @@ export function WorkbookViewer({ workbookPath, projectRoot, autosaveEnabled = tr
     setError(null);
 
     try {
+      // Snapshot cell IDs at the start to prevent corruption if cells are reordered during execution
+      const cellsToExecute = notebook.cells
+        .filter(cell => cell.cell_type === "code" && cell.source.join("").trim() && cell.metadata?.cell_id)
+        .map(cell => ({
+          id: cell.metadata.cell_id,
+          code: cell.source.join("")
+        }));
+
       // Execute all code cells in sequence
-      for (let i = 0; i < notebook.cells.length; i++) {
-        const cell = notebook.cells[i];
-        if (cell.cell_type === "code") {
-          // Get the source code before clearing output
-          const code = cell.source.join("");
+      for (const { id, code } of cellsToExecute) {
+        setRunningCellId(id);
 
-          // Skip empty cells
-          if (!code.trim()) {
-            continue;
+        // Clear the output before running to show it's executing
+        setNotebook(prevNotebook => {
+          const newCells = [...prevNotebook.cells];
+          const idx = newCells.findIndex(c => c.metadata?.cell_id === id);
+          if (idx !== -1) {
+            newCells[idx].outputs = [];
           }
+          return { ...prevNotebook, cells: newCells };
+        });
 
-          setSelectedCell(i);
-          setRunningCellIndex(i);
+        // Execute the cell
+        const result = await invoke("execute_cell", {
+          workbookPath: workbookPath,
+          code: code,
+        });
 
-          // Clear the output before running to show it's executing
-          setNotebook(prevNotebook => {
-            const newCells = [...prevNotebook.cells];
-            newCells[i].outputs = [];
-            return { ...prevNotebook, cells: newCells };
-          });
-
-          // Execute the cell
-          const result = await invoke("execute_cell", {
-            workbookPath: workbookPath,
-            code: code,
-          });
-
-          // Update the cell with outputs and execution count
-          setNotebook(prevNotebook => {
-            const newCells = [...prevNotebook.cells];
-            newCells[i].outputs = result.outputs || [];
+        // Update the cell with outputs and execution count
+        setNotebook(prevNotebook => {
+          const newCells = [...prevNotebook.cells];
+          const idx = newCells.findIndex(c => c.metadata?.cell_id === id);
+          if (idx !== -1) {
+            newCells[idx].outputs = result.outputs || [];
 
             // Set execution_count from the result
             if (result.execution_count !== null && result.execution_count !== undefined) {
-              newCells[i].execution_count = result.execution_count;
+              newCells[idx].execution_count = result.execution_count;
             }
-
-            return { ...prevNotebook, cells: newCells };
-          });
-          setHasUnsavedChanges(true);
-        }
+          }
+          return { ...prevNotebook, cells: newCells };
+        });
+        setHasUnsavedChanges(true);
       }
     } catch (err) {
       console.error("Failed to run all cells:", err);
@@ -1702,7 +1816,7 @@ export function WorkbookViewer({ workbookPath, projectRoot, autosaveEnabled = tr
       }
     } finally {
       setIsRunningAll(false);
-      setRunningCellIndex(null);
+      setRunningCellId(null);
       // Set kernel back to idle (unless it's in error state)
       if (engineStatus !== 'error') {
         setEngineStatus('idle');
@@ -1934,7 +2048,7 @@ export function WorkbookViewer({ workbookPath, projectRoot, autosaveEnabled = tr
         </div>
       </div>
 
-      <div className={STYLES.viewer.content}>
+      <div ref={contentScrollRef} className={STYLES.viewer.content}>
         {error && (
           <div className={STYLES.viewer.error}>
             <span>{error}</span>
@@ -1967,14 +2081,15 @@ export function WorkbookViewer({ workbookPath, projectRoot, autosaveEnabled = tr
             onInsertBelow={() => addCellAt(index + 1, "code")}
             isSelected={selectedCell === index}
             isEditMode={editMode && selectedCell === index}
-            isRunning={runningCellIndex === index}
-            executionElapsed={runningCellIndex === index ? cellExecutionElapsed : 0}
+            isRunning={runningCellId === cell.metadata?.cell_id}
+            executionElapsed={runningCellId === cell.metadata?.cell_id ? cellExecutionElapsed : 0}
             onSelect={setSelectedCell}
             onEnterEditMode={() => {
               setSelectedCell(index);
               setEditMode(true);
             }}
             autosaveEnabled={autosaveEnabled}
+            swappingCells={swappingCells}
           />
         ))}
       </div>

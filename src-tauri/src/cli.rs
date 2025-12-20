@@ -71,6 +71,9 @@ enum ScheduleAction {
 
 #[tokio::main]
 async fn main() {
+    // Set environment variable to indicate CLI mode
+    std::env::set_var("TETHER_CLI", "1");
+
     // Initialize logger for CLI
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
         .init();
@@ -114,8 +117,7 @@ async fn run_workbook(workbook: &PathBuf, project: Option<&PathBuf>) -> anyhow::
     let project_root = if let Some(p) = project {
         std::fs::canonicalize(p)?
     } else {
-        // Try to find project by looking for .tether directory
-        // Start from workbook's parent, or current dir if workbook is just a filename
+        // Start from workbook's parent directory
         let start_dir = workbook_path
             .parent()
             .map(|p| p.to_path_buf())
@@ -124,7 +126,18 @@ async fn run_workbook(workbook: &PathBuf, project: Option<&PathBuf>) -> anyhow::
         let mut current = start_dir.as_path();
         let mut result_path = start_dir.clone();
 
+        // Look for project markers (Python project indicators or .tether directory)
         loop {
+            // Check for Python project markers (these take priority)
+            let python_markers = ["uv.lock", "pyproject.toml", "requirements.txt", "Pipfile.lock"];
+            let has_python_marker = python_markers.iter().any(|marker| current.join(marker).exists());
+
+            if has_python_marker {
+                result_path = current.to_path_buf();
+                break;
+            }
+
+            // Also check for .tether directory as fallback
             let tether_dir = current.join(".tether");
             if tether_dir.exists() {
                 result_path = current.to_path_buf();
@@ -134,7 +147,8 @@ async fn run_workbook(workbook: &PathBuf, project: Option<&PathBuf>) -> anyhow::
             if let Some(parent) = current.parent() {
                 current = parent;
             } else {
-                // No .tether found, use starting directory
+                // No markers found, use starting directory (workbook's parent)
+                result_path = start_dir;
                 break;
             }
         }

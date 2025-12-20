@@ -5288,6 +5288,7 @@ dependencies = [
  "tauri-plugin-window-state",
  "tokio",
  "tokio-cron-scheduler",
+ "toml 0.8.2",
  "urlencoding",
  "uuid",
  "which",
