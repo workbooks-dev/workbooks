@@ -43,6 +43,7 @@ function App() {
     let unlistenNewWindow;
     let unlistenShowLogs;
     let unlistenOpenLogsFolder;
+    let unlistenTakeScreenshot;
 
     const setupMenuListeners = async () => {
       // Open new window
@@ -86,6 +87,15 @@ function App() {
           alert(`Failed to open logs folder: ${error}`);
         }
       });
+
+      // Take screenshot
+      unlistenTakeScreenshot = await listen("menu:take-screenshot", async () => {
+        try {
+          alert("Screenshot feature coming soon! For now, use your system screenshot tool (Cmd+Shift+4 on macOS)");
+        } catch (error) {
+          console.error("Failed to take screenshot:", error);
+        }
+      });
     };
 
     setupMenuListeners();
@@ -94,6 +104,7 @@ function App() {
       if (unlistenNewWindow) unlistenNewWindow();
       if (unlistenShowLogs) unlistenShowLogs();
       if (unlistenOpenLogsFolder) unlistenOpenLogsFolder();
+      if (unlistenTakeScreenshot) unlistenTakeScreenshot();
     };
   }, []);
 

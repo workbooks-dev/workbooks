@@ -517,66 +517,86 @@ impl SchedulerManager {
         let project_root_path = PathBuf::from(project_root);
         let workbook_full_path = PathBuf::from(workbook_path);
 
-        // Parse notebook to get cells
-        let notebook_content = std::fs::read_to_string(&workbook_full_path)
-            .context("Failed to read notebook file")?;
-        let notebook: serde_json::Value = serde_json::from_str(&notebook_content)
-            .context("Failed to parse notebook JSON")?;
+        // Helper to always complete the run, even on error
+        let complete_run_always = |status: &str, error_message: Option<String>| {
+            let temp_manager = SchedulerManager {
+                db_path: db_path.to_path_buf(),
+                scheduler: None,
+                job_map: Arc::new(Mutex::new(HashMap::new()))
+            };
+            if let Err(e) = temp_manager.complete_run(run_id, status, error_message.as_deref(), None) {
+                eprintln!("Failed to complete run: {}", e);
+            }
+        };
 
-        let cells: Vec<crate::engine_http::Cell> = notebook["cells"]
-            .as_array()
-            .context("No cells array in notebook")?
-            .iter()
-            .filter_map(|cell| {
-                let cell_type = cell["cell_type"].as_str().unwrap_or("code");
-                if cell_type != "code" {
-                    return None;
-                }
+        // Execute workbook with proper error handling
+        let execution_result = async {
+            // Parse notebook to get cells
+            let notebook_content = std::fs::read_to_string(&workbook_full_path)
+                .context("Failed to read notebook file")?;
+            let notebook: serde_json::Value = serde_json::from_str(&notebook_content)
+                .context("Failed to parse notebook JSON")?;
 
-                let source = cell["source"].as_array()
-                    .map(|lines| {
-                        lines.iter()
-                            .filter_map(|l| l.as_str())
-                            .collect::<Vec<_>>()
-                            .join("")
+            let cells: Vec<crate::engine_http::Cell> = notebook["cells"]
+                .as_array()
+                .context("No cells array in notebook")?
+                .iter()
+                .filter_map(|cell| {
+                    let cell_type = cell["cell_type"].as_str().unwrap_or("code");
+                    if cell_type != "code" {
+                        return None;
+                    }
+
+                    let source = cell["source"].as_array()
+                        .map(|lines| {
+                            lines.iter()
+                                .filter_map(|l| l.as_str())
+                                .collect::<Vec<_>>()
+                                .join("")
+                        })
+                        .or_else(|| cell["source"].as_str().map(String::from))
+                        .unwrap_or_default();
+
+                    Some(crate::engine_http::Cell {
+                        source,
+                        cell_type: cell_type.to_string(),
                     })
-                    .or_else(|| cell["source"].as_str().map(String::from))
-                    .unwrap_or_default();
-
-                Some(crate::engine_http::Cell {
-                    source,
-                    cell_type: cell_type.to_string(),
                 })
-            })
-            .collect();
+                .collect();
 
-        // Ensure Python environment exists
-        // Extract project name from project_root directory name
-        let project_name = project_root_path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("project")
-            .to_string();
-        let venv_path = crate::python::ensure_venv(&project_root_path, &project_name).await?;
+            // Ensure Python environment exists
+            let project_name = project_root_path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("project")
+                .to_string();
+            let venv_path = crate::python::ensure_venv(&project_root_path, &project_name).await?;
 
-        // Start engine server
-        let engine = crate::engine_http::EngineServer::start().await
-            .context("Failed to start engine server")?;
-        let port = engine.port;
+            // Start engine server
+            let engine = crate::engine_http::EngineServer::start().await
+                .context("Failed to start engine server")?;
+            let port = engine.port;
 
-        // Start engine for this workbook
-        crate::engine_http::EngineServer::start_engine_http(
-            port,
-            workbook_path,
-            &project_root_path,
-            &venv_path,
-        ).await?;
+            // Start engine for this workbook
+            crate::engine_http::EngineServer::start_engine_http(
+                port,
+                workbook_path,
+                &project_root_path,
+                &venv_path,
+            ).await?;
 
-        // Execute all cells
-        let result = crate::engine_http::EngineServer::execute_all_http(port, workbook_path, cells).await;
+            // Execute all cells
+            let result = crate::engine_http::EngineServer::execute_all_http(port, workbook_path, cells).await;
 
-        // Determine status and error message
-        let (status, error_message) = match &result {
+            // Clean up engine
+            let _ = crate::engine_http::EngineServer::stop_engine_http(port, workbook_path).await;
+            drop(engine);
+
+            result
+        }.await;
+
+        // Determine status and error message based on execution result
+        let (status, error_message) = match execution_result {
             Ok(response) => {
                 if response.success {
                     ("success", None)
@@ -588,26 +608,19 @@ impl SchedulerManager {
                     ("failed", Some(errors.join("\n")))
                 }
             }
-            Err(e) => ("failed", Some(e.to_string())),
+            Err(e) => {
+                eprintln!("Execution error: {}", e);
+                ("failed", Some(e.to_string()))
+            }
         };
 
-        // Save report (TODO: implement report saving)
-        let report_path = None;
-
-        // Complete the run
-        {
-            let temp_manager = SchedulerManager { db_path: db_path.to_path_buf(), scheduler: None, job_map: Arc::new(Mutex::new(HashMap::new())) };
-            temp_manager.complete_run(run_id, status, error_message.as_deref(), report_path)?;
-        }
-
-        // Clean up engine
-        let _ = crate::engine_http::EngineServer::stop_engine_http(port, workbook_path).await;
-        drop(engine);
+        // Always complete the run
+        complete_run_always(status, error_message);
 
         // Clean up old runs
         {
             let temp_manager = SchedulerManager { db_path: db_path.to_path_buf(), scheduler: None, job_map: Arc::new(Mutex::new(HashMap::new())) };
-            temp_manager.cleanup_old_runs(30)?;
+            let _ = temp_manager.cleanup_old_runs(30);
         }
 
         println!("Scheduled execution completed: {} (status: {})", workbook_path, status);

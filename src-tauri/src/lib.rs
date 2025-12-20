@@ -1161,6 +1161,7 @@ async fn open_project_window(
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     use tauri::menu::{MenuBuilder, MenuItemBuilder, SubmenuBuilder};
+    use tauri::tray::TrayIconBuilder;
 
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
@@ -1180,6 +1181,54 @@ pub fn run() {
                 .build(),
         )
         .setup(|app| {
+            // Create system tray
+            let open_item = MenuItemBuilder::with_id("tray_open", "Open Tether")
+                .build(app)?;
+            let scheduler_status_item = MenuItemBuilder::with_id("tray_scheduler_status", "Scheduler: Running")
+                .enabled(false)
+                .build(app)?;
+            let separator = tauri::menu::PredefinedMenuItem::separator(app)?;
+            let quit_item = MenuItemBuilder::with_id("tray_quit", "Quit Tether")
+                .build(app)?;
+
+            let tray_menu = tauri::menu::Menu::with_items(
+                app,
+                &[&open_item, &scheduler_status_item, &separator, &quit_item]
+            )?;
+
+            let _tray = TrayIconBuilder::new()
+                .menu(&tray_menu)
+                .icon(app.default_window_icon().unwrap().clone())
+                .on_menu_event(|app, event| match event.id().as_ref() {
+                    "tray_open" => {
+                        if let Some(window) = app.get_webview_window("main") {
+                            let _ = window.show();
+                            let _ = window.set_focus();
+                        }
+                    }
+                    "tray_quit" => {
+                        app.exit(0);
+                    }
+                    _ => {}
+                })
+                .build(app)?;
+
+            log::info!("System tray created successfully");
+
+            // Configure window close behavior to hide instead of quit
+            if let Some(main_window) = app.get_webview_window("main") {
+                let window_clone = main_window.clone();
+                main_window.on_window_event(move |event| {
+                    if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                        // Hide the window instead of closing the app
+                        let _ = window_clone.hide();
+                        api.prevent_close();
+                        log::info!("Window hidden - app continues running in background");
+                    }
+                });
+                log::info!("Window close handler configured");
+            }
+
             // Create custom menu items
             let open_new_window = MenuItemBuilder::with_id("open_new_window", "Open Project in New Window...")
                 .accelerator("Cmd+Shift+O")
@@ -1190,6 +1239,10 @@ pub fn run() {
                 .build(app)?;
 
             let open_logs_folder = MenuItemBuilder::with_id("open_logs_folder", "Open Logs Folder")
+                .build(app)?;
+
+            let take_screenshot = MenuItemBuilder::with_id("take_screenshot", "Take Screenshot")
+                .accelerator("Cmd+Shift+S")
                 .build(app)?;
 
             // Create "About" menu item for app menu
@@ -1239,6 +1292,8 @@ pub fn run() {
             let view_menu = SubmenuBuilder::new(app, "View")
                 .item(&show_logs)
                 .item(&open_logs_folder)
+                .separator()
+                .item(&take_screenshot)
                 .build()?;
 
             // Build Window menu
@@ -1292,6 +1347,11 @@ pub fn run() {
                     }
                     "open_logs_folder" => {
                         if let Err(e) = app_handle.emit("menu:open-logs-folder", ()) {
+                            log::error!("Failed to emit menu event: {}", e);
+                        }
+                    }
+                    "take_screenshot" => {
+                        if let Err(e) = app_handle.emit("menu:take-screenshot", ()) {
                             log::error!("Failed to emit menu event: {}", e);
                         }
                     }

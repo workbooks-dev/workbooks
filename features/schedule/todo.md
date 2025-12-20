@@ -138,30 +138,30 @@
 - [ ] Clean up orphaned report files - **NEEDS IMPLEMENTATION**
 - [ ] Configurable retention (future)
 
-## System Tray Background Process
+## System Tray Background Process ✅ **(Core Implemented Dec 20, 2024)**
 
-**Required for reliable scheduling** - Allows schedules to run even when main window is closed.
+**Status:** Basic system tray implemented. Advanced features (dynamic updates, pause/resume, icons) are future enhancements.
 
 ### Backend (Rust)
 
-- [ ] System tray setup
-  - [ ] Add `tauri` system tray dependencies
-  - [ ] Create system tray menu structure
-  - [ ] Design menu bar icons (idle, running, error, paused states)
-  - [ ] Initialize SystemTray in main.rs
+- [x] System tray setup ✅ **(Dec 20, 2024)**
+  - [x] Add `tauri` system tray dependencies (tray-icon feature)
+  - [x] Create system tray menu structure
+  - [x] Initialize SystemTray in lib.rs
+  - [ ] Design menu bar icons (idle, running, error, paused states) - **FUTURE ENHANCEMENT**
 
-- [ ] Menu items and actions
-  - [ ] "Open Tether" - Show main window
-  - [ ] "Scheduler: [Status]" - Dynamic status display (not clickable)
-  - [ ] "Next Run: [Time]" - Shows upcoming schedule (not clickable)
-  - [ ] "Pause Scheduler" / "Resume Scheduler" - Toggle scheduler state
-  - [ ] "Quit Tether" - Full app shutdown
+- [x] Basic menu items and actions ✅ **(Dec 20, 2024)**
+  - [x] "Open Tether" - Show main window
+  - [x] "Scheduler: Running" - Static status display (not clickable)
+  - [x] "Quit Tether" - Full app shutdown
+  - [ ] "Next Run: [Time]" - Shows upcoming schedule (not clickable) - **FUTURE ENHANCEMENT**
+  - [ ] "Pause Scheduler" / "Resume Scheduler" - Toggle scheduler state - **FUTURE ENHANCEMENT**
 
-- [ ] Window behavior
-  - [ ] Intercept window close event
-  - [ ] Hide window instead of closing app
-  - [ ] Re-show window on "Open Tether" click
-  - [ ] Proper shutdown on "Quit" from menu
+- [x] Window behavior ✅ **(Dec 20, 2024)**
+  - [x] Intercept window close event
+  - [x] Hide window instead of closing app
+  - [x] Re-show window on "Open Tether" click
+  - [x] Proper shutdown on "Quit" from menu
 
 - [ ] Dynamic menu updates
   - [ ] Update status text when schedules run

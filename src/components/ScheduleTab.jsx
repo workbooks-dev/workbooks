@@ -9,19 +9,29 @@ export function ScheduleTab({ projectRoot, onClose }) {
   const [loading, setLoading] = useState(false);
   const [showAddDialog, setShowAddDialog] = useState(false);
   const [editingSchedule, setEditingSchedule] = useState(null);
+  const [showAllProjects, setShowAllProjects] = useState(false); // Toggle for all projects view
 
   useEffect(() => {
     loadSchedules();
     loadRuns();
-  }, []);
+
+    // Auto-refresh runs every 3 seconds to update running status
+    const interval = setInterval(() => {
+      loadRuns(true); // Silent refresh (no loading spinner)
+    }, 3000);
+
+    return () => clearInterval(interval);
+  }, [showAllProjects, projectRoot]); // Reload when toggling view or project changes
 
   const loadSchedules = async () => {
     setLoading(true);
     try {
       const schedulesList = await invoke("list_schedules");
-      // Filter schedules for current project
-      const projectSchedules = schedulesList.filter(s => s.project_root === projectRoot);
-      setSchedules(projectSchedules);
+      // Filter schedules based on view mode
+      const filteredSchedules = showAllProjects
+        ? schedulesList
+        : schedulesList.filter(s => s.project_root === projectRoot);
+      setSchedules(filteredSchedules);
     } catch (err) {
       console.error("Failed to load schedules:", err);
     } finally {
@@ -29,17 +39,23 @@ export function ScheduleTab({ projectRoot, onClose }) {
     }
   };
 
-  const loadRuns = async () => {
-    setLoading(true);
+  const loadRuns = async (silent = false) => {
+    if (!silent) {
+      setLoading(true);
+    }
     try {
       const runsList = await invoke("list_runs", { limit: 30 });
-      // Filter runs for current project
-      const projectRuns = runsList.filter(r => r.project_root === projectRoot);
-      setRuns(projectRuns);
+      // Filter runs based on view mode
+      const filteredRuns = showAllProjects
+        ? runsList
+        : runsList.filter(r => r.project_root === projectRoot);
+      setRuns(filteredRuns);
     } catch (err) {
       console.error("Failed to load runs:", err);
     } finally {
-      setLoading(false);
+      if (!silent) {
+        setLoading(false);
+      }
     }
   };
 
@@ -87,10 +103,10 @@ export function ScheduleTab({ projectRoot, onClose }) {
   const handleRunNow = async (schedule) => {
     try {
       await invoke("run_schedule_now", { scheduleId: schedule.id });
-      // Show a brief success message
-      alert("Workbook execution started. Check the Recent Runs tab for status.");
+      // Switch to runs tab
+      setActiveSubTab("runs");
       // Reload runs to show the new execution
-      setTimeout(() => loadRuns(), 1000);
+      setTimeout(() => loadRuns(), 500);
     } catch (err) {
       console.error("Failed to run workbook:", err);
       alert(`Failed to run workbook: ${err}`);
@@ -99,6 +115,10 @@ export function ScheduleTab({ projectRoot, onClose }) {
 
   const getWorkbookName = (path) => {
     return path.split("/").pop().replace(".ipynb", "");
+  };
+
+  const getProjectName = (projectPath) => {
+    return projectPath.split("/").pop() || projectPath;
   };
 
   const formatCronExpression = (cron) => {
@@ -161,6 +181,12 @@ export function ScheduleTab({ projectRoot, onClose }) {
 
   const getStatusBadge = (status) => {
     const badges = {
+      running: (
+        <span className="text-xs px-2 py-1 rounded-md font-medium bg-blue-50 text-blue-700 flex items-center gap-1">
+          <span className="inline-block w-2 h-2 bg-blue-500 rounded-full animate-pulse"></span>
+          Running
+        </span>
+      ),
       success: (
         <span className="text-xs px-2 py-1 rounded-md font-medium bg-emerald-50 text-emerald-700">
           Success
@@ -183,8 +209,21 @@ export function ScheduleTab({ projectRoot, onClose }) {
   return (
     <div className="flex flex-col h-full bg-white">
       {/* Header */}
-      <div className="border-b border-gray-200 px-6 py-4">
+      <div className="border-b border-gray-200 px-6 py-4 flex items-center justify-between">
         <h2 className="text-lg font-semibold text-gray-900">Schedule</h2>
+        <div className="flex items-center gap-2">
+          <span className="text-sm text-gray-600">View:</span>
+          <button
+            onClick={() => setShowAllProjects(!showAllProjects)}
+            className={`px-3 py-1.5 text-sm font-medium rounded-md transition-all ${
+              showAllProjects
+                ? "bg-blue-600 text-white"
+                : "bg-gray-100 text-gray-700 hover:bg-gray-200"
+            }`}
+          >
+            {showAllProjects ? "All Projects" : "Current Project"}
+          </button>
+        </div>
       </div>
 
       {/* Sub-tabs */}
@@ -243,6 +282,11 @@ export function ScheduleTab({ projectRoot, onClose }) {
                       <th className="text-left px-4 py-3 text-gray-700 text-xs font-semibold uppercase tracking-wider">
                         Workbook
                       </th>
+                      {showAllProjects && (
+                        <th className="text-left px-4 py-3 text-gray-700 text-xs font-semibold uppercase tracking-wider">
+                          Project
+                        </th>
+                      )}
                       <th className="text-left px-4 py-3 text-gray-700 text-xs font-semibold uppercase tracking-wider">
                         Frequency
                       </th>
@@ -266,6 +310,11 @@ export function ScheduleTab({ projectRoot, onClose }) {
                         <td className="px-4 py-3 text-sm text-gray-900">
                           {getWorkbookName(schedule.workbook_path)}
                         </td>
+                        {showAllProjects && (
+                          <td className="px-4 py-3 text-sm text-gray-600">
+                            {getProjectName(schedule.project_root)}
+                          </td>
+                        )}
                         <td className="px-4 py-3 text-sm text-gray-700">
                           {formatCronExpression(schedule.cron_expression)}
                         </td>
@@ -341,6 +390,11 @@ export function ScheduleTab({ projectRoot, onClose }) {
                       <th className="text-left px-4 py-3 text-gray-700 text-xs font-semibold uppercase tracking-wider">
                         Workbook
                       </th>
+                      {showAllProjects && (
+                        <th className="text-left px-4 py-3 text-gray-700 text-xs font-semibold uppercase tracking-wider">
+                          Project
+                        </th>
+                      )}
                       <th className="text-left px-4 py-3 text-gray-700 text-xs font-semibold uppercase tracking-wider">
                         Started At
                       </th>
@@ -361,6 +415,11 @@ export function ScheduleTab({ projectRoot, onClose }) {
                         <td className="px-4 py-3 text-sm text-gray-900">
                           {getWorkbookName(run.workbook_path)}
                         </td>
+                        {showAllProjects && (
+                          <td className="px-4 py-3 text-sm text-gray-600">
+                            {getProjectName(run.project_root)}
+                          </td>
+                        )}
                         <td className="px-4 py-3 text-sm text-gray-700">
                           {formatTimestamp(run.started_at)}
                         </td>

@@ -6,6 +6,24 @@ This file tracks major features and improvements as they're completed.
 
 ### December 2024
 
+**System Tray for Background Scheduling (Dec 20, 2024)**
+- **System Tray Implementation**: App now runs in menu bar/system tray for reliable scheduled execution
+  - Added `tray-icon` feature to Tauri
+  - System tray menu with "Open Tether", "Scheduler: Running", and "Quit Tether" options
+  - Closing window hides the app instead of quitting - scheduler continues running in background
+  - App only quits when "Quit Tether" is selected from tray menu
+  - Solves the core issue: schedules now work even when the main window is closed
+  - Familiar UX pattern similar to Docker Desktop, Ollama, and other menu bar apps
+  - Files: `src-tauri/Cargo.toml`, `src-tauri/src/lib.rs`
+
+- **Global Schedule Manager**: View and manage schedules across all projects from one place
+  - Added "All Projects" toggle button in Schedule tab header
+  - Switches between "Current Project" view and global "All Projects" view
+  - "Project" column appears when viewing all projects
+  - Works for both scheduled workbooks and run history
+  - Enables centralized management of automated data pipelines
+  - Files: `src/components/ScheduleTab.jsx`
+
 **Code Preprocessing for Directory Persistence (Dec 20, 2024)**
 - **Automatic `!cd` to `%cd` Conversion**: Shell directory changes now persist across cells
   - Added `preprocess_code()` function to engine_server.py

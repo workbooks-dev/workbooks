@@ -98,6 +98,67 @@
 - [x] Added job_map to track schedule_id → job_id mapping
 - [x] Updated CLI to use new async methods
 
+### System Tray Background Process (December 20, 2024)
+
+**Implementation Status:** ✅ Complete
+
+- [x] Added `tray-icon` feature to Tauri in `Cargo.toml`
+- [x] Implemented system tray with menu items:
+  - "Open Tether" - Shows and focuses main window
+  - "Scheduler: Running" - Status indicator (disabled/non-clickable)
+  - Separator
+  - "Quit Tether" - Exits app completely
+- [x] Configured window close behavior to hide instead of quit
+  - Closing window hides it and keeps app running in background
+  - Scheduler continues running when window is closed
+  - App only quits when "Quit Tether" is selected from tray menu
+- [x] System tray appears in menu bar (macOS) / system tray (Windows/Linux)
+- [x] Window can be reopened from tray menu
+
+**Files Modified:**
+- `src-tauri/Cargo.toml` - Added tray-icon feature
+- `src-tauri/src/lib.rs` - System tray implementation and window close handler
+
+**How It Works:**
+1. App starts with main window visible
+2. System tray icon appears in menu bar/system tray
+3. User closes window (X button) → Window hides, app continues running
+4. Scheduler continues executing scheduled workbooks in background
+5. User clicks "Open Tether" in tray menu → Window shows again
+6. User clicks "Quit Tether" in tray menu → App exits completely
+
+**Benefits:**
+- Reliable scheduled execution even when window is closed
+- No missed scheduled runs
+- Familiar UX pattern (like Docker Desktop, Ollama)
+- Clean mental model: close window = hide, quit from tray = stop everything
+
+### Global Schedule Manager (December 20, 2024)
+
+**Implementation Status:** ✅ Complete
+
+- [x] Added "All Projects" view toggle to Schedule tab
+- [x] Toggle button switches between "Current Project" and "All Projects" view
+- [x] "Project" column appears in schedules table when viewing all projects
+- [x] "Project" column appears in runs table when viewing all projects
+- [x] Both scheduled workbooks and run history support global view
+
+**Files Modified:**
+- `src/components/ScheduleTab.jsx` - Added showAllProjects state and filtering logic
+
+**How It Works:**
+1. Open Schedule tab from any project
+2. Click "All Projects" button in the header
+3. View shows ALL schedules and runs across ALL projects
+4. "Project" column displays which project each schedule/run belongs to
+5. Click "Current Project" to switch back to project-specific view
+
+**Benefits:**
+- Manage all scheduled workbooks from one place
+- See run history across all projects
+- No need to switch between projects to check schedules
+- Global view of automated data pipelines
+
 **Architecture:**
 - When app starts, `start_scheduler()` creates a JobScheduler and loads all enabled schedules
 - Each schedule is registered as a cron job with tokio-cron-scheduler
