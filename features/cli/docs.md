@@ -20,7 +20,7 @@ The CLI is a **separate binary in the same Cargo workspace** as the Tauri app. T
 ```toml
 [package]
 name = "tether"
-version = "0.1.0"
+version = "0.0.1"
 
 [lib]
 name = "tether_core"
