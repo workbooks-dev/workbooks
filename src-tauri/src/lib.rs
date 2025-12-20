@@ -27,6 +27,7 @@ pub struct AppState {
     pub current_project: Mutex<Option<project::TetherProject>>,
     pub engine_server: Arc<Mutex<Option<engine_http::EngineServer>>>,
     pub secrets_manager: Arc<Mutex<Option<secrets::SecretsManager>>>,
+    pub scheduler_manager: Arc<Mutex<Option<scheduler::SchedulerManager>>>,
 }
 
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
@@ -928,6 +929,117 @@ async fn test_secrets_loading(
     }
 }
 
+// ==================== SCHEDULER COMMANDS ====================
+
+/// Ensure scheduler manager is initialized
+async fn ensure_scheduler_manager(state: &State<'_, AppState>) -> Result<(), String> {
+    let mut manager_lock = state.scheduler_manager.lock().await;
+    if manager_lock.is_none() {
+        let mut new_manager = scheduler::SchedulerManager::new()
+            .map_err(|e| format!("Failed to create scheduler manager: {}", e))?;
+
+        // Start the scheduler
+        new_manager.start_scheduler().await
+            .map_err(|e| format!("Failed to start scheduler: {}", e))?;
+
+        *manager_lock = Some(new_manager);
+    }
+    Ok(())
+}
+
+#[tauri::command]
+async fn add_schedule(
+    project_root: String,
+    workbook_path: String,
+    cron_expression: String,
+    state: State<'_, AppState>,
+) -> Result<scheduler::Schedule, String> {
+    ensure_scheduler_manager(&state).await?;
+
+    let manager_lock = state.scheduler_manager.lock().await;
+    let manager = manager_lock.as_ref().ok_or("Scheduler manager not initialized")?;
+
+    let schedule = manager.add_schedule(&workbook_path, &project_root, &cron_expression)
+        .await
+        .map_err(|e| format!("Failed to add schedule: {}", e))?;
+
+    Ok(schedule)
+}
+
+#[tauri::command]
+async fn list_schedules(
+    state: State<'_, AppState>,
+) -> Result<Vec<scheduler::Schedule>, String> {
+    ensure_scheduler_manager(&state).await?;
+
+    let manager_lock = state.scheduler_manager.lock().await;
+    let manager = manager_lock.as_ref().ok_or("Scheduler manager not initialized")?;
+
+    manager.list_schedules()
+        .map_err(|e| format!("Failed to list schedules: {}", e))
+}
+
+#[tauri::command]
+async fn update_schedule(
+    schedule_id: String,
+    cron_expression: Option<String>,
+    enabled: Option<bool>,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    ensure_scheduler_manager(&state).await?;
+
+    let manager_lock = state.scheduler_manager.lock().await;
+    let manager = manager_lock.as_ref().ok_or("Scheduler manager not initialized")?;
+
+    manager.update_schedule(&schedule_id, cron_expression.as_deref(), enabled)
+        .await
+        .map_err(|e| format!("Failed to update schedule: {}", e))
+}
+
+#[tauri::command]
+async fn delete_schedule(
+    schedule_id: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    ensure_scheduler_manager(&state).await?;
+
+    let manager_lock = state.scheduler_manager.lock().await;
+    let manager = manager_lock.as_ref().ok_or("Scheduler manager not initialized")?;
+
+    manager.delete_schedule(&schedule_id)
+        .await
+        .map_err(|e| format!("Failed to delete schedule: {}", e))
+}
+
+#[tauri::command]
+async fn list_runs(
+    limit: usize,
+    state: State<'_, AppState>,
+) -> Result<Vec<scheduler::Run>, String> {
+    ensure_scheduler_manager(&state).await?;
+
+    let manager_lock = state.scheduler_manager.lock().await;
+    let manager = manager_lock.as_ref().ok_or("Scheduler manager not initialized")?;
+
+    manager.list_runs(limit)
+        .map_err(|e| format!("Failed to list runs: {}", e))
+}
+
+#[tauri::command]
+async fn run_schedule_now(
+    schedule_id: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    ensure_scheduler_manager(&state).await?;
+
+    let manager_lock = state.scheduler_manager.lock().await;
+    let manager = manager_lock.as_ref().ok_or("Scheduler manager not initialized")?;
+
+    manager.run_now(&schedule_id)
+        .await
+        .map_err(|e| format!("Failed to run schedule: {}", e))
+}
+
 #[tauri::command]
 async fn get_logs_directory(app: tauri::AppHandle) -> Result<String, String> {
     let logs_dir = app.path().app_log_dir()
@@ -1193,6 +1305,7 @@ pub fn run() {
             current_project: Mutex::new(None),
             engine_server: Arc::new(Mutex::new(None)),
             secrets_manager: Arc::new(Mutex::new(None)),
+            scheduler_manager: Arc::new(Mutex::new(None)),
         })
         .invoke_handler(tauri::generate_handler![
             greet,
@@ -1248,6 +1361,12 @@ pub fn run() {
             check_secrets_session,
             lock_secrets_session,
             test_secrets_loading,
+            add_schedule,
+            list_schedules,
+            update_schedule,
+            delete_schedule,
+            list_runs,
+            run_schedule_now,
             open_project_window,
             get_logs_directory,
             open_logs_folder,

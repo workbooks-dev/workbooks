@@ -2,6 +2,7 @@
 
 ## Priority
 
+- [ ] File list should stay current with the folder (it does not)
 - [ ] Files need to able to be dragged into folders and subfolders (drag and drop to move files)
 - [ ] Renaming files or folders should happen inline (just like vscode)
 - [x] + New Folder needs to retain focus (the input loses focus when the button is pressed)
@@ -9,6 +10,7 @@
 - [x] control+click (or right click) should have a menu like vscode and styles matching the other menu in the main viewport with
   - [x] New file (if folder)
   - [x] New folder (if folder)
+  - [ ] Refresh (folder list)
   - [ ] Find in folder
   - [ ] toggle file size (toggles all file sizes)
   - [ ] Open with (if file)

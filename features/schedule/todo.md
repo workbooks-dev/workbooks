@@ -44,15 +44,14 @@
   - [x] Update run status (success/failed) - `complete_run()` function exists
   - [x] Scheduled execution fully working ✅ **(Completed Dec 19, 2025)**
 
-- [ ] Tauri commands - **NEEDS IMPLEMENTATION**
-  - [ ] `add_schedule(workbook_path, cron, enabled)` - Create schedule
-  - [ ] `list_schedules()` - Get all schedules
-  - [ ] `update_schedule(id, cron, enabled)` - Update schedule
-  - [ ] `delete_schedule(id)` - Delete schedule
-  - [ ] `get_next_run(schedule_id)` - Calculate next run time
-  - [ ] `list_runs(limit)` - Get recent runs
-  - [ ] `get_run_report(run_id)` - Load run report notebook
-  - [ ] `run_now(workbook_path)` - Manual execution (for testing)
+- [x] Tauri commands ✅ **(Completed Dec 20, 2025)**
+  - [x] `add_schedule(workbook_path, cron)` - Create schedule (always enabled by default)
+  - [x] `list_schedules()` - Get all schedules
+  - [x] `update_schedule(id, cron, enabled)` - Update schedule
+  - [x] `delete_schedule(id)` - Delete schedule
+  - [x] `list_runs(limit)` - Get recent runs
+  - [ ] `get_run_report(run_id)` - Load run report notebook - **FUTURE**
+  - [ ] `run_now(workbook_path)` - Manual execution (for testing) - **FUTURE**
 
 ## CLI Commands ✅ **(Completed Dec 19, 2025)**
 
@@ -66,49 +65,50 @@
 
 **Files:** `src-tauri/src/cli.rs`, `src-tauri/Cargo.toml`
 
-## Frontend (React)
+## Frontend (React) ✅ **(Completed Dec 20, 2025)**
 
-- [ ] Schedule tab component
-  - [ ] Two-tab layout (Scheduled Workbooks / Recent Runs)
-  - [ ] Open as tab (not modal)
+- [x] Schedule tab component ✅
+  - [x] Two-tab layout (Scheduled Workbooks / Recent Runs)
+  - [x] Opens as tab (not modal)
 
-- [ ] Scheduled Workbooks tab
-  - [ ] Table view of active schedules
-  - [ ] Columns: Name, Frequency, Next Run, Toggle, Actions
-  - [ ] "+ Add Schedule" button and dialog
-  - [ ] Edit schedule dialog
-  - [ ] Delete confirmation dialog
-  - [ ] Enable/disable toggle
+- [x] Scheduled Workbooks tab ✅
+  - [x] Table view of active schedules
+  - [x] Columns: Name, Frequency, Next Run, Last Run, Status (enabled/disabled), Actions
+  - [x] "+ Add Schedule" button and dialog
+  - [x] Edit schedule dialog
+  - [x] Delete confirmation dialog
+  - [x] Enable/disable toggle
 
-- [ ] Add/Edit Schedule dialog
-  - [ ] Workbook selector
-  - [ ] Frequency presets (Daily, Hourly, Weekly)
-  - [ ] Custom cron expression input
-  - [ ] Next run preview
-  - [ ] Cron validation
-  - [ ] Save/cancel buttons
+- [x] Add/Edit Schedule dialog ✅
+  - [x] Workbook selector (for new schedules)
+  - [x] Frequency presets (Daily, Hourly, Weekly, Custom)
+  - [x] Custom cron expression input
+  - [x] Save/cancel buttons
+  - [ ] Next run preview - **FUTURE ENHANCEMENT**
+  - [ ] Cron validation feedback - **FUTURE ENHANCEMENT**
 
-- [ ] Recent Runs tab
-  - [ ] Table view of last 30 runs
-  - [ ] Columns: Workbook, Started At, Duration, Status, Actions
-  - [ ] "View Report" button
-  - [ ] Status indicators (success/failed icons)
-  - [ ] Filters (all/success/failed)
+- [x] Recent Runs tab ✅
+  - [x] Table view of last 30 runs
+  - [x] Columns: Workbook, Started At, Duration, Status, Error Message
+  - [x] Status badges (success/failed/interrupted)
+  - [ ] "View Report" button - **FUTURE** (requires report file saving)
+  - [ ] Filters (all/success/failed) - **FUTURE ENHANCEMENT**
 
-- [ ] Run report viewer
+- [ ] Run report viewer - **FUTURE**
   - [ ] Open report in read-only tab
   - [ ] Display saved notebook with outputs
   - [ ] "Report" indicator in tab
   - [ ] Cannot edit cells
   - [ ] Can copy code
 
-## Sidebar Integration
+## Sidebar Integration ✅ **(Completed Dec 20, 2025)**
 
-- [ ] Schedule section enhancements
-  - [ ] Show scheduled workbook count
-  - [ ] Show next upcoming run time
-  - [ ] Click header → Open schedule tab
-  - [ ] Visual indicator for active schedules
+- [x] Schedule section enhancements ✅
+  - [x] Click header → Open schedule tab
+  - [x] "Manage Schedule" button
+  - [ ] Show scheduled workbook count - **FUTURE ENHANCEMENT**
+  - [ ] Show next upcoming run time - **FUTURE ENHANCEMENT**
+  - [ ] Visual indicator for active schedules - **FUTURE ENHANCEMENT**
 
 ## Workbooks Table Integration
 

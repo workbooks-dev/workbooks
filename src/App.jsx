@@ -9,6 +9,7 @@ import { Sidebar } from "./components/Sidebar";
 import { WorkbookViewer } from "./components/WorkbookViewer";
 import { FileViewer } from "./components/FileViewer";
 import { SecretsManager } from "./components/SecretsManager";
+import { ScheduleTab } from "./components/ScheduleTab";
 import { TabBar } from "./components/TabBar";
 import { SaveConfirmDialog } from "./components/SaveConfirmDialog";
 import "./App.css";
@@ -379,8 +380,8 @@ function App() {
       path: filePath,
       type: fileType,
       hasUnsavedChanges: false,
-      // For special tabs like secrets, use a friendly name
-      name: fileType === 'secrets' ? 'Secrets' : undefined,
+      // For special tabs like secrets and schedule, use a friendly name
+      name: fileType === 'secrets' ? 'Secrets' : fileType === 'schedule' ? 'Schedule' : undefined,
     };
 
     setTabs([...tabs, newTab]);
@@ -543,6 +544,12 @@ function App() {
                 />
               ) : activeTab.type === "secrets" ? (
                 <SecretsManager
+                  key={activeTab.id}
+                  projectRoot={currentProject.root}
+                  onClose={() => handleTabClose(activeTab.id)}
+                />
+              ) : activeTab.type === "schedule" ? (
+                <ScheduleTab
                   key={activeTab.id}
                   projectRoot={currentProject.root}
                   onClose={() => handleTabClose(activeTab.id)}

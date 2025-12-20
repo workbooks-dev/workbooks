@@ -113,9 +113,104 @@
 - `src-tauri/src/scheduler.rs` (major updates)
 - `src-tauri/src/cli.rs` (updated to use async methods)
 
+## Schedule UI Implementation (December 20, 2025)
+
+### Tauri Commands
+- [x] Added `add_schedule(project_root, workbook_path, cron_expression)` command
+- [x] Added `list_schedules()` command
+- [x] Added `update_schedule(schedule_id, cron_expression, enabled)` command
+- [x] Added `delete_schedule(schedule_id)` command
+- [x] Added `list_runs(limit)` command
+- [x] Added scheduler manager initialization in AppState
+- [x] Fixed Send trait issues in `SchedulerManager::update_schedule`
+
+**Files:**
+- `src-tauri/src/lib.rs` - Added Tauri commands and AppState updates
+- `src-tauri/src/scheduler.rs` - Fixed Send trait issue by scoping database operations
+
+### Frontend Components
+- [x] Created `ScheduleTab.jsx` component with two sub-tabs:
+  - Scheduled Workbooks tab with table view, add/edit/delete functionality
+  - Recent Runs tab with run history display
+- [x] Created `AddEditScheduleDialog` component for adding/editing schedules
+  - Workbook selector for new schedules
+  - Frequency presets (Daily, Hourly, Weekly, Custom)
+  - Custom cron expression input
+  - Enable/disable toggle (only shown when editing)
+- [x] Updated `Sidebar.jsx` to open Schedule tab on click
+- [x] Updated `App.jsx` to support 'schedule' tab type
+- [x] Implemented schedule toggle (enable/disable)
+- [x] Implemented schedule deletion with confirmation
+- [x] Formatted timestamps, durations, and cron expressions
+- [x] Added status badges for runs (success/failed/interrupted)
+- [x] Added empty states for no schedules/runs
+
+**Files:**
+- `src/components/ScheduleTab.jsx` - New component
+- `src/components/Sidebar.jsx` - Updated Schedule section
+- `src/App.jsx` - Added ScheduleTab import and rendering
+
+### Design Decisions
+- New schedules are always created enabled (no checkbox in Add dialog)
+- Enabled checkbox only shown when editing existing schedules
+- Schedule tab opens as a regular tab, not a modal
+- Follows style guide patterns (clean, minimal, grayscale + blue)
+- Empty states with emojis for better UX
+
+### Enhanced Scheduling UI (December 20, 2025)
+
+**User-Friendly Scheduling Options:**
+- [x] **Interval-based scheduling** - "Every X minutes/hours"
+  - Number input (1-59 for minutes, 1-23 for hours)
+  - Unit selector (minutes/hours)
+  - Auto-validation when switching units
+  - Preview text shows final schedule
+
+- [x] **Daily with custom time** - "Daily at specific time"
+  - Hour selector (00-23)
+  - Minute selector (00-59)
+  - Preview shows selected time in HH:MM format
+
+- [x] **Weekly with day and time** - "Weekly on specific day"
+  - Day of week selector (Sunday-Saturday)
+  - Hour and minute selectors
+  - Preview shows full schedule (e.g., "Monday at 9:15 AM")
+
+- [x] **Smart cron formatting** - Displays human-readable schedules
+  - "Every 5 minutes"
+  - "Daily at 9:15 AM"
+  - "Monday at 2:30 PM"
+  - "Every 3 hours"
+  - Falls back to "Custom: [cron]" for advanced patterns
+
+**Technical Implementation:**
+- Schedule type now defaults to "interval" (most common use case)
+- Custom cron option moved to bottom as "advanced" option
+- Cron expression builder handles all patterns correctly
+- Parser detects existing schedules and populates UI fields
+- 6-field cron format: `second minute hour day month weekday`
+
+**Files Modified:**
+- `src/components/ScheduleTab.jsx` - Enhanced scheduling UI
+
 ## Notes
 
-**Background scheduler now fully implemented!** Schedules automatically execute when the app is running. Still needed:
-- Tauri commands for GUI integration
-- Frontend UI components (see `todo.md`)
-- Report file saving (currently stored in database only)
+**Schedule UI now fully functional with enhanced user-friendly scheduling!** Users can:
+- Create schedules with **no technical knowledge required**:
+  - "Every 5 minutes" - simple interval input
+  - "Daily at 9:15 AM" - time picker with hour/minute selectors
+  - "Monday at 2:30 PM" - day and time pickers
+  - Advanced users can still use custom cron expressions
+- View all scheduled workbooks in a table with human-readable frequency descriptions
+- Edit existing schedules (automatically detects and populates UI fields)
+- Enable/disable schedules with a single click
+- Delete schedules with confirmation
+- View recent run history with status, duration, and error messages
+
+Still needed (future enhancements):
+- Report file saving and viewing
+- Run now button for manual execution
+- Next run preview in schedule dialog
+- Cron expression validation with user feedback
+- Filter recent runs by status
+- Show schedule count and next run in sidebar

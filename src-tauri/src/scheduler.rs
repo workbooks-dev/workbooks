@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use chrono::{DateTime, Utc};
+use chrono::Utc;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -47,9 +47,9 @@ pub enum CronPreset {
 impl CronPreset {
     pub fn to_cron_expression(&self) -> &'static str {
         match self {
-            CronPreset::Daily => "0 9 * * *",      // 9am daily
-            CronPreset::Hourly => "0 * * * *",     // Top of every hour
-            CronPreset::Weekly => "0 9 * * 1",     // 9am every Monday
+            CronPreset::Daily => "0 0 9 * * *",      // 9am daily
+            CronPreset::Hourly => "0 0 * * * *",     // Top of every hour
+            CronPreset::Weekly => "0 0 9 * * 1",     // 9am every Monday
         }
     }
 }
@@ -259,42 +259,45 @@ impl SchedulerManager {
         cron_expression: Option<&str>,
         enabled: Option<bool>,
     ) -> Result<()> {
-        let conn = self.get_connection()?;
-        let now = Utc::now().timestamp();
+        // Perform database update in a scope to ensure params_vec is dropped before await
+        {
+            let conn = self.get_connection()?;
+            let now = Utc::now().timestamp();
 
-        // If cron expression is being updated, validate it
-        if let Some(cron) = cron_expression {
-            self.validate_cron(cron)?;
-        }
-
-        // Build dynamic update query
-        let mut updates = vec!["modified_at = ?1"];
-        let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(now)];
-
-        if let Some(cron) = cron_expression {
-            updates.push("cron_expression = ?");
-            params_vec.push(Box::new(cron.to_string()));
-
-            // Recalculate next run
-            if let Some(next_run) = self.calculate_next_run(cron)? {
-                updates.push("next_run = ?");
-                params_vec.push(Box::new(next_run));
+            // If cron expression is being updated, validate it
+            if let Some(cron) = cron_expression {
+                self.validate_cron(cron)?;
             }
-        }
 
-        if let Some(en) = enabled {
-            updates.push("enabled = ?");
-            params_vec.push(Box::new(en as i32));
-        }
+            // Build dynamic update query
+            let mut updates = vec!["modified_at = ?1"];
+            let mut params_vec: Vec<Box<dyn rusqlite::ToSql>> = vec![Box::new(now)];
 
-        params_vec.push(Box::new(id.to_string()));
+            if let Some(cron) = cron_expression {
+                updates.push("cron_expression = ?");
+                params_vec.push(Box::new(cron.to_string()));
 
-        let query = format!(
-            "UPDATE schedules SET {} WHERE id = ?",
-            updates.join(", ")
-        );
+                // Recalculate next run
+                if let Some(next_run) = self.calculate_next_run(cron)? {
+                    updates.push("next_run = ?");
+                    params_vec.push(Box::new(next_run));
+                }
+            }
 
-        conn.execute(&query, rusqlite::params_from_iter(params_vec.iter()))?;
+            if let Some(en) = enabled {
+                updates.push("enabled = ?");
+                params_vec.push(Box::new(en as i32));
+            }
+
+            params_vec.push(Box::new(id.to_string()));
+
+            let query = format!(
+                "UPDATE schedules SET {} WHERE id = ?",
+                updates.join(", ")
+            );
+
+            conn.execute(&query, rusqlite::params_from_iter(params_vec.iter()))?;
+        } // params_vec is dropped here
 
         // Unregister and re-register job if scheduler is running
         if self.scheduler.is_some() {
@@ -706,6 +709,31 @@ impl SchedulerManager {
             // If Arc::try_unwrap fails, there are other references
             // The scheduler will be cleaned up when all references are dropped
         }
+        Ok(())
+    }
+
+    /// Manually execute a schedule immediately (outside of its regular schedule)
+    pub async fn run_now(&self, schedule_id: &str) -> Result<()> {
+        let schedule = self.get_schedule(schedule_id)?
+            .context("Schedule not found")?;
+
+        // Execute the workbook in a background task
+        let schedule_id = schedule.id.clone();
+        let workbook_path = schedule.workbook_path.clone();
+        let project_root = schedule.project_root.clone();
+        let db_path = self.db_path.clone();
+
+        tokio::spawn(async move {
+            if let Err(e) = Self::execute_scheduled_workbook(
+                schedule_id,
+                workbook_path,
+                project_root,
+                db_path,
+            ).await {
+                eprintln!("Error executing workbook manually: {}", e);
+            }
+        });
+
         Ok(())
     }
 }
