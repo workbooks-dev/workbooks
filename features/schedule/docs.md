@@ -177,14 +177,119 @@ CREATE TABLE runs (
 - Does not block UI
 
 **App Closed:**
-- Scheduler pauses
-- Missed runs shown on next start
-- Option to run missed schedules immediately
+- With system tray: Scheduler continues running in background
+- Without system tray (old behavior): Scheduler pauses, missed runs shown on next start
 
-**Future:**
-- System service/daemon for always-on scheduling
-- Run even when app is closed
-- Platform-specific implementations
+## System Tray Background Process
+
+**Overview:**
+Tether runs as a menu bar/system tray application (like Docker Desktop, Ollama) to enable reliable scheduling even when the main window is closed.
+
+**Architecture Decision:**
+- **System Tray App** (recommended approach)
+  - Main window can close, background process continues
+  - Menu bar icon provides quick access and status
+  - Native Tauri `SystemTray` API support
+  - Familiar UX pattern (Docker, Ollama, Postgres.app)
+  - Clean mental model: quit = stop schedules, hide = keep running
+
+**Alternative Approaches Considered:**
+- Separate daemon process - More complex, requires IPC/HTTP between processes
+- System service (launchd/systemd) - More setup complexity, harder installation
+- System tray chosen for simplicity and user familiarity
+
+### System Tray Features
+
+**Menu Bar Icon:**
+- Shows Tether status at a glance
+- Always visible when scheduler is active
+- Click to reveal menu
+
+**Menu Options:**
+- **Open Tether** - Shows main window
+- **Scheduler Status** - Running / Paused / X schedules active
+- **Next Run** - Shows upcoming scheduled workbook and time
+- **Separator**
+- **Pause Scheduler** - Temporarily disable all schedules
+- **Resume Scheduler** - Re-enable schedules
+- **Separator**
+- **Quit Tether** - Stops background process entirely
+
+**Status Indicators:**
+- Idle: Gray icon
+- Running workbook: Blue animated icon
+- Error: Red icon with badge
+- Paused: Gray icon with pause symbol
+
+**Window Behavior:**
+- Closing window (X button) → Hides window, keeps app running
+- Main window can be re-opened from tray
+- Quit from menu → Stops scheduler and exits app completely
+
+### Implementation Details
+
+**Tauri SystemTray:**
+```rust
+use tauri::{CustomMenuItem, SystemTray, SystemTrayMenu, SystemTrayEvent};
+
+let tray_menu = SystemTrayMenu::new()
+    .add_item(CustomMenuItem::new("open", "Open Tether"))
+    .add_item(CustomMenuItem::new("status", "Scheduler: Running"))
+    .add_native_item(SystemTrayMenuItem::Separator)
+    .add_item(CustomMenuItem::new("pause", "Pause Scheduler"))
+    .add_item(CustomMenuItem::new("quit", "Quit Tether"));
+
+let system_tray = SystemTray::new().with_menu(tray_menu);
+```
+
+**Window Close Prevention:**
+```rust
+.on_window_event(|event| match event.event() {
+    WindowEvent::CloseRequested { api, .. } => {
+        // Hide window instead of closing app
+        event.window().hide().unwrap();
+        api.prevent_close();
+    }
+    _ => {}
+})
+```
+
+**Dynamic Menu Updates:**
+- Update status text when schedules run
+- Show countdown to next run
+- Update icon based on scheduler state
+- Refresh menu on schedule changes
+
+### User Experience
+
+**First Launch:**
+- App opens with main window
+- Menu bar icon appears
+- User can close window, app stays running
+
+**Subsequent Use:**
+- Click menu bar icon → Open Tether
+- Schedules run in background
+- Notifications on completion (optional)
+
+**Quitting:**
+- Menu → Quit Tether
+- Icon disappears from menu bar
+- Scheduler stops, no more scheduled runs
+- Clean shutdown
+
+**Platform-Specific:**
+- macOS: Menu bar (top right)
+- Windows: System tray (bottom right)
+- Linux: System tray (varies by DE)
+
+### Benefits
+
+1. **Reliable Scheduling** - Runs continue even when window closed
+2. **Quick Access** - Always one click away
+3. **Status Visibility** - See scheduler state at a glance
+4. **Familiar Pattern** - Users understand menu bar apps
+5. **Clean Exit** - Quit explicitly stops everything
 
 ## Run History
 

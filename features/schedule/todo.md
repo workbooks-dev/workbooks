@@ -138,21 +138,89 @@
 - [ ] Clean up orphaned report files - **NEEDS IMPLEMENTATION**
 - [ ] Configurable retention (future)
 
+## System Tray Background Process
+
+**Required for reliable scheduling** - Allows schedules to run even when main window is closed.
+
+### Backend (Rust)
+
+- [ ] System tray setup
+  - [ ] Add `tauri` system tray dependencies
+  - [ ] Create system tray menu structure
+  - [ ] Design menu bar icons (idle, running, error, paused states)
+  - [ ] Initialize SystemTray in main.rs
+
+- [ ] Menu items and actions
+  - [ ] "Open Tether" - Show main window
+  - [ ] "Scheduler: [Status]" - Dynamic status display (not clickable)
+  - [ ] "Next Run: [Time]" - Shows upcoming schedule (not clickable)
+  - [ ] "Pause Scheduler" / "Resume Scheduler" - Toggle scheduler state
+  - [ ] "Quit Tether" - Full app shutdown
+
+- [ ] Window behavior
+  - [ ] Intercept window close event
+  - [ ] Hide window instead of closing app
+  - [ ] Re-show window on "Open Tether" click
+  - [ ] Proper shutdown on "Quit" from menu
+
+- [ ] Dynamic menu updates
+  - [ ] Update status text when schedules run
+  - [ ] Update next run time display
+  - [ ] Change icon based on scheduler state
+  - [ ] Refresh menu when schedules change
+
+- [ ] Event handlers
+  - [ ] System tray click events
+  - [ ] Menu item click routing
+  - [ ] Update tray on scheduler events (start run, complete run, error)
+
+### Frontend Integration
+
+- [ ] Tauri commands for tray
+  - [ ] `update_tray_status(status)` - Update status in menu
+  - [ ] `update_next_run(time)` - Update next run display
+  - [ ] `set_tray_icon(state)` - Change icon (idle/running/error/paused)
+
+- [ ] React hooks
+  - [ ] Hook to update tray when schedules change
+  - [ ] Hook to update tray during workbook execution
+  - [ ] Hook to show window on tray "Open" click
+
+### Icon Design
+
+- [ ] Create icon set
+  - [ ] Idle state (gray)
+  - [ ] Running state (blue, animated if possible)
+  - [ ] Error state (red with badge)
+  - [ ] Paused state (gray with pause symbol)
+  - [ ] Platform-specific sizes (macOS: 16x16@2x, Windows: 16x16/32x32)
+
+### Testing
+
+- [ ] Test window hide/show behavior
+- [ ] Test scheduler continues when window closed
+- [ ] Test quit fully stops scheduler
+- [ ] Test menu updates reflect actual state
+- [ ] Test on all platforms (macOS, Windows, Linux)
+
 ## Notifications (Future)
 
 - [ ] Desktop notifications on run completion
 - [ ] Success/failure status
 - [ ] Click notification → View report
 - [ ] Email notifications (optional)
+- [ ] Integration with system tray - click notification shows relevant tray menu item
 
-## System Integration (Future)
+## Advanced System Integration (Future)
 
-- [ ] Run scheduler as system service/daemon
-- [ ] Execute schedules even when app closed
+- [ ] Optional system service/daemon mode (for advanced users)
+- [ ] Run as true background service (beyond system tray)
 - [ ] Platform-specific implementations:
-  - [ ] macOS: launchd
-  - [ ] Windows: Task Scheduler
-  - [ ] Linux: systemd
+  - [ ] macOS: launchd plist
+  - [ ] Windows: Windows Service
+  - [ ] Linux: systemd unit
+- [ ] Auto-start on login option
+- [ ] Service management UI in settings
 
 ## Testing
 
