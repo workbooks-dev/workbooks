@@ -2,17 +2,20 @@
 
 ## 🎯 Current Status (Dec 19, 2025)
 
-**✅ Foundational Backend Complete:**
+**✅ Backend Complete:**
 - Scheduler module with SQLite database (`~/.tether/schedules.db`)
 - CLI commands for managing schedules
 - Engine server endpoint for executing all cells
 - Run tracking and cleanup functions
+- **Background scheduler task runner** ✅ **(Completed Dec 19, 2025)**
+  - Automatically executes workbooks on schedule
+  - Dynamic job registration when schedules change
+  - Full integration with engine server
 
 **🚧 Next Steps:**
-- Implement background scheduler task runner
 - Add Tauri commands for GUI integration
 - Build frontend Schedule tab UI
-- Complete `tether run` command with full engine integration
+- Implement report file saving
 
 **📝 See `features/schedule/done.md` for detailed implementation notes.**
 
@@ -22,7 +25,7 @@
 
 - [x] Scheduler system ✅ **(Completed Dec 19, 2025)**
   - [x] Cron parsing and evaluation (via tokio-cron-scheduler)
-  - [ ] Background task runner (tokio tasks) - **NEEDS IMPLEMENTATION**
+  - [x] Background task runner (tokio tasks) ✅ **(Completed Dec 19, 2025)**
   - [x] Schedule storage (SQLite) - Global database at `~/.tether/schedules.db`
   - [x] Next run calculation (framework in place, needs full implementation)
   - [x] Scheduler lifecycle (start/stop/pause)
@@ -37,8 +40,9 @@
   - [x] Execute all cells in workbook sequentially - `/engine/execute-all` endpoint
   - [x] Capture outputs for each cell
   - [x] Handle errors gracefully - Stops on first error
-  - [ ] Save notebook with outputs to .tether/runs/ - **NEEDS IMPLEMENTATION**
+  - [ ] Save notebook with outputs to .tether/runs/ - **NEEDS IMPLEMENTATION** (reports in DB only)
   - [x] Update run status (success/failed) - `complete_run()` function exists
+  - [x] Scheduled execution fully working ✅ **(Completed Dec 19, 2025)**
 
 - [ ] Tauri commands - **NEEDS IMPLEMENTATION**
   - [ ] `add_schedule(workbook_path, cron, enabled)` - Create schedule

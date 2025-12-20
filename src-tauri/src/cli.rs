@@ -317,7 +317,7 @@ async fn handle_schedule_action(action: ScheduleAction) -> anyhow::Result<()> {
                 workbook_abs.to_str().unwrap(),
                 project_abs.to_str().unwrap(),
                 &cron_expr,
-            )?;
+            ).await?;
 
             println!("✓ Schedule added successfully!");
             println!("  ID: {}", schedule.id);
@@ -351,7 +351,7 @@ async fn handle_schedule_action(action: ScheduleAction) -> anyhow::Result<()> {
         }
 
         ScheduleAction::Remove { id } => {
-            manager.delete_schedule(&id)?;
+            manager.delete_schedule(&id).await?;
             println!("✓ Schedule removed successfully!");
         }
     }

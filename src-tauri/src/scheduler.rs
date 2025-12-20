@@ -2,8 +2,9 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tokio_cron_scheduler::{Job, JobScheduler};
 use uuid::Uuid;
 
@@ -57,6 +58,8 @@ impl CronPreset {
 pub struct SchedulerManager {
     db_path: PathBuf,
     scheduler: Option<Arc<JobScheduler>>,
+    // Map of schedule_id -> job_id for tracking jobs
+    job_map: Arc<Mutex<HashMap<String, uuid::Uuid>>>,
 }
 
 impl SchedulerManager {
@@ -73,6 +76,7 @@ impl SchedulerManager {
         let manager = Self {
             db_path,
             scheduler: None,
+            job_map: Arc::new(Mutex::new(HashMap::new())),
         };
 
         // Initialize database
@@ -141,7 +145,7 @@ impl SchedulerManager {
     }
 
     /// Add a new schedule
-    pub fn add_schedule(
+    pub async fn add_schedule(
         &self,
         workbook_path: &str,
         project_root: &str,
@@ -186,6 +190,11 @@ impl SchedulerManager {
                 schedule.last_run,
             ],
         )?;
+
+        // Register job if scheduler is running
+        if self.scheduler.is_some() {
+            self.register_schedule_job(&schedule).await?;
+        }
 
         Ok(schedule)
     }
@@ -244,7 +253,7 @@ impl SchedulerManager {
     }
 
     /// Update a schedule
-    pub fn update_schedule(
+    pub async fn update_schedule(
         &self,
         id: &str,
         cron_expression: Option<&str>,
@@ -287,11 +296,28 @@ impl SchedulerManager {
 
         conn.execute(&query, rusqlite::params_from_iter(params_vec.iter()))?;
 
+        // Unregister and re-register job if scheduler is running
+        if self.scheduler.is_some() {
+            self.unregister_schedule_job(id).await?;
+
+            // Re-register if still enabled
+            if let Some(schedule) = self.get_schedule(id)? {
+                if schedule.enabled {
+                    self.register_schedule_job(&schedule).await?;
+                }
+            }
+        }
+
         Ok(())
     }
 
     /// Delete a schedule
-    pub fn delete_schedule(&self, id: &str) -> Result<()> {
+    pub async fn delete_schedule(&self, id: &str) -> Result<()> {
+        // Unregister job first if scheduler is running
+        if self.scheduler.is_some() {
+            self.unregister_schedule_job(id).await?;
+        }
+
         let conn = self.get_connection()?;
         conn.execute("DELETE FROM schedules WHERE id = ?1", [id])?;
         Ok(())
@@ -450,11 +476,223 @@ impl SchedulerManager {
         Ok(deleted)
     }
 
+    /// Execute a scheduled workbook
+    async fn execute_scheduled_workbook(
+        schedule_id: String,
+        workbook_path: String,
+        project_root: String,
+        db_path: PathBuf,
+    ) -> Result<()> {
+        println!("Executing scheduled workbook: {} (schedule: {})", workbook_path, schedule_id);
+
+        // Record run start
+        let run_id = {
+            let temp_manager = SchedulerManager { db_path: db_path.clone(), scheduler: None, job_map: Arc::new(Mutex::new(HashMap::new())) };
+            let run = temp_manager.record_run(Some(&schedule_id), &workbook_path, &project_root)?;
+            run.id
+        };
+
+        // Execute the workbook
+        let result = Self::execute_workbook_internal(&workbook_path, &project_root, &run_id, &db_path).await;
+
+        // Update schedule's last_run timestamp
+        {
+            let temp_manager = SchedulerManager { db_path: db_path.clone(), scheduler: None, job_map: Arc::new(Mutex::new(HashMap::new())) };
+            temp_manager.update_next_run(&schedule_id)?;
+        }
+
+        result
+    }
+
+    /// Internal helper to execute a workbook and save report
+    async fn execute_workbook_internal(
+        workbook_path: &str,
+        project_root: &str,
+        run_id: &str,
+        db_path: &Path,
+    ) -> Result<()> {
+        let project_root_path = PathBuf::from(project_root);
+        let workbook_full_path = PathBuf::from(workbook_path);
+
+        // Parse notebook to get cells
+        let notebook_content = std::fs::read_to_string(&workbook_full_path)
+            .context("Failed to read notebook file")?;
+        let notebook: serde_json::Value = serde_json::from_str(&notebook_content)
+            .context("Failed to parse notebook JSON")?;
+
+        let cells: Vec<crate::engine_http::Cell> = notebook["cells"]
+            .as_array()
+            .context("No cells array in notebook")?
+            .iter()
+            .filter_map(|cell| {
+                let cell_type = cell["cell_type"].as_str().unwrap_or("code");
+                if cell_type != "code" {
+                    return None;
+                }
+
+                let source = cell["source"].as_array()
+                    .map(|lines| {
+                        lines.iter()
+                            .filter_map(|l| l.as_str())
+                            .collect::<Vec<_>>()
+                            .join("")
+                    })
+                    .or_else(|| cell["source"].as_str().map(String::from))
+                    .unwrap_or_default();
+
+                Some(crate::engine_http::Cell {
+                    source,
+                    cell_type: cell_type.to_string(),
+                })
+            })
+            .collect();
+
+        // Ensure Python environment exists
+        // Extract project name from project_root directory name
+        let project_name = project_root_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("project")
+            .to_string();
+        let venv_path = crate::python::ensure_venv(&project_root_path, &project_name).await?;
+
+        // Start engine server
+        let engine = crate::engine_http::EngineServer::start().await
+            .context("Failed to start engine server")?;
+        let port = engine.port;
+
+        // Start engine for this workbook
+        crate::engine_http::EngineServer::start_engine_http(
+            port,
+            workbook_path,
+            &project_root_path,
+            &venv_path,
+        ).await?;
+
+        // Execute all cells
+        let result = crate::engine_http::EngineServer::execute_all_http(port, workbook_path, cells).await;
+
+        // Determine status and error message
+        let (status, error_message) = match &result {
+            Ok(response) => {
+                if response.success {
+                    ("success", None)
+                } else {
+                    let errors: Vec<String> = response.cell_results.iter()
+                        .filter(|r| !r.success)
+                        .filter_map(|r| r.error.clone())
+                        .collect();
+                    ("failed", Some(errors.join("\n")))
+                }
+            }
+            Err(e) => ("failed", Some(e.to_string())),
+        };
+
+        // Save report (TODO: implement report saving)
+        let report_path = None;
+
+        // Complete the run
+        {
+            let temp_manager = SchedulerManager { db_path: db_path.to_path_buf(), scheduler: None, job_map: Arc::new(Mutex::new(HashMap::new())) };
+            temp_manager.complete_run(run_id, status, error_message.as_deref(), report_path)?;
+        }
+
+        // Clean up engine
+        let _ = crate::engine_http::EngineServer::stop_engine_http(port, workbook_path).await;
+        drop(engine);
+
+        // Clean up old runs
+        {
+            let temp_manager = SchedulerManager { db_path: db_path.to_path_buf(), scheduler: None, job_map: Arc::new(Mutex::new(HashMap::new())) };
+            temp_manager.cleanup_old_runs(30)?;
+        }
+
+        println!("Scheduled execution completed: {} (status: {})", workbook_path, status);
+        Ok(())
+    }
+
     /// Initialize and start the background scheduler
     pub async fn start_scheduler(&mut self) -> Result<()> {
         let sched = JobScheduler::new().await?;
         sched.start().await?;
         self.scheduler = Some(Arc::new(sched));
+
+        // Load and register all enabled schedules
+        self.load_all_schedules().await?;
+
+        Ok(())
+    }
+
+    /// Load all enabled schedules and register them as jobs
+    async fn load_all_schedules(&self) -> Result<()> {
+        let schedules = self.list_schedules()?;
+        let enabled_schedules: Vec<_> = schedules.into_iter().filter(|s| s.enabled).collect();
+
+        println!("Loading {} enabled schedules", enabled_schedules.len());
+
+        for schedule in enabled_schedules {
+            self.register_schedule_job(&schedule).await?;
+        }
+
+        Ok(())
+    }
+
+    /// Register a single schedule as a job in the scheduler
+    async fn register_schedule_job(&self, schedule: &Schedule) -> Result<()> {
+        let scheduler = self.scheduler.as_ref()
+            .context("Scheduler not started")?;
+
+        let schedule_id = schedule.id.clone();
+        let workbook_path = schedule.workbook_path.clone();
+        let project_root = schedule.project_root.clone();
+        let cron_expression = schedule.cron_expression.clone();
+        let db_path = self.db_path.clone();
+
+        // Create a job that executes the workbook
+        let job = Job::new_async(cron_expression.as_str(), move |_uuid, _lock| {
+            let schedule_id = schedule_id.clone();
+            let workbook_path = workbook_path.clone();
+            let project_root = project_root.clone();
+            let db_path = db_path.clone();
+
+            Box::pin(async move {
+                if let Err(e) = Self::execute_scheduled_workbook(
+                    schedule_id,
+                    workbook_path,
+                    project_root,
+                    db_path,
+                ).await {
+                    eprintln!("Error executing scheduled workbook: {}", e);
+                }
+            })
+        })?;
+
+        let job_id = scheduler.add(job).await?;
+
+        // Store job_id in map
+        if let Ok(mut map) = self.job_map.lock() {
+            map.insert(schedule.id.clone(), job_id);
+        }
+
+        println!("Registered schedule: {} ({})", schedule.workbook_path, schedule.cron_expression);
+
+        Ok(())
+    }
+
+    /// Unregister a schedule's job from the scheduler
+    async fn unregister_schedule_job(&self, schedule_id: &str) -> Result<()> {
+        let job_id = {
+            let mut map = self.job_map.lock().unwrap();
+            map.remove(schedule_id)
+        };
+
+        if let Some(job_id) = job_id {
+            if let Some(scheduler) = &self.scheduler {
+                scheduler.remove(&job_id).await?;
+                println!("Unregistered schedule job: {}", schedule_id);
+            }
+        }
+
         Ok(())
     }
 

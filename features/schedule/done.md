@@ -77,9 +77,45 @@
 
 **File:** `features/schedule/implementation-notes.md`
 
+### Background Scheduler Task Runner (December 19, 2024)
+
+- [x] Implemented background scheduler using tokio-cron-scheduler
+- [x] Added `execute_scheduled_workbook()` - Executes a workbook when schedule triggers
+- [x] Added `execute_workbook_internal()` - Core workbook execution logic
+  - Parses notebook to extract cells
+  - Ensures Python environment exists
+  - Starts engine server
+  - Executes all cells via `/engine/execute-all`
+  - Records run status (success/failed)
+  - Cleans up old runs (keeps last 30)
+- [x] Added `load_all_schedules()` - Loads all enabled schedules on startup
+- [x] Added `register_schedule_job()` - Registers a schedule as a cron job
+- [x] Added `unregister_schedule_job()` - Removes a schedule's job
+- [x] Updated `start_scheduler()` - Now loads and registers all schedules
+- [x] Made `add_schedule()` async - Automatically registers job when created
+- [x] Made `update_schedule()` async - Re-registers job when modified
+- [x] Made `delete_schedule()` async - Unregisters job when deleted
+- [x] Added job_map to track schedule_id → job_id mapping
+- [x] Updated CLI to use new async methods
+
+**Architecture:**
+- When app starts, `start_scheduler()` creates a JobScheduler and loads all enabled schedules
+- Each schedule is registered as a cron job with tokio-cron-scheduler
+- When a job triggers, `execute_scheduled_workbook()` runs:
+  1. Records run start in database
+  2. Executes workbook via engine server
+  3. Saves execution status and outputs
+  4. Updates schedule's last_run timestamp
+  5. Cleans up old runs
+- Jobs are dynamically added/removed when schedules are created/deleted/updated
+
+**Files:**
+- `src-tauri/src/scheduler.rs` (major updates)
+- `src-tauri/src/cli.rs` (updated to use async methods)
+
 ## Notes
 
-**Foundational backend complete.** Schedule database, CLI commands, and execute-all endpoint are implemented. Still needed:
+**Background scheduler now fully implemented!** Schedules automatically execute when the app is running. Still needed:
 - Tauri commands for GUI integration
-- Background scheduler task runner
 - Frontend UI components (see `todo.md`)
+- Report file saving (currently stored in database only)
