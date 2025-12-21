@@ -420,7 +420,40 @@ async fn ensure_engine_server(state: State<'_, AppState>) -> Result<(), String> 
     // Use async mutex to hold lock across await - prevents race condition
     let mut server = state.engine_server.lock().await;
 
-    if server.is_none() {
+    // Check if server exists and is healthy
+    let needs_restart = if let Some(ref existing_server) = *server {
+        // Try health check
+        let health_url = format!("http://127.0.0.1:{}/health", existing_server.port);
+        let client = reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(2))
+            .build()
+            .map_err(|e| e.to_string())?;
+
+        match client.get(&health_url).send().await {
+            Ok(response) if response.status().is_success() => {
+                log::info!("Engine server is healthy on port {}", existing_server.port);
+                false // Server is healthy, no restart needed
+            }
+            Ok(response) => {
+                log::warn!("Engine server returned status: {}, restarting...", response.status());
+                true // Unhealthy, needs restart
+            }
+            Err(e) => {
+                log::warn!("Engine server health check failed: {}, restarting...", e);
+                true // Unhealthy, needs restart
+            }
+        }
+    } else {
+        true // No server, needs start
+    };
+
+    if needs_restart {
+        // Drop old server if it exists
+        if server.is_some() {
+            log::info!("Dropping old engine server...");
+            *server = None;
+        }
+
         log::info!("Starting engine server...");
         let es = engine_http::EngineServer::start()
             .await
@@ -430,7 +463,7 @@ async fn ensure_engine_server(state: State<'_, AppState>) -> Result<(), String> 
             })?;
 
         *server = Some(es);
-        log::info!("Engine server started successfully");
+        log::info!("Engine server started successfully on port {}", server.as_ref().unwrap().port);
     }
 
     Ok(())
