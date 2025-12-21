@@ -1,7 +1,18 @@
 # Tray Menu To Dos
 
+All core tray menu functionality is complete! See `done.md` for implementation details.
 
-- [ ] Update tray menu feature docs
-- [ ] Ensure tray menu stays active after all windows are closed, use full quit (command+q) on tether tray to fully quit app; this is so the scheduler can continue working
-- [ ] Ensure try menu lists recent projects used (max 3), create project, open project, view runs (all recent project runs), and view scheduler
-- [ ] Add "install MCP" menu so the user can install any projects available or "pick a folder and install" type option. This "install mcp" item should open a new window to help manage installed and installing tether mcps
+## Bugs
+- When doing the MCP section, there's a os-alert that's
+  impossible to fully dismiss it says "MCP installation UI
+  coming soon!" -- it just gets stuck on that. 
+
+
+## Future Enhancements
+
+- [ ] Build MCP installation UI window (currently shows placeholder alert)
+- [ ] Add tray icon badge with number of queued/running jobs
+- [ ] Add quick actions for pausing/resuming scheduler from tray
+- [ ] Add notifications for completed/failed runs
+- [ ] Support per-project tray icons when managing multiple projects
+- [ ] Add "Open in New Window" option for recent projects

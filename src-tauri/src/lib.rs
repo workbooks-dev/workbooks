@@ -6,6 +6,7 @@ pub mod engine_http;
 mod secrets;
 pub mod scheduler;
 pub mod cli_install;
+mod recent_projects;
 
 #[cfg(target_os = "macos")]
 mod local_auth_macos;
@@ -183,6 +184,9 @@ async fn create_project(project_path: String, project_name: String, state: State
         root: project.root.to_string_lossy().to_string(),
     };
 
+    // Add to recent projects
+    let _ = recent_projects::add_recent_project(&project.name, &project.root);
+
     // Set as current project
     let mut current = state.current_project.lock().await;
     *current = Some(project);
@@ -203,6 +207,9 @@ async fn open_folder(folder_path: String, state: State<'_, AppState>) -> Result<
         root: project.root.to_string_lossy().to_string(),
     };
 
+    // Add to recent projects
+    let _ = recent_projects::add_recent_project(&project.name, &project.root);
+
     // Set as current project
     let mut current = state.current_project.lock().await;
     *current = Some(project);
@@ -221,6 +228,9 @@ async fn load_project(project_path: String, state: State<'_, AppState>) -> Resul
         name: project.name.clone(),
         root: project.root.to_string_lossy().to_string(),
     };
+
+    // Add to recent projects
+    let _ = recent_projects::add_recent_project(&project.name, &project.root);
 
     // Set as current project
     let mut current = state.current_project.lock().await;
@@ -258,6 +268,11 @@ async fn set_project_root(project_path: String, state: State<'_, AppState>) -> R
 async fn get_project_root(state: State<'_, AppState>) -> Result<Option<String>, String> {
     let current = state.current_project.lock().await;
     Ok(current.as_ref().map(|p| p.root.to_string_lossy().to_string()))
+}
+
+#[tauri::command]
+async fn get_recent_projects() -> Result<Vec<recent_projects::RecentProject>, String> {
+    Ok(recent_projects::get_recent_projects())
 }
 
 #[tauri::command]
@@ -1026,6 +1041,38 @@ async fn list_runs(
 }
 
 #[tauri::command]
+async fn list_runs_paginated(
+    limit: usize,
+    offset: usize,
+    start_time: Option<i64>,
+    end_time: Option<i64>,
+    state: State<'_, AppState>,
+) -> Result<Vec<scheduler::Run>, String> {
+    ensure_scheduler_manager(&state).await?;
+
+    let manager_lock = state.scheduler_manager.lock().await;
+    let manager = manager_lock.as_ref().ok_or("Scheduler manager not initialized")?;
+
+    manager.list_runs_paginated(limit, offset, start_time, end_time)
+        .map_err(|e| format!("Failed to list runs: {}", e))
+}
+
+#[tauri::command]
+async fn count_runs(
+    start_time: Option<i64>,
+    end_time: Option<i64>,
+    state: State<'_, AppState>,
+) -> Result<usize, String> {
+    ensure_scheduler_manager(&state).await?;
+
+    let manager_lock = state.scheduler_manager.lock().await;
+    let manager = manager_lock.as_ref().ok_or("Scheduler manager not initialized")?;
+
+    manager.count_runs(start_time, end_time)
+        .map_err(|e| format!("Failed to count runs: {}", e))
+}
+
+#[tauri::command]
 async fn run_schedule_now(
     schedule_id: String,
     state: State<'_, AppState>,
@@ -1182,35 +1229,267 @@ pub fn run() {
                 .build(),
         )
         .setup(|app| {
-            // Create system tray
-            let open_item = MenuItemBuilder::with_id("tray_open", "Open Tether")
+            // Create system tray with recent projects
+            let mut tray_items: Vec<Box<dyn tauri::menu::IsMenuItem<tauri::Wry>>> = Vec::new();
+
+            // Add recent projects (max 3)
+            let recent_projects = recent_projects::get_recent_projects();
+            if !recent_projects.is_empty() {
+                for (i, project) in recent_projects.iter().enumerate() {
+                    let item = MenuItemBuilder::with_id(
+                        format!("tray_recent_{}", i),
+                        &project.name
+                    ).build(app)?;
+                    tray_items.push(Box::new(item));
+                }
+                tray_items.push(Box::new(tauri::menu::PredefinedMenuItem::separator(app)?));
+            }
+
+            // Project management items
+            let create_project_item = MenuItemBuilder::with_id("tray_create_project", "Create Project...")
                 .build(app)?;
+            tray_items.push(Box::new(create_project_item));
+
+            let open_project_item = MenuItemBuilder::with_id("tray_open_project", "Open Project...")
+                .build(app)?;
+            tray_items.push(Box::new(open_project_item));
+
+            tray_items.push(Box::new(tauri::menu::PredefinedMenuItem::separator(app)?));
+
+            // Navigation items
+            let view_runs_item = MenuItemBuilder::with_id("tray_view_runs", "View Runs")
+                .build(app)?;
+            tray_items.push(Box::new(view_runs_item));
+
+            let view_scheduler_item = MenuItemBuilder::with_id("tray_view_scheduler", "View Scheduler")
+                .build(app)?;
+            tray_items.push(Box::new(view_scheduler_item));
+
+            tray_items.push(Box::new(tauri::menu::PredefinedMenuItem::separator(app)?));
+
+            // MCP management
+            let install_mcp_item = MenuItemBuilder::with_id("tray_install_mcp", "Install MCP...")
+                .build(app)?;
+            tray_items.push(Box::new(install_mcp_item));
+
+            tray_items.push(Box::new(tauri::menu::PredefinedMenuItem::separator(app)?));
+
+            // Status and quit
             let scheduler_status_item = MenuItemBuilder::with_id("tray_scheduler_status", "Scheduler: Running")
                 .enabled(false)
                 .build(app)?;
-            let separator = tauri::menu::PredefinedMenuItem::separator(app)?;
+            tray_items.push(Box::new(scheduler_status_item));
+
             let quit_item = MenuItemBuilder::with_id("tray_quit", "Quit Tether")
                 .build(app)?;
+            tray_items.push(Box::new(quit_item));
 
-            let tray_menu = tauri::menu::Menu::with_items(
-                app,
-                &[&open_item, &scheduler_status_item, &separator, &quit_item]
-            )?;
+            // Build menu from items
+            let tray_menu = tauri::menu::MenuBuilder::new(app);
+            let mut tray_menu = tray_menu;
+            for item in tray_items {
+                tray_menu = tray_menu.item(&*item);
+            }
+            let tray_menu = tray_menu.build()?;
 
             let _tray = TrayIconBuilder::new()
                 .menu(&tray_menu)
                 .icon(app.default_window_icon().unwrap().clone())
-                .on_menu_event(|app, event| match event.id().as_ref() {
-                    "tray_open" => {
-                        if let Some(window) = app.get_webview_window("main") {
-                            let _ = window.show();
-                            let _ = window.set_focus();
+                // Note: Tray icon click handler removed because on macOS, clicking the icon
+                // to open the menu fires a Click event, which would reset the window.
+                // All functionality is accessible through menu items instead.
+                .on_menu_event(|app, event| {
+                    let event_id = event.id().as_ref();
+
+                    // Helper function to show main window (creates new window if none exist)
+                    // Returns true if a window was shown/created
+                    let show_main_window = || -> bool {
+                        // Check if any windows exist
+                        let windows = app.webview_windows();
+                        let window_labels: Vec<String> = windows.keys().cloned().collect();
+                        log::info!("Available windows: {:?}", window_labels);
+
+                        // If main window exists, show and focus it
+                        if let Some(main_window) = windows.get("main") {
+                            log::info!("Found main window, showing it");
+                            let _ = main_window.show();
+                            let _ = main_window.set_focus();
+                            true
+                        } else if !windows.is_empty() {
+                            // Some other window exists, focus the first one
+                            log::info!("Main window not found, focusing first available window");
+                            if let Some((_, window)) = windows.iter().next() {
+                                let _ = window.show();
+                                let _ = window.set_focus();
+                                true
+                            } else {
+                                false
+                            }
+                        } else {
+                            // No windows exist - don't create one here, let the caller handle it
+                            false
                         }
+                    };
+
+                    // Helper to create a new main window with optional view parameter
+                    let create_main_window = |view: Option<&str>| -> bool {
+                        log::info!("Creating new main window with view: {:?}", view);
+
+                        // Build URL with optional view parameter
+                        let url = if let Some(v) = view {
+                            format!("index.html?view={}", v)
+                        } else {
+                            "index.html".to_string()
+                        };
+
+                        match tauri::WebviewWindowBuilder::new(
+                            app,
+                            "main",
+                            tauri::WebviewUrl::App(url.into())
+                        )
+                        .title("tether")
+                        .inner_size(1200.0, 800.0)
+                        .build() {
+                            Ok(window) => {
+                                // Add close handler to hide instead of quit
+                                let window_clone = window.clone();
+                                window.on_window_event(move |event| {
+                                    if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                                        let _ = window_clone.hide();
+                                        api.prevent_close();
+                                        log::info!("Window hidden - app continues running in background");
+                                    }
+                                });
+
+                                let _ = window.show();
+                                let _ = window.set_focus();
+                                log::info!("Created and showed new main window");
+                                true
+                            }
+                            Err(e) => {
+                                log::error!("Failed to create new window: {}", e);
+                                false
+                            }
+                        }
+                    };
+
+                    // Handle recent project clicks
+                    if event_id.starts_with("tray_recent_") {
+                        if let Some(index_str) = event_id.strip_prefix("tray_recent_") {
+                            if let Ok(index) = index_str.parse::<usize>() {
+                                let recent_projects = recent_projects::get_recent_projects();
+                                if let Some(project) = recent_projects.get(index) {
+                                    let project_path = project.path.clone();
+                                    let project_name = project.name.clone();
+
+                                    if !show_main_window() {
+                                        // No window exists - create one with project parameter
+                                        // Use special format to pass project path
+                                        log::info!("Creating window with project: {}", project_path.display());
+                                        match tauri::WebviewWindowBuilder::new(
+                                            app,
+                                            "main",
+                                            tauri::WebviewUrl::App(format!("index.html?project={}", urlencoding::encode(&project_path.to_string_lossy())).into())
+                                        )
+                                        .title("tether")
+                                        .inner_size(1200.0, 800.0)
+                                        .build() {
+                                            Ok(window) => {
+                                                // Add close handler
+                                                let window_clone = window.clone();
+                                                window.on_window_event(move |event| {
+                                                    if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                                                        let _ = window_clone.hide();
+                                                        api.prevent_close();
+                                                        log::info!("Window hidden - app continues running in background");
+                                                    }
+                                                });
+                                                let _ = window.show();
+                                                let _ = window.set_focus();
+                                            }
+                                            Err(e) => {
+                                                log::error!("Failed to create window: {}", e);
+                                            }
+                                        }
+                                    } else {
+                                        // Window exists - emit event
+                                        let app_handle = app.clone();
+                                        tauri::async_runtime::spawn(async move {
+                                            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+                                            let _ = app_handle.emit("open-project", serde_json::json!({
+                                                "path": project_path,
+                                                "name": project_name,
+                                            }));
+                                        });
+                                    }
+                                }
+                            }
+                        }
+                        return;
                     }
-                    "tray_quit" => {
-                        app.exit(0);
+
+                    match event_id {
+                        "tray_create_project" => {
+                            if !show_main_window() {
+                                create_main_window(Some("create"));
+                            } else {
+                                let app_handle = app.clone();
+                                tauri::async_runtime::spawn(async move {
+                                    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+                                    let _ = app_handle.emit("tray-create-project", ());
+                                });
+                            }
+                        }
+                        "tray_open_project" => {
+                            if !show_main_window() {
+                                create_main_window(Some("action"));
+                            } else {
+                                let app_handle = app.clone();
+                                tauri::async_runtime::spawn(async move {
+                                    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+                                    let _ = app_handle.emit("tray-open-project", ());
+                                });
+                            }
+                        }
+                        "tray_view_runs" => {
+                            if !show_main_window() {
+                                create_main_window(Some("global-runs"));
+                            } else {
+                                let app_handle = app.clone();
+                                tauri::async_runtime::spawn(async move {
+                                    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+                                    let _ = app_handle.emit("tray-view-runs", ());
+                                });
+                            }
+                        }
+                        "tray_view_scheduler" => {
+                            if !show_main_window() {
+                                create_main_window(Some("global-schedules"));
+                            } else {
+                                let app_handle = app.clone();
+                                tauri::async_runtime::spawn(async move {
+                                    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+                                    let _ = app_handle.emit("tray-view-scheduler", ());
+                                });
+                            }
+                        }
+                        "tray_install_mcp" => {
+                            if !show_main_window() {
+                                create_main_window(Some("action"));
+                            } else {
+                                let app_handle = app.clone();
+                                tauri::async_runtime::spawn(async move {
+                                    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+                                    let _ = app_handle.emit("tray-install-mcp", ());
+                                });
+                            }
+                        }
+                        "tray_quit" => {
+                            // Force quit the application
+                            std::process::exit(0);
+                        }
+                        _ => {}
                     }
-                    _ => {}
                 })
                 .build(app)?;
 
@@ -1384,6 +1663,7 @@ pub fn run() {
             run_python_code,
             set_project_root,
             get_project_root,
+            get_recent_projects,
             list_files,
             create_workbook,
             read_workbook,
@@ -1427,6 +1707,8 @@ pub fn run() {
             update_schedule,
             delete_schedule,
             list_runs,
+            list_runs_paginated,
+            count_runs,
             run_schedule_now,
             open_project_window,
             get_logs_directory,
@@ -1438,6 +1720,16 @@ pub fn run() {
             cli_install::get_bundled_cli_version,
             cli_install::get_installed_cli_version,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|_app_handle, event| {
+            match event {
+                tauri::RunEvent::ExitRequested { api, .. } => {
+                    // Prevent app from quitting when windows are closed
+                    // Only allow quit from tray menu
+                    api.prevent_exit();
+                }
+                _ => {}
+            }
+        });
 }

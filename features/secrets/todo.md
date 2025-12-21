@@ -1,80 +1,80 @@
 # Secrets - To Do
 
-## Critical Issues
+## High Priority
 
-- [ ] **Backend automatic redaction (alternative/complement to frontend warning)**
-  - [ ] Scan outputs before save/display
-  - [ ] Replace secret values with `[REDACTED]` marker
-  - [ ] Log redactions for audit
-  - [ ] Test that secrets never appear in saved notebook files
-  - [ ] Verify redaction works for partial matches and variations
+### Touch ID Session Management UI
 
-### Touch ID Session Management
-
-- [ ] Session should expire on app close or manual lock
 - [ ] Visual indicator of authentication status (locked/unlocked state)
 - [ ] "Lock Secrets" button to manually invalidate session
+- [ ] Session should expire on app close (currently persists until timeout)
 
-## Future Enhancements
+## Medium Priority
 
-## Notebook Detection
-- [ ] If `os.environ` is used, automatically check to see if it's in secrets. If it's not, then add it as a "unset value" with a row of items below the in-use ones.
+### Auto-Detection of Hardcoded Secrets (Pre-Execution)
 
-## Auto-Detection
+**Goal:** Detect secrets BEFORE execution and prompt user to move them to secrets manager
 
 - [ ] Pattern recognition
-  - [ ] Regex patterns for common secret formats
+  - [ ] Regex patterns for common secret formats (API keys, tokens, passwords)
   - [ ] Entropy analysis for random strings
   - [ ] Whitelist of known secret key names
   - [ ] Configurable detection sensitivity
 
 - [ ] User prompts
-  - [ ] "Detected secret" dialog
+  - [ ] "Detected secret" dialog before cell execution
   - [ ] Suggest key name based on variable
   - [ ] Partially mask detected value
   - [ ] One-click migration to secrets manager
 
 - [ ] Cell rewriting
   - [ ] Replace hardcoded value with `os.environ["KEY"]`
-  - [ ] Update cell source
+  - [ ] Update cell source automatically
   - [ ] Preserve code structure
-  - [ ] Add import os if needed
+  - [ ] Add `import os` if needed
 
-## Output Redaction
+### Notebook Environment Detection
 
-- [ ] Scan outputs before save
-  - [ ] Text outputs (stdout, stderr)
-  - [ ] HTML content
-  - [ ] Error messages
-  - [ ] Return values
+- [ ] Detect `os.environ` usage in code
+- [ ] Check if referenced environment variable exists in secrets
+- [ ] Show "unset value" warning row in secrets UI for missing secrets
+- [ ] Quick-add button to create the missing secret
 
-- [ ] Replace with redaction marker
-  - [ ] `[REDACTED]` or similar
-  - [ ] Preserve output structure
-  - [ ] Log redactions for audit
+## Low Priority
 
-## Migration & Import
+### .env File Integration Enhancements
 
-- [ ] .env file detection
-  - [ ] Scan for .env in project root
+**Note:** Basic .env import is already implemented. These are enhancements:
+
+- [ ] Automatic .env file detection
+  - [ ] Scan for .env in project root on project open
   - [ ] Parse .env format
-  - [ ] Offer to import
+  - [ ] Offer to import if found
 
-- [ ] Import flow
+- [ ] Import flow improvements
   - [ ] Preview secrets to import
-  - [ ] Encrypt and store
-  - [ ] Option to delete original .env
-  - [ ] Update code references
+  - [ ] Option to delete original .env after import
+  - [ ] Update code references to use `os.environ`
 
 - [ ] External edit detection
-  - [ ] File watcher for .env
+  - [ ] File watcher for .env changes
   - [ ] Prompt on changes
   - [ ] Suggest migration
 
-## Testing & Polish
+### Backend Automatic Redaction (Optional Enhancement)
+
+**Note:** Output redaction is currently handled via frontend warning system (SecretsWarningModal). This would be a backend alternative/complement.
+
+- [ ] Backend scan outputs before save/display
+  - [ ] Replace secret values with `[REDACTED]` marker automatically
+  - [ ] Log redactions for audit trail
+  - [ ] Test that secrets never appear in saved notebook files
+  - [ ] Verify redaction works for partial matches and variations
+
+## Testing & Documentation
 
 - [ ] Test secrets workflow on Windows (keyring integration)
 - [ ] Test secrets workflow on Linux (keyring integration)
 - [ ] Security audit of encryption implementation
 - [ ] User documentation for secrets workflow
 - [ ] Tutorial/onboarding for first-time secrets users
+- [ ] Test session expiration on app close/restart

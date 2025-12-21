@@ -2,14 +2,26 @@ import { useState, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { ask } from "@tauri-apps/plugin-dialog";
 
-export function ScheduleTab({ projectRoot, onClose }) {
-  const [activeSubTab, setActiveSubTab] = useState("scheduled"); // "scheduled" or "runs"
+export function ScheduleTab({ projectRoot = null, onClose, initialSubTab = "scheduled", initialShowAllProjects = null }) {
+  const [activeSubTab, setActiveSubTab] = useState(initialSubTab); // "scheduled" or "runs"
   const [schedules, setSchedules] = useState([]);
   const [runs, setRuns] = useState([]);
   const [loading, setLoading] = useState(false);
   const [showAddDialog, setShowAddDialog] = useState(false);
   const [editingSchedule, setEditingSchedule] = useState(null);
-  const [showAllProjects, setShowAllProjects] = useState(false); // Toggle for all projects view
+  // Default to showing all projects if no projectRoot is provided, or if explicitly requested
+  const [showAllProjects, setShowAllProjects] = useState(
+    initialShowAllProjects !== null ? initialShowAllProjects : !projectRoot
+  );
+
+  // Pagination state
+  const [currentPage, setCurrentPage] = useState(1);
+  const [pageSize, setPageSize] = useState(20);
+  const [totalRuns, setTotalRuns] = useState(0);
+
+  // Date filtering state
+  const [startDate, setStartDate] = useState("");
+  const [endDate, setEndDate] = useState("");
 
   useEffect(() => {
     loadSchedules();
@@ -21,7 +33,7 @@ export function ScheduleTab({ projectRoot, onClose }) {
     }, 3000);
 
     return () => clearInterval(interval);
-  }, [showAllProjects, projectRoot]); // Reload when toggling view or project changes
+  }, [showAllProjects, projectRoot, currentPage, pageSize, startDate, endDate]); // Reload when toggling view, pagination, or filters change
 
   const loadSchedules = async () => {
     setLoading(true);
@@ -45,7 +57,28 @@ export function ScheduleTab({ projectRoot, onClose }) {
       setLoading(true);
     }
     try {
-      const runsList = await invoke("list_runs", { limit: 30 });
+      // Convert date strings to Unix timestamps (seconds)
+      const startTime = startDate ? Math.floor(new Date(startDate).getTime() / 1000) : null;
+      const endTime = endDate ? Math.floor(new Date(endDate + "T23:59:59").getTime() / 1000) : null;
+
+      // Calculate offset based on current page
+      const offset = (currentPage - 1) * pageSize;
+
+      // Get total count first
+      const totalCount = await invoke("count_runs", {
+        startTime,
+        endTime,
+      });
+      setTotalRuns(totalCount);
+
+      // Get paginated runs
+      const runsList = await invoke("list_runs_paginated", {
+        limit: pageSize,
+        offset,
+        startTime,
+        endTime,
+      });
+
       // Filter runs based on view mode
       const filteredRuns = showAllProjects
         ? (runsList || [])
@@ -54,6 +87,7 @@ export function ScheduleTab({ projectRoot, onClose }) {
     } catch (err) {
       console.error("Failed to load runs:", err);
       setRuns([]);
+      setTotalRuns(0);
     } finally {
       if (!silent) {
         setLoading(false);
@@ -376,6 +410,67 @@ export function ScheduleTab({ projectRoot, onClose }) {
 
         {activeSubTab === "runs" && (
           <div className="p-6">
+            {/* Filters and Controls */}
+            <div className="mb-4 flex flex-wrap items-end gap-4">
+              {/* Date Range Filter */}
+              <div className="flex gap-2 items-end">
+                <div>
+                  <label className="block text-xs font-medium text-gray-700 mb-1">Start Date</label>
+                  <input
+                    type="date"
+                    value={startDate}
+                    onChange={(e) => {
+                      setStartDate(e.target.value);
+                      setCurrentPage(1); // Reset to first page when filtering
+                    }}
+                    className="px-3 py-1.5 text-sm border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-gray-700 mb-1">End Date</label>
+                  <input
+                    type="date"
+                    value={endDate}
+                    onChange={(e) => {
+                      setEndDate(e.target.value);
+                      setCurrentPage(1); // Reset to first page when filtering
+                    }}
+                    className="px-3 py-1.5 text-sm border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  />
+                </div>
+                {(startDate || endDate) && (
+                  <button
+                    onClick={() => {
+                      setStartDate("");
+                      setEndDate("");
+                      setCurrentPage(1);
+                    }}
+                    className="px-3 py-1.5 text-sm text-gray-700 bg-white hover:bg-gray-50 border border-gray-300 rounded-md transition-all"
+                  >
+                    Clear
+                  </button>
+                )}
+              </div>
+
+              {/* Page Size Selector */}
+              <div className="ml-auto">
+                <label className="block text-xs font-medium text-gray-700 mb-1">Page Size</label>
+                <select
+                  value={pageSize}
+                  onChange={(e) => {
+                    setPageSize(Number(e.target.value));
+                    setCurrentPage(1); // Reset to first page when changing page size
+                  }}
+                  className="px-3 py-1.5 text-sm border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500"
+                >
+                  <option value="10">10</option>
+                  <option value="20">20</option>
+                  <option value="50">50</option>
+                  <option value="100">100</option>
+                </select>
+              </div>
+            </div>
+
             {/* Runs Table */}
             {loading ? (
               <div className="text-center py-12 text-gray-500">Loading...</div>
@@ -384,11 +479,14 @@ export function ScheduleTab({ projectRoot, onClose }) {
                 <div className="text-5xl mb-4">📊</div>
                 <h3 className="text-base font-semibold text-gray-900 mb-2">No run history</h3>
                 <p className="text-sm text-gray-600 mb-6">
-                  Run history will appear here once you schedule and execute workbooks.
+                  {startDate || endDate
+                    ? "No runs found for the selected date range."
+                    : "Run history will appear here once you schedule and execute workbooks."}
                 </p>
               </div>
             ) : (
-              <div className="bg-white border border-gray-200 rounded-lg overflow-hidden">
+              <>
+                <div className="bg-white border border-gray-200 rounded-lg overflow-hidden">
                 <table className="w-full">
                   <thead>
                     <tr className="bg-gray-50 border-b border-gray-200">
@@ -431,6 +529,60 @@ export function ScheduleTab({ projectRoot, onClose }) {
                   </tbody>
                 </table>
               </div>
+
+              {/* Pagination Controls */}
+              <div className="mt-4 flex items-center justify-between">
+                <div className="text-sm text-gray-700">
+                  Showing {runs.length > 0 ? ((currentPage - 1) * pageSize + 1) : 0} to{" "}
+                  {Math.min(currentPage * pageSize, totalRuns)} of {totalRuns} runs
+                </div>
+                <div className="flex gap-2">
+                  <button
+                    onClick={() => setCurrentPage(currentPage - 1)}
+                    disabled={currentPage === 1}
+                    className="px-3 py-1.5 text-sm font-medium text-gray-700 bg-white hover:bg-gray-50 border border-gray-300 rounded-md transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    Previous
+                  </button>
+                  <div className="flex items-center gap-1">
+                    {Array.from({ length: Math.ceil(totalRuns / pageSize) }, (_, i) => i + 1)
+                      .filter(page => {
+                        // Show first, last, current, and adjacent pages
+                        const totalPages = Math.ceil(totalRuns / pageSize);
+                        return (
+                          page === 1 ||
+                          page === totalPages ||
+                          Math.abs(page - currentPage) <= 1
+                        );
+                      })
+                      .map((page, index, array) => (
+                        <div key={page} className="flex items-center">
+                          {index > 0 && array[index - 1] !== page - 1 && (
+                            <span className="px-2 text-gray-400">...</span>
+                          )}
+                          <button
+                            onClick={() => setCurrentPage(page)}
+                            className={`px-3 py-1.5 text-sm font-medium rounded-md transition-all ${
+                              currentPage === page
+                                ? "bg-blue-600 text-white"
+                                : "text-gray-700 bg-white hover:bg-gray-50 border border-gray-300"
+                            }`}
+                          >
+                            {page}
+                          </button>
+                        </div>
+                      ))}
+                  </div>
+                  <button
+                    onClick={() => setCurrentPage(currentPage + 1)}
+                    disabled={currentPage >= Math.ceil(totalRuns / pageSize)}
+                    className="px-3 py-1.5 text-sm font-medium text-gray-700 bg-white hover:bg-gray-50 border border-gray-300 rounded-md transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    Next
+                  </button>
+                </div>
+              </div>
+            </>
             )}
           </div>
         )}

@@ -5,6 +5,7 @@ import { listen } from "@tauri-apps/api/event";
 import { ask } from "@tauri-apps/plugin-dialog";
 import { getWindowScreenshot, getScreenshotableWindows } from "tauri-plugin-screenshots-api";
 import { writeImage } from "@tauri-apps/plugin-clipboard-manager";
+import { ActionWindow } from "./components/ActionWindow";
 import { Welcome } from "./components/Welcome";
 import { CreateProject } from "./components/CreateProject";
 import { Sidebar } from "./components/Sidebar";
@@ -19,7 +20,7 @@ import "./App.css";
 function App() {
   const [currentProject, setCurrentProject] = useState(null);
   const [loading, setLoading] = useState(true);
-  const [view, setView] = useState("loading"); // loading, welcome, create, project
+  const [view, setView] = useState("loading"); // loading, action, welcome, create, project, global-schedules, global-runs
   const [tabs, setTabs] = useState([]);
   const [activeTabId, setActiveTabId] = useState(null);
   const [isDragging, setIsDragging] = useState(false);
@@ -27,13 +28,19 @@ function App() {
   const [pendingClose, setPendingClose] = useState(null); // 'window' or 'tab'
 
   useEffect(() => {
-    // Check if project path is provided via URL parameter
+    // Check URL parameters for initial view/project
     const urlParams = new URLSearchParams(window.location.search);
     const projectPath = urlParams.get('project');
+    const viewParam = urlParams.get('view');
 
     if (projectPath) {
       // Load project from URL parameter
       loadProjectFromPath(projectPath);
+    } else if (viewParam) {
+      // Navigate to specific view (global-runs, global-schedules, create, action, etc.)
+      console.log("Navigating to view from URL:", viewParam);
+      setView(viewParam);
+      setLoading(false);
     } else {
       // Check for current project
       checkCurrentProject();
@@ -135,6 +142,106 @@ function App() {
       if (unlistenTakeScreenshot) unlistenTakeScreenshot();
     };
   }, []);
+
+  // Listen for tray menu events
+  useEffect(() => {
+    let unlistenOpenProject;
+    let unlistenCreateProject;
+    let unlistenOpenProjectDialog;
+    let unlistenViewRuns;
+    let unlistenViewScheduler;
+    let unlistenInstallMcp;
+
+    const setupTrayListeners = async () => {
+      console.log("Setting up tray listeners...");
+
+      // Handle recent project clicks from tray
+      unlistenOpenProject = await listen("open-project", async (event) => {
+        console.log("Received open-project event:", event.payload);
+        try {
+          const { path, name } = event.payload;
+          await loadProjectFromPath(path);
+        } catch (error) {
+          console.error("Failed to open project from tray:", error);
+        }
+      });
+
+      // Create new project
+      unlistenCreateProject = await listen("tray-create-project", async () => {
+        console.log("Received tray-create-project event");
+        // Clear project state and navigate to create view
+        setCurrentProject(null);
+        setTabs([]);
+        setActiveTabId(null);
+        setView("create");
+      });
+
+      // Open project dialog
+      unlistenOpenProjectDialog = await listen("tray-open-project", async () => {
+        console.log("Received tray-open-project event");
+        try {
+          const { open } = await import("@tauri-apps/plugin-dialog");
+          const folderPath = await open({
+            directory: true,
+            multiple: false,
+            title: "Open Project",
+          });
+
+          if (folderPath) {
+            await loadProjectFromPath(folderPath);
+          } else {
+            // User cancelled - go to action window
+            setCurrentProject(null);
+            setTabs([]);
+            setActiveTabId(null);
+            setView("action");
+          }
+        } catch (error) {
+          console.error("Failed to open project:", error);
+        }
+      });
+
+      // View runs
+      unlistenViewRuns = await listen("tray-view-runs", async () => {
+        console.log("Received tray-view-runs event");
+        // Clear project state and navigate to global runs
+        setCurrentProject(null);
+        setTabs([]);
+        setActiveTabId(null);
+        setView("global-runs");
+      });
+
+      // View scheduler
+      unlistenViewScheduler = await listen("tray-view-scheduler", async () => {
+        console.log("Received tray-view-scheduler event");
+        // Clear project state and navigate to global schedules
+        setCurrentProject(null);
+        setTabs([]);
+        setActiveTabId(null);
+        setView("global-schedules");
+      });
+
+      // Install MCP
+      unlistenInstallMcp = await listen("tray-install-mcp", async () => {
+        console.log("Received tray-install-mcp event");
+        alert("MCP installation UI coming soon!");
+      });
+
+      console.log("Tray listeners set up successfully");
+    };
+
+    setupTrayListeners();
+
+    return () => {
+      console.log("Cleaning up tray listeners");
+      if (unlistenOpenProject) unlistenOpenProject();
+      if (unlistenCreateProject) unlistenCreateProject();
+      if (unlistenOpenProjectDialog) unlistenOpenProjectDialog();
+      if (unlistenViewRuns) unlistenViewRuns();
+      if (unlistenViewScheduler) unlistenViewScheduler();
+      if (unlistenInstallMcp) unlistenInstallMcp();
+    };
+  }, []); // Remove dependencies so listeners stay active
 
   // Automatically install/update CLI on app launch
   useEffect(() => {
@@ -263,21 +370,32 @@ function App() {
     }
   }, [tabs, activeTabId, currentProject]);
 
-  // Prevent window close if there are unsaved changes
+  // Handle window close requests
   useEffect(() => {
     const appWindow = getCurrentWindow();
 
     const unlisten = appWindow.onCloseRequested(async (event) => {
+      // If in Action Window or global views, allow close (will hide window via lib.rs)
+      if (view === "action" || view === "global-schedules" || view === "global-runs") {
+        return; // Allow close
+      }
+
+      // If in create or project view, prevent close and reset to Action Window
+      event.preventDefault();
+
       // Check if any tabs have unsaved changes
       const hasUnsavedChanges = tabs.some(tab => tab.hasUnsavedChanges);
 
       if (hasUnsavedChanges) {
-        // Prevent the close
-        event.preventDefault();
-
-        // Show custom save dialog
-        setPendingClose('window');
+        // Show custom save dialog, then reset to Action Window
+        setPendingClose('reset-to-action');
         setShowSaveDialog(true);
+      } else {
+        // No unsaved changes, just reset to Action Window
+        setCurrentProject(null);
+        setTabs([]);
+        setActiveTabId(null);
+        setView("action");
       }
     });
 
@@ -285,42 +403,58 @@ function App() {
     return () => {
       unlisten.then(fn => fn());
     };
-  }, [tabs]);
+  }, [view, tabs]);
 
-  // Handle Command+W to close tabs or window
+  // Handle Command+W to close tabs or reset to Action Window
   useEffect(() => {
-    if (view !== "project") return;
-
     const handleKeyDown = async (event) => {
       // Command+W on macOS or Ctrl+W on other platforms
       if ((event.metaKey || event.ctrlKey) && event.key === "w") {
         event.preventDefault();
 
-        // If there's an active tab, close it
-        if (activeTabId) {
-          const tabToClose = tabs.find((tab) => tab.id === activeTabId);
-          const isLastTab = tabs.length === 1;
-
-          // Check if the tab has unsaved changes
-          if (tabToClose?.hasUnsavedChanges) {
-            // Show the save confirmation dialog
-            setPendingClose(isLastTab ? 'window' : 'tab');
-            setShowSaveDialog(true);
-            return;
-          }
-
-          // No unsaved changes, just close
-          handleTabClose(activeTabId);
-
-          // If this was the last tab, close the window
-          if (isLastTab) {
-            const appWindow = getCurrentWindow();
-            await appWindow.close();
-          }
-        } else if (tabs.length === 0) {
-          // No tabs open, close the window
+        // If in Action Window or global views, hide the window
+        if (view === "action" || view === "global-schedules" || view === "global-runs") {
           const appWindow = getCurrentWindow();
-          await appWindow.close();
+          await appWindow.close(); // Will hide via lib.rs
+          return;
+        }
+
+        // If in create view, reset to Action Window
+        if (view === "create") {
+          setView("action");
+          return;
+        }
+
+        // If in project view, handle tab closing
+        if (view === "project") {
+          // If there's an active tab, close it
+          if (activeTabId) {
+            const tabToClose = tabs.find((tab) => tab.id === activeTabId);
+            const isLastTab = tabs.length === 1;
+
+            // Check if the tab has unsaved changes
+            if (tabToClose?.hasUnsavedChanges) {
+              // Show the save confirmation dialog
+              setPendingClose(isLastTab ? 'reset-to-action' : 'tab');
+              setShowSaveDialog(true);
+              return;
+            }
+
+            // No unsaved changes, just close
+            handleTabClose(activeTabId);
+
+            // If this was the last tab, reset to Action Window
+            if (isLastTab) {
+              setCurrentProject(null);
+              setTabs([]);
+              setActiveTabId(null);
+              setView("action");
+            }
+          } else if (tabs.length === 0) {
+            // No tabs open, reset to Action Window
+            setCurrentProject(null);
+            setView("action");
+          }
         }
       }
     };
@@ -340,11 +474,11 @@ function App() {
         restoreTabs(project);
         setView("project");
       } else {
-        setView("welcome");
+        setView("action");
       }
     } catch (error) {
       console.error("Failed to get current project:", error);
-      setView("welcome");
+      setView("action");
     } finally {
       setLoading(false);
     }
@@ -367,7 +501,7 @@ function App() {
       setView("project");
     } catch (error) {
       console.error("Failed to load project:", error);
-      setView("welcome");
+      setView("action");
     } finally {
       setLoading(false);
     }
@@ -479,6 +613,12 @@ function App() {
       if (activeTabId) {
         handleTabClose(activeTabId);
       }
+    } else if (pendingClose === 'reset-to-action') {
+      // Reset to Action Window
+      setCurrentProject(null);
+      setTabs([]);
+      setActiveTabId(null);
+      setView("action");
     }
 
     setPendingClose(null);
@@ -495,6 +635,12 @@ function App() {
       if (activeTabId) {
         handleTabClose(activeTabId);
       }
+    } else if (pendingClose === 'reset-to-action') {
+      // Reset to Action Window without saving
+      setCurrentProject(null);
+      setTabs([]);
+      setActiveTabId(null);
+      setView("action");
     }
 
     setPendingClose(null);
@@ -505,6 +651,25 @@ function App() {
     setPendingClose(null);
   };
 
+  function handleActionWindowAction(action) {
+    switch (action.type) {
+      case "create-project":
+        setView("create");
+        break;
+      case "open-project":
+        loadProjectFromPath(action.path);
+        break;
+      case "view-all-runs":
+        setView("global-runs");
+        break;
+      case "view-all-schedules":
+        setView("global-schedules");
+        break;
+      default:
+        console.warn("Unknown action:", action);
+    }
+  }
+
 
   if (loading || view === "loading") {
     return (
@@ -512,6 +677,10 @@ function App() {
         <p>Loading...</p>
       </div>
     );
+  }
+
+  if (view === "action") {
+    return <ActionWindow onAction={handleActionWindowAction} />;
   }
 
   if (view === "welcome") {
@@ -528,7 +697,7 @@ function App() {
         <div className="fixed top-0 left-0 right-0 bg-white border-b border-gray-200 px-6 py-4 flex items-center justify-between shadow-sm">
           <h1 className="text-xl font-semibold text-gray-900">Tether</h1>
           <button
-            onClick={() => setView("welcome")}
+            onClick={() => setView("action")}
             className="px-4 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-md hover:bg-gray-50"
           >
             Back
@@ -536,6 +705,56 @@ function App() {
         </div>
         <div className="pt-20">
           <CreateProject onProjectCreated={handleProjectCreated} />
+        </div>
+      </div>
+    );
+  }
+
+  if (view === "global-schedules") {
+    return (
+      <div className="min-h-screen bg-gray-50">
+        <div className="fixed top-0 left-0 right-0 bg-white border-b border-gray-200 px-6 py-4 flex items-center justify-between shadow-sm z-10">
+          <h1 className="text-xl font-semibold text-gray-900">All Schedules</h1>
+          <button
+            onClick={() => setView("action")}
+            className="px-4 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-md hover:bg-gray-50"
+          >
+            Back
+          </button>
+        </div>
+        <div className="pt-20 h-screen">
+          <ScheduleTab
+            key="global-schedules"
+            projectRoot={null}
+            initialSubTab="scheduled"
+            initialShowAllProjects={true}
+            onClose={() => setView("action")}
+          />
+        </div>
+      </div>
+    );
+  }
+
+  if (view === "global-runs") {
+    return (
+      <div className="min-h-screen bg-gray-50">
+        <div className="fixed top-0 left-0 right-0 bg-white border-b border-gray-200 px-6 py-4 flex items-center justify-between shadow-sm z-10">
+          <h1 className="text-xl font-semibold text-gray-900">All Runs</h1>
+          <button
+            onClick={() => setView("action")}
+            className="px-4 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-md hover:bg-gray-50"
+          >
+            Back
+          </button>
+        </div>
+        <div className="pt-20 h-screen">
+          <ScheduleTab
+            key="global-runs"
+            projectRoot={null}
+            initialSubTab="runs"
+            initialShowAllProjects={true}
+            onClose={() => setView("action")}
+          />
         </div>
       </div>
     );

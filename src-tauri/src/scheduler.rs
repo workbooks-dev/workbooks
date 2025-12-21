@@ -148,6 +148,21 @@ impl SchedulerManager {
             [],
         )?;
 
+        // MIGRATION: Add metadata column if it doesn't exist (for existing databases)
+        // Check if metadata column exists
+        let metadata_exists: bool = conn
+            .prepare("SELECT COUNT(*) FROM pragma_table_info('runs') WHERE name='metadata'")?
+            .query_row([], |row| {
+                let count: i64 = row.get(0)?;
+                Ok(count > 0)
+            })?;
+
+        if !metadata_exists {
+            log::info!("Migrating database: adding 'metadata' column to runs table");
+            conn.execute("ALTER TABLE runs ADD COLUMN metadata TEXT", [])?;
+            log::info!("Database migration complete");
+        }
+
         Ok(())
     }
 
@@ -414,34 +429,116 @@ impl SchedulerManager {
         Ok(())
     }
 
-    /// List recent runs
-    pub fn list_runs(&self, limit: usize) -> Result<Vec<Run>> {
+    /// List recent runs with pagination and optional date filtering
+    pub fn list_runs_paginated(
+        &self,
+        limit: usize,
+        offset: usize,
+        start_time: Option<i64>,
+        end_time: Option<i64>,
+    ) -> Result<Vec<Run>> {
         let conn = self.get_connection()?;
-        let mut stmt = conn.prepare(
-            "SELECT id, schedule_id, workbook_path, project_root, started_at, finished_at, duration, status, error_message, report_path, metadata
-             FROM runs
-             ORDER BY started_at DESC
-             LIMIT ?1"
-        )?;
 
-        let runs = stmt.query_map([limit], |row| {
-            Ok(Run {
-                id: row.get(0)?,
-                schedule_id: row.get(1)?,
-                workbook_path: row.get(2)?,
-                project_root: row.get(3)?,
-                started_at: row.get(4)?,
-                finished_at: row.get(5)?,
-                duration: row.get(6)?,
-                status: row.get(7)?,
-                error_message: row.get(8)?,
-                report_path: row.get(9)?,
-                metadata: row.get(10)?,
-            })
-        })?
+        // Build query with optional date filters
+        let mut query = String::from(
+            "SELECT id, schedule_id, workbook_path, project_root, started_at, finished_at, duration, status, error_message, report_path, metadata
+             FROM runs"
+        );
+
+        let mut conditions: Vec<String> = Vec::new();
+        if start_time.is_some() {
+            conditions.push("started_at >= ?1".to_string());
+        }
+        if end_time.is_some() {
+            conditions.push(format!("started_at <= ?{}", if start_time.is_some() { 2 } else { 1 }));
+        }
+
+        if !conditions.is_empty() {
+            query.push_str(" WHERE ");
+            query.push_str(&conditions.join(" AND "));
+        }
+
+        query.push_str(" ORDER BY started_at DESC LIMIT ? OFFSET ?");
+
+        let mut stmt = conn.prepare(&query)?;
+
+        // Bind parameters dynamically based on which filters are present
+        let runs = match (start_time, end_time) {
+            (Some(start), Some(end)) => {
+                stmt.query_map([start, end, limit as i64, offset as i64], Self::map_run_row)?
+            }
+            (Some(start), None) => {
+                stmt.query_map([start, limit as i64, offset as i64], Self::map_run_row)?
+            }
+            (None, Some(end)) => {
+                stmt.query_map([end, limit as i64, offset as i64], Self::map_run_row)?
+            }
+            (None, None) => {
+                stmt.query_map([limit as i64, offset as i64], Self::map_run_row)?
+            }
+        }
         .collect::<Result<Vec<_>, _>>()?;
 
         Ok(runs)
+    }
+
+    /// Helper function to map a row to a Run struct
+    fn map_run_row(row: &rusqlite::Row) -> rusqlite::Result<Run> {
+        Ok(Run {
+            id: row.get(0)?,
+            schedule_id: row.get(1)?,
+            workbook_path: row.get(2)?,
+            project_root: row.get(3)?,
+            started_at: row.get(4)?,
+            finished_at: row.get(5)?,
+            duration: row.get(6)?,
+            status: row.get(7)?,
+            error_message: row.get(8)?,
+            report_path: row.get(9)?,
+            metadata: row.get(10)?,
+        })
+    }
+
+    /// Get total count of runs (optionally filtered by date)
+    pub fn count_runs(&self, start_time: Option<i64>, end_time: Option<i64>) -> Result<usize> {
+        let conn = self.get_connection()?;
+
+        let mut query = String::from("SELECT COUNT(*) FROM runs");
+
+        let mut conditions: Vec<String> = Vec::new();
+        if start_time.is_some() {
+            conditions.push("started_at >= ?1".to_string());
+        }
+        if end_time.is_some() {
+            conditions.push(format!("started_at <= ?{}", if start_time.is_some() { 2 } else { 1 }));
+        }
+
+        if !conditions.is_empty() {
+            query.push_str(" WHERE ");
+            query.push_str(&conditions.join(" AND "));
+        }
+
+        let count: i64 = match (start_time, end_time) {
+            (Some(start), Some(end)) => {
+                conn.query_row(&query, [start, end], |row| row.get(0))?
+            }
+            (Some(start), None) => {
+                conn.query_row(&query, [start], |row| row.get(0))?
+            }
+            (None, Some(end)) => {
+                conn.query_row(&query, [end], |row| row.get(0))?
+            }
+            (None, None) => {
+                conn.query_row(&query, [], |row| row.get(0))?
+            }
+        };
+
+        Ok(count as usize)
+    }
+
+    /// List recent runs (legacy method for backward compatibility)
+    pub fn list_runs(&self, limit: usize) -> Result<Vec<Run>> {
+        self.list_runs_paginated(limit, 0, None, None)
     }
 
     /// Validate a cron expression
@@ -502,22 +599,35 @@ impl SchedulerManager {
         project_root: String,
         db_path: PathBuf,
     ) -> Result<()> {
+        log::info!("Executing scheduled workbook: {} (schedule: {})", workbook_path, schedule_id);
         println!("Executing scheduled workbook: {} (schedule: {})", workbook_path, schedule_id);
 
         // Record run start
         let run_id = {
+            log::info!("Recording run start...");
             let temp_manager = SchedulerManager { db_path: db_path.clone(), scheduler: None, job_map: Arc::new(Mutex::new(HashMap::new())) };
-            let run = temp_manager.record_run(Some(&schedule_id), &workbook_path, &project_root)?;
+            let run = temp_manager.record_run(Some(&schedule_id), &workbook_path, &project_root)
+                .context("Failed to record run start")?;
+            log::info!("Run recorded with ID: {}", run.id);
             run.id
         };
 
         // Execute the workbook
+        log::info!("Starting workbook execution...");
         let result = Self::execute_workbook_internal(&workbook_path, &project_root, &run_id, &db_path).await;
+
+        if let Err(ref e) = result {
+            log::error!("Workbook execution failed: {:#}", e);
+        } else {
+            log::info!("Workbook execution completed successfully");
+        }
 
         // Update schedule's last_run timestamp
         {
+            log::info!("Updating schedule last_run timestamp...");
             let temp_manager = SchedulerManager { db_path: db_path.clone(), scheduler: None, job_map: Arc::new(Mutex::new(HashMap::new())) };
-            temp_manager.update_next_run(&schedule_id)?;
+            temp_manager.update_next_run(&schedule_id)
+                .context("Failed to update schedule timestamp")?;
         }
 
         result
@@ -530,17 +640,23 @@ impl SchedulerManager {
         run_id: &str,
         db_path: &Path,
     ) -> Result<()> {
+        log::info!("execute_workbook_internal called: workbook={}, project={}, run={}", workbook_path, project_root, run_id);
+
         let project_root_path = PathBuf::from(project_root);
         let workbook_full_path = PathBuf::from(workbook_path);
 
+        log::info!("Resolved paths: project={}, workbook={}", project_root_path.display(), workbook_full_path.display());
+
         // Helper to always complete the run, even on error
         let complete_run_always = |status: &str, error_message: Option<String>, report_path: Option<String>, metadata: Option<String>| {
+            log::info!("Completing run {} with status: {}", run_id, status);
             let temp_manager = SchedulerManager {
                 db_path: db_path.to_path_buf(),
                 scheduler: None,
                 job_map: Arc::new(Mutex::new(HashMap::new()))
             };
             if let Err(e) = temp_manager.complete_run(run_id, status, error_message.as_deref(), report_path.as_deref(), metadata.as_deref()) {
+                log::error!("Failed to complete run: {}", e);
                 eprintln!("Failed to complete run: {}", e);
             }
         };
@@ -548,8 +664,11 @@ impl SchedulerManager {
         // Execute workbook with proper error handling
         let execution_result = async {
             // Parse notebook to get cells
+            log::info!("Reading notebook file: {}", workbook_full_path.display());
             let notebook_content = std::fs::read_to_string(&workbook_full_path)
-                .context("Failed to read notebook file")?;
+                .context(format!("Failed to read notebook file: {}", workbook_full_path.display()))?;
+
+            log::info!("Notebook file read successfully, parsing JSON...");
             let notebook: serde_json::Value = serde_json::from_str(&notebook_content)
                 .context("Failed to parse notebook JSON")?;
 
@@ -586,27 +705,45 @@ impl SchedulerManager {
                 .and_then(|n| n.to_str())
                 .unwrap_or("project")
                 .to_string();
-            let venv_path = crate::python::ensure_venv(&project_root_path, &project_name).await?;
+
+            log::info!("Ensuring Python venv for project: {}", project_name);
+            let venv_path = crate::python::ensure_venv(&project_root_path, &project_name).await
+                .context("Failed to ensure Python venv")?;
+            log::info!("Python venv ready at: {}", venv_path.display());
 
             // Start engine server
+            log::info!("Starting engine server...");
             let engine = crate::engine_http::EngineServer::start().await
                 .context("Failed to start engine server")?;
             let port = engine.port;
+            log::info!("Engine server started on port: {}", port);
 
             // Start engine for this workbook
+            log::info!("Starting engine for workbook: {}", workbook_path);
             crate::engine_http::EngineServer::start_engine_http(
                 port,
                 workbook_path,
                 &project_root_path,
                 &venv_path,
-            ).await?;
+            ).await
+            .context("Failed to start engine for workbook")?;
+            log::info!("Engine started successfully for workbook");
 
             // Execute all cells
+            log::info!("Executing all cells ({} cells total)...", cells.len());
             let result = crate::engine_http::EngineServer::execute_all_http(port, workbook_path, cells).await;
 
+            if let Err(ref e) = result {
+                log::error!("Cell execution failed: {:#}", e);
+            } else {
+                log::info!("All cells executed");
+            }
+
             // Clean up engine
+            log::info!("Cleaning up engine...");
             let _ = crate::engine_http::EngineServer::stop_engine_http(port, workbook_path).await;
             drop(engine);
+            log::info!("Engine cleanup complete");
 
             result
         }.await;
@@ -626,14 +763,19 @@ impl SchedulerManager {
                             .take(3) // Last 3 cells
                             .filter_map(|r| {
                                 r.outputs.iter()
-                                    .find(|o| o.output_type == "stream" && o.text.is_some())
-                                    .and_then(|o| o.text.clone())
+                                    .find_map(|o| match o {
+                                        crate::engine_http::CellOutput::Stream { text, .. } => Some(text.clone()),
+                                        _ => None,
+                                    })
                                     .or_else(|| {
                                         r.outputs.iter()
-                                            .find(|o| o.output_type == "execute_result")
-                                            .and_then(|o| o.data.as_ref())
-                                            .and_then(|d| d.get("text/plain"))
-                                            .and_then(|v| v.as_str().map(String::from))
+                                            .find_map(|o| match o {
+                                                crate::engine_http::CellOutput::ExecuteResult { data, .. } => {
+                                                    data.get("text/plain")
+                                                        .and_then(|v| v.as_str().map(String::from))
+                                                },
+                                                _ => None,
+                                            })
                                     })
                             })
                             .collect()
@@ -778,6 +920,8 @@ impl SchedulerManager {
         let schedule = self.get_schedule(schedule_id)?
             .context("Schedule not found")?;
 
+        log::info!("Manual execution requested for schedule: {} (workbook: {})", schedule_id, schedule.workbook_path);
+
         // Execute the workbook in a background task
         let schedule_id = schedule.id.clone();
         let workbook_path = schedule.workbook_path.clone();
@@ -785,13 +929,37 @@ impl SchedulerManager {
         let db_path = self.db_path.clone();
 
         tokio::spawn(async move {
+            log::info!("Starting manual execution in background task...");
             if let Err(e) = Self::execute_scheduled_workbook(
-                schedule_id,
-                workbook_path,
-                project_root,
-                db_path,
+                schedule_id.clone(),
+                workbook_path.clone(),
+                project_root.clone(),
+                db_path.clone(),
             ).await {
-                eprintln!("Error executing workbook manually: {}", e);
+                log::error!("Error executing workbook manually (schedule: {}): {:#}", schedule_id, e);
+                eprintln!("Error executing workbook manually: {:#}", e);
+
+                // Try to mark run as failed in database
+                let temp_manager = SchedulerManager {
+                    db_path: db_path.clone(),
+                    scheduler: None,
+                    job_map: std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()))
+                };
+                // Find the most recent running run for this schedule and mark it as failed
+                if let Ok(runs) = temp_manager.list_runs(100) {
+                    if let Some(run) = runs.iter().find(|r|
+                        r.schedule_id.as_ref() == Some(&schedule_id) &&
+                        r.status == "running"
+                    ) {
+                        let _ = temp_manager.complete_run(
+                            &run.id,
+                            "failed",
+                            Some(&format!("Execution error: {:#}", e)),
+                            None,
+                            None,
+                        );
+                    }
+                }
             }
         });
 

@@ -66,18 +66,35 @@ Tether allows workbooks to run on automated schedules (cron-style) and tracks ex
 #### Tab 2: Recent Runs
 
 **List View:**
-- Last 30 runs across all workbooks
+- Paginated view of all runs across all workbooks
 - Columns:
+  - Expandable arrow indicator
   - Workbook Name
+  - Project (when viewing all projects)
   - Started At (timestamp)
   - Duration (seconds)
   - Status (Success, Failed, Interrupted)
-  - Actions (View Report)
+  - Cells (succeeded/executed summary)
 
-**Auto-Deletion:**
-- Keeps only last 30 runs
+**Pagination (✅ Implemented Dec 20, 2025):**
+- **Page Size Selector:** Choose 10, 20, 50, or 100 runs per page
+- **Smart Navigation:** Shows first, last, current, and adjacent pages with "..." ellipsis
+- **Previous/Next Buttons:** Navigate between pages (disabled at boundaries)
+- **Run Counter:** Shows "X to Y of Z runs" for current page
+- **Auto-reset:** Pagination resets to page 1 when filters change or page size changes
+- **Preserved State:** Current page persists during 3-second auto-refresh
+
+**Date Range Filtering (✅ Implemented Dec 20, 2025):**
+- **Start Date:** Filter runs starting from a specific date
+- **End Date:** Filter runs up to a specific date (inclusive of entire day)
+- **Clear Button:** Quickly remove date filters and see all runs
+- **Empty State:** Helpful message when no runs match the selected date range
+- **Backend Filtering:** Efficient SQL queries with WHERE clauses on `started_at`
+
+**Auto-Cleanup:**
+- Keeps only last 30 runs per workbook
 - Oldest automatically deleted
-- Per-workbook and global limits
+- Configurable in future versions
 
 **Execution Insights (✅ Implemented Dec 20, 2025):**
 - **Expandable Run Rows:**

@@ -6,6 +6,129 @@ This file tracks major features and improvements as they're completed.
 
 ### December 2025
 
+**Fixed: Tray Menu Behavior (Dec 21, 2025)**
+- **Bug Fix #1**: Tray menu items now work correctly when all windows are closed/hidden
+  - **Root Cause**: Hidden windows are completely removed from Tauri's window HashMap
+    - `get_webview_window("main")` returns `None` for hidden windows
+    - `webview_windows()` iterator shows empty HashMap when all windows hidden
+  - **Solution**: Two-path handling strategy
+    - **Path 1 (Window Exists)**: Show window and emit navigation event
+    - **Path 2 (No Window)**: Create new window with URL parameters
+  - **Window Creation**: Added `create_main_window()` helper (src-tauri/src/lib.rs:1337-1374)
+    - Accepts optional `view` parameter (e.g., "global-schedules", "global-runs")
+    - Builds URL: `index.html?view={view}`
+    - Configures close handler to hide instead of quit
+  - **URL-based Navigation**: App.jsx reads query parameters on mount (lines 30-48)
+    - `?view=` parameter → Navigate to specific view
+    - `?project=` parameter → Load specific project
+  - **React Component Keys**: Force remounting when switching views (App.jsx:727, 752)
+    - `key="global-schedules"` for schedules view
+    - `key="global-runs"` for runs view
+    - Prevents data from getting stale when switching between similar views
+  - **Fixed Actions**:
+    - Recent project menu items → Opens project in new window if needed
+    - Create/Open Project menu items → Shows appropriate view
+    - View Runs/Scheduler menu items → Creates window or navigates existing
+    - Install MCP menu item → Shows placeholder
+- **Bug Fix #2**: Opening tray menu no longer resets window to Action Window
+  - **Root Cause**: Tray icon click handler was triggering on menu open (macOS behavior)
+  - **Solution**: Removed tray icon click handler entirely (src-tauri/src/lib.rs:1295-1300)
+    - On macOS, clicking tray icon opens menu (no separate click action needed)
+    - All functionality accessible through menu items
+    - Menu can be browsed without affecting window state
+    - Only selecting menu items triggers actions
+  - **Result**: Standard macOS tray menu behavior - browse freely, act on selection
+- **Implementation Files**:
+  - src-tauri/src/lib.rs:1295-1458 (window management helpers, tray menu handlers)
+  - src/App.jsx:30-48 (URL parameter parsing), 169-212 (tray event handlers), 727, 752 (React keys)
+- **Result**: Full tray functionality with correct window lifecycle management
+
+**Action Window - Central Launcher and Entry Point (Dec 20, 2025)**
+- **New Entry Point**: Action Window now serves as the main entry point to Tether
+  - Clean, centered launcher UI with Tether branding
+  - Appears on app startup when no project is loaded
+  - Replaces the previous "Welcome" screen with richer functionality
+- **Recent Projects**: Shows 3 most recently opened projects
+  - Click to open a project (or focus if already open)
+  - Displays project name and path
+  - Empty state when no recent projects exist
+- **Quick Actions**: Fast access to common operations
+  - Create Project - Opens project creation flow
+  - Open Project - Opens native folder picker to select existing project
+  - **View All Runs** - Opens global run history across all projects ✅ IMPLEMENTED
+  - **View All Schedules** - Opens global scheduler view across all projects ✅ IMPLEMENTED
+  - Install MCP - Placeholder for MCP management UI (coming soon)
+- **Global Views**: Fully functional cross-project views
+  - View All Schedules shows all scheduled workbooks from all projects
+  - View All Runs shows execution history from all projects
+  - Both views reuse ScheduleTab component with enhanced global mode support
+  - Tray menu items now navigate to these views instead of showing placeholders
+- **Integrated with Tray**: Works seamlessly with system tray menu
+  - Tray menu items navigate through the Action Window
+  - Recent projects list shared between tray and Action Window
+  - Create/Open project actions accessible from both
+  - **FIXED:** Tray events now properly received when window is hidden
+- **Clean Design**: Follows Tether style guide
+  - Grayscale palette with blue accents
+  - Minimal, professional aesthetic
+  - Smooth transitions and hover states
+  - Proper loading and empty states
+- **Backend**: New `get_recent_projects` Tauri command
+  - Returns recent projects from ~/.tether/recent_projects.json
+  - Integrated with existing recent_projects.rs module
+  - Backend: `src-tauri/src/lib.rs` - Added get_recent_projects command (line 273)
+  - Frontend: `src/components/ActionWindow.jsx` - New launcher component
+  - Frontend: `src/App.jsx` - Integrated Action Window routing
+
+**Pagination and Filtering for Recent Runs (Dec 20, 2025)**
+- **Pagination Controls**: Added full pagination support for the Recent Runs tab
+  - Page size selector: 10, 20, 50, or 100 runs per page
+  - Smart page navigation showing first, last, current, and adjacent pages
+  - Shows "X to Y of Z runs" counter
+  - Previous/Next buttons with disabled state on boundaries
+  - Automatically resets to page 1 when filtering or changing page size
+- **Date Range Filtering**: Filter runs by start and end date
+  - Start date and end date inputs with native date pickers
+  - "Clear" button to reset date filters
+  - Empty state message updates based on filter status
+  - Filters reset pagination to page 1 for better UX
+- **Backend Pagination**: New database queries with efficient pagination
+  - `list_runs_paginated`: Returns runs with LIMIT and OFFSET
+  - `count_runs`: Returns total count for pagination calculation
+  - Optional start_time and end_time filtering in both queries
+  - Backward compatible - old `list_runs` still works
+- **Auto-refresh Compatible**: Pagination state preserved during 3-second auto-refresh
+  - Backend: `src-tauri/src/scheduler.rs` - Added pagination queries, date filtering
+  - Backend: `src-tauri/src/lib.rs` - New Tauri commands: `list_runs_paginated`, `count_runs`
+  - Frontend: `src/components/ScheduleTab.jsx` - Pagination UI, date filters, state management
+
+**Fixed "Run Now" Scheduler Functionality (Dec 20, 2025)**
+- **Database Migration**: Added automatic schema migration for the `metadata` column in runs table
+  - Fixed "no such column: metadata" error that prevented "Run Now" from working
+  - Database automatically migrates on app startup using `pragma_table_info`
+  - No manual intervention required - existing databases are upgraded automatically
+- **Enhanced Logging**: Added comprehensive logging throughout scheduler execution
+  - Logs now show each step: venv setup, engine start, cell execution, cleanup
+  - Better error messages with full context for debugging
+  - Failed runs are now properly marked as "failed" in the database
+- **Improved Error Handling**: Background execution errors are now caught and recorded
+  - Run status correctly updates even when execution fails
+  - Error messages are stored in the database for viewing in Recent Runs
+  - Backend: `src-tauri/src/scheduler.rs` - Added migration logic, logging, error handling
+
+**Enhanced Tray Menu with Recent Projects & Navigation (Dec 20, 2025)**
+- **Rich Tray Menu**: Expanded system tray with quick access to projects and features
+  - Recent Projects section (max 3) - click to open or focus existing window
+  - "Create Project..." and "Open Project..." menu items
+  - "View Runs" and "View Scheduler" navigation items
+  - "Install MCP..." placeholder for future MCP management
+  - Automatic recent projects tracking in `~/.tether/recent_projects.json`
+  - Backend: `src-tauri/src/recent_projects.rs` - Recent projects storage and retrieval
+  - Backend: `src-tauri/src/lib.rs` - Dynamic tray menu construction, event emission
+  - Frontend: `src/App.jsx` - Tray event listeners, window management, navigation
+  - All tray events show/focus window if hidden, navigate appropriately
+  - Documentation: `features/tray/docs.md` - Full design and implementation guide
+
 **Execution Insights for Scheduler (Dec 20, 2025)**
 - **Enhanced Run History**: Recent Runs now shows detailed execution metadata for each workbook run
   - Expandable run rows with click-to-expand/collapse functionality
