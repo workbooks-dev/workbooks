@@ -2,9 +2,12 @@
 
 ## High Priority
 
+- [ ] Allow users to select model in app settings, default to sonnet "claude-sonnet-4-5-20250929"
+- [ ] Can Claude Agent SDK have Planning be Opus 4.5 (claude-opus-4-5-20251101) and coding be "claude-sonnet-4-5-20250929"
 - [ ] Test with actual Claude Agent SDK (requires valid API key)
 - [ ] Add session title auto-generation from first message
 - [ ] Implement session search/filter functionality
+- [ ] Add Markdown rendering for chat ui
 
 ## Medium Priority
 
