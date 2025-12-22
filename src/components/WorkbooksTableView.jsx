@@ -77,36 +77,16 @@ export function WorkbooksTableView({ workbooks, onClose, onOpenWorkbook }) {
                     <span className="text-gray-400">No</span>
                   </td>
                   <td className="px-6 py-4 whitespace-nowrap text-sm">
-                    <div className="flex items-center gap-2">
-                      <button
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          onOpenWorkbook(workbook);
-                          onClose();
-                        }}
-                        className="px-3 py-1 text-xs font-medium text-blue-600 hover:bg-blue-50 rounded transition-colors"
-                      >
-                        Open
-                      </button>
-                      <button
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          alert('Run workbook - Coming Soon');
-                        }}
-                        className="px-3 py-1 text-xs font-medium text-green-600 hover:bg-green-50 rounded transition-colors"
-                      >
-                        Run
-                      </button>
-                      <button
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          alert('Schedule workbook - Coming Soon');
-                        }}
-                        className="px-3 py-1 text-xs font-medium text-gray-600 hover:bg-gray-50 rounded transition-colors"
-                      >
-                        Schedule
-                      </button>
-                    </div>
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onOpenWorkbook(workbook);
+                        onClose();
+                      }}
+                      className="px-3 py-1 text-xs font-medium text-blue-600 hover:bg-blue-50 rounded transition-colors"
+                    >
+                      Open
+                    </button>
                   </td>
                 </tr>
               ))}

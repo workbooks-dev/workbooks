@@ -95,7 +95,7 @@ async fn main() {
         }
         None => {
             // No subcommand provided, show help
-            eprintln!("tether: Durable workbook orchestration for local-first data pipelines");
+            eprintln!("tether: Sharpen your automations for local-first notebooks as automations");
             eprintln!("\nUsage: tether <COMMAND>\n");
             eprintln!("Commands:");
             eprintln!("  run        Run a workbook and execute all cells");

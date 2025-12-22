@@ -7,6 +7,8 @@ mod secrets;
 pub mod scheduler;
 pub mod cli_install;
 mod recent_projects;
+pub mod app_credentials;
+pub mod global_config;
 
 #[cfg(target_os = "macos")]
 mod local_auth_macos;
@@ -1307,6 +1309,13 @@ pub fn run() {
 
             tray_items.push(Box::new(tauri::menu::PredefinedMenuItem::separator(app)?));
 
+            // Settings
+            let settings_item = MenuItemBuilder::with_id("tray_settings", "Settings...")
+                .build(app)?;
+            tray_items.push(Box::new(settings_item));
+
+            tray_items.push(Box::new(tauri::menu::PredefinedMenuItem::separator(app)?));
+
             // Status and quit
             let scheduler_status_item = MenuItemBuilder::with_id("tray_scheduler_status", "Scheduler: Running")
                 .enabled(false)
@@ -1517,6 +1526,17 @@ pub fn run() {
                                 });
                             }
                         }
+                        "tray_settings" => {
+                            if !show_main_window() {
+                                create_main_window(Some("settings"));
+                            } else {
+                                let app_handle = app.clone();
+                                tauri::async_runtime::spawn(async move {
+                                    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+                                    let _ = app_handle.emit("tray-settings", ());
+                                });
+                            }
+                        }
                         "tray_quit" => {
                             // Force quit the application
                             std::process::exit(0);
@@ -1562,10 +1582,17 @@ pub fn run() {
             let about_item = MenuItemBuilder::with_id("about", "About tether")
                 .build(app)?;
 
+            // Create "Settings" menu item for app menu
+            let settings_item = MenuItemBuilder::with_id("menu_settings", "Settings...")
+                .accelerator("Cmd+,")
+                .build(app)?;
+
             // Build App menu (appears as "tether" in menu bar)
             // On macOS, this MUST be the first submenu
             let app_menu = SubmenuBuilder::new(app, "tether")
                 .item(&about_item)
+                .separator()
+                .item(&settings_item)
                 .separator()
                 .quit()
                 .build()?;
@@ -1635,6 +1662,11 @@ pub fn run() {
                 match event.id().as_ref() {
                     "about" => {
                         if let Err(e) = app_handle.emit("menu:about", ()) {
+                            log::error!("Failed to emit menu event: {}", e);
+                        }
+                    }
+                    "menu_settings" => {
+                        if let Err(e) = app_handle.emit("menu:settings", ()) {
                             log::error!("Failed to emit menu event: {}", e);
                         }
                     }
@@ -1752,6 +1784,17 @@ pub fn run() {
             cli_install::get_path_instructions,
             cli_install::get_bundled_cli_version,
             cli_install::get_installed_cli_version,
+            app_credentials::save_anthropic_api_key,
+            app_credentials::load_anthropic_api_key,
+            app_credentials::remove_anthropic_api_key,
+            app_credentials::check_anthropic_api_key,
+            global_config::get_global_config,
+            global_config::update_global_config,
+            global_config::set_ai_features_enabled,
+            global_config::set_default_project_path,
+            global_config::add_project_to_recent,
+            global_config::get_default_project,
+            global_config::get_global_recent_projects,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

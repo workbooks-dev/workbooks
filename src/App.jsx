@@ -13,6 +13,7 @@ import { WorkbookViewer } from "./components/WorkbookViewer";
 import { FileViewer } from "./components/FileViewer";
 import { SecretsManager } from "./components/SecretsManager";
 import { ScheduleTab } from "./components/ScheduleTab";
+import { AppSettings } from "./components/AppSettings";
 import { TabBar } from "./components/TabBar";
 import { SaveConfirmDialog } from "./components/SaveConfirmDialog";
 import "./App.css";
@@ -53,6 +54,7 @@ function App() {
     let unlistenShowLogs;
     let unlistenOpenLogsFolder;
     let unlistenTakeScreenshot;
+    let unlistenSettings;
 
     const setupMenuListeners = async () => {
       // Open new window
@@ -131,6 +133,19 @@ function App() {
           alert(`Failed to take screenshot: ${error.message || error}`);
         }
       });
+
+      // Settings
+      unlistenSettings = await listen("menu:settings", async () => {
+        console.log("Settings menu clicked");
+        // Navigate to settings (works with or without a project)
+        if (currentProject) {
+          // If in project view, open settings as a tab
+          handleOpenSettings();
+        } else {
+          // If not in project view, navigate to settings view
+          setView("settings");
+        }
+      });
     };
 
     setupMenuListeners();
@@ -140,6 +155,7 @@ function App() {
       if (unlistenShowLogs) unlistenShowLogs();
       if (unlistenOpenLogsFolder) unlistenOpenLogsFolder();
       if (unlistenTakeScreenshot) unlistenTakeScreenshot();
+      if (unlistenSettings) unlistenSettings();
     };
   }, []);
 
@@ -150,7 +166,7 @@ function App() {
     let unlistenOpenProjectDialog;
     let unlistenViewRuns;
     let unlistenViewScheduler;
-    let unlistenInstallMcp;
+    let unlistenSettings;
 
     const setupTrayListeners = async () => {
       console.log("Setting up tray listeners...");
@@ -221,10 +237,14 @@ function App() {
         setView("global-schedules");
       });
 
-      // Install MCP
-      unlistenInstallMcp = await listen("tray-install-mcp", async () => {
-        console.log("Received tray-install-mcp event");
-        alert("MCP installation UI coming soon!");
+      // Settings
+      unlistenSettings = await listen("tray-settings", async () => {
+        console.log("Received tray-settings event");
+        // Clear project state and navigate to settings
+        setCurrentProject(null);
+        setTabs([]);
+        setActiveTabId(null);
+        setView("settings");
       });
 
       console.log("Tray listeners set up successfully");
@@ -239,7 +259,7 @@ function App() {
       if (unlistenOpenProjectDialog) unlistenOpenProjectDialog();
       if (unlistenViewRuns) unlistenViewRuns();
       if (unlistenViewScheduler) unlistenViewScheduler();
-      if (unlistenInstallMcp) unlistenInstallMcp();
+      if (unlistenSettings) unlistenSettings();
     };
   }, []); // Remove dependencies so listeners stay active
 
@@ -561,6 +581,27 @@ function App() {
     setActiveTabId(newTab.id);
   }
 
+  function handleOpenSettings() {
+    // Check if settings tab is already open
+    const existingTab = tabs.find((tab) => tab.type === 'settings');
+    if (existingTab) {
+      setActiveTabId(existingTab.id);
+      return;
+    }
+
+    // Create new settings tab
+    const newTab = {
+      id: Date.now().toString(),
+      path: 'settings',
+      type: 'settings',
+      hasUnsavedChanges: false,
+      name: 'Settings',
+    };
+
+    setTabs([...tabs, newTab]);
+    setActiveTabId(newTab.id);
+  }
+
   function handleTabSelect(tabId) {
     setActiveTabId(tabId);
   }
@@ -665,6 +706,9 @@ function App() {
       case "view-all-schedules":
         setView("global-schedules");
         break;
+      case "open-settings":
+        setView("settings");
+        break;
       default:
         console.warn("Unknown action:", action);
     }
@@ -686,7 +730,19 @@ function App() {
   if (view === "welcome") {
     return (
       <div className="app welcome-view">
-        <Welcome onProjectOpened={handleProjectOpened} />
+        <Welcome
+          onProjectOpened={handleProjectOpened}
+          onOpenSettings={() => setView("settings")}
+        />
+      </div>
+    );
+  }
+
+  // Settings view (accessible without a project)
+  if (view === "settings") {
+    return (
+      <div className="app settings-view h-screen">
+        <AppSettings onClose={() => setView("action")} />
       </div>
     );
   }
@@ -780,6 +836,7 @@ function App() {
             projectName={currentProject.name}
             onOpenFile={handleOpenFile}
             onFileDeleted={handleFileDeleted}
+            onOpenSettings={handleOpenSettings}
             activeFilePath={activeTab?.path}
           />
         </aside>
@@ -810,6 +867,11 @@ function App() {
                 <ScheduleTab
                   key={activeTab.id}
                   projectRoot={currentProject.root}
+                  onClose={() => handleTabClose(activeTab.id)}
+                />
+              ) : activeTab.type === "settings" ? (
+                <AppSettings
+                  key={activeTab.id}
                   onClose={() => handleTabClose(activeTab.id)}
                 />
               ) : (

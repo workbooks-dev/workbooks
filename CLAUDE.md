@@ -1,6 +1,8 @@
 # Tether
 
-Durable workbook orchestration for local-first data pipelines.
+*Sharpen your automations*
+
+Notebooks as automations. Built for speed, security, privacy, open source, and desktop-first. Use our AI Agent to debug and build.
 
 ## Feature Documentation
 
