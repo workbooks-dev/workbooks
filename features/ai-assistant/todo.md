@@ -2,6 +2,8 @@
 
 ## High Priority
 
+- [ ] Ensure each chat stays in the context window
+- [ ] Project-level context for Claude?
 - [ ] Allow users to select model in app settings, default to sonnet "claude-sonnet-4-5-20250929"
 - [ ] Can Claude Agent SDK have Planning be Opus 4.5 (claude-opus-4-5-20251101) and coding be "claude-sonnet-4-5-20250929"
 - [ ] Test with actual Claude Agent SDK (requires valid API key)

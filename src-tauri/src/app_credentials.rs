@@ -352,7 +352,7 @@ pub async fn verify_anthropic_api_key(key: String) -> Result<(), String> {
     let client = reqwest::Client::new();
 
     let request_body = MessageRequest {
-        model: "claude-3-5-haiku-20241022".to_string(),
+        model: "claude-sonnet-4-5-20250929".to_string(),
         max_tokens: 10,
         messages: vec![Message {
             role: "user".to_string(),
