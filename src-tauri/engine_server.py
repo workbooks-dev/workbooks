@@ -8,7 +8,7 @@ import os
 import asyncio
 import logging
 from contextlib import asynccontextmanager
-from typing import Dict, List, Any
+from typing import Dict, List, Any, Optional
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
@@ -1023,6 +1023,115 @@ async def complete_code(request: CompleteRequest):
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+# ============================================================================
+# AGENT CHAT ENDPOINTS
+# ============================================================================
+
+class AgentChatRequest(BaseModel):
+    """Request to send a message to the AI agent."""
+    session_id: str
+    message: str
+    api_key: str
+    project_root: Optional[str] = None
+
+
+class AgentMessage(BaseModel):
+    """A single message in the chat."""
+    role: str  # "user" or "assistant"
+    content: str
+    timestamp: float
+
+
+@app.post("/agent/chat")
+async def agent_chat(request: AgentChatRequest):
+    """
+    Stream responses from Claude Agent SDK.
+    Uses Server-Sent Events to stream tokens as they arrive.
+    """
+    async def generate():
+        """Generate SSE events as agent responds."""
+        try:
+            from claude_agent_sdk import query, ClaudeAgentOptions
+
+            # Set API key in environment
+            os.environ["ANTHROPIC_API_KEY"] = request.api_key
+
+            # Prepare options
+            options = ClaudeAgentOptions(
+                allowed_tools=["Read", "Bash", "Glob", "Grep", "Edit", "Write"],
+            )
+
+            # If project_root is provided, set working directory context
+            if request.project_root:
+                # Add project context to the prompt
+                context_prompt = f"""You are helping with a Tether project at: {request.project_root}
+
+User request: {request.message}"""
+            else:
+                context_prompt = request.message
+
+            # Send start event
+            yield f"data: {json.dumps({'type': 'start'})}\n\n"
+
+            # Stream agent responses
+            full_response = ""
+            async for message in query(prompt=context_prompt, options=options):
+                # The SDK yields message chunks
+                logger.info(f"Agent message type: {type(message)}, value: {message}")
+                content = None
+
+                if hasattr(message, 'content'):
+                    content = message.content
+                elif isinstance(message, dict) and 'content' in message:
+                    content = message['content']
+                elif isinstance(message, str):
+                    content = message
+                else:
+                    logger.info(f"Skipping message with no content: {message}")
+                    continue
+
+                # Handle content blocks (list) vs plain text (str)
+                if isinstance(content, list):
+                    # Extract text from content blocks
+                    text_content = ""
+                    for block in content:
+                        if isinstance(block, dict) and 'text' in block:
+                            text_content += block['text']
+                        elif isinstance(block, dict) and 'type' in block and block['type'] == 'text':
+                            text_content += block.get('text', '')
+                        elif hasattr(block, 'text'):
+                            text_content += block.text
+                    content = text_content
+                elif not isinstance(content, str):
+                    # Skip non-string, non-list content
+                    logger.info(f"Skipping non-string content: {type(content)}")
+                    continue
+
+                # Only send if we have content
+                if content:
+                    full_response += content
+
+                    # Send chunk event
+                    event = {
+                        "type": "chunk",
+                        "content": content
+                    }
+                    yield f"data: {json.dumps(event)}\n\n"
+
+            # Send completion event
+            yield f"data: {json.dumps({'type': 'complete', 'full_response': full_response})}\n\n"
+
+        except Exception as e:
+            logger.error(f"Agent chat error: {e}")
+            error_event = {
+                "type": "error",
+                "message": str(e)
+            }
+            yield f"data: {json.dumps(error_event)}\n\n"
+
+    return StreamingResponse(generate(), media_type="text/event-stream")
 
 
 if __name__ == "__main__":

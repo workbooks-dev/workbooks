@@ -5,6 +5,9 @@
 - [ ] File list should stay current with the folder (it does not)
 - [ ] Files need to able to be dragged into folders and subfolders (drag and drop to move files)
 - [ ] Renaming files or folders should happen inline (just like vscode)
+- [ ] Notebooks in the Workbooks section should be able to be renamed.
+- [ ] when a file is open, the title should be editable in the viewer. 
+- [ ] If a filename is changed, the scheduler should be auto updated
 - [x] + New Folder needs to retain focus (the input loses focus when the button is pressed)
 - [x] Breadcrumb navigation in FileViewer (like VS Code)
 - [x] control+click (or right click) should have a menu like vscode and styles matching the other menu in the main viewport with

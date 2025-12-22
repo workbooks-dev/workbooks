@@ -1259,16 +1259,22 @@ export function WorkbookViewer({ workbookPath, projectRoot, autosaveEnabled = tr
     // Use functional update to prevent race conditions
     setNotebook(prevNotebook => {
       const newCells = [...prevNotebook.cells];
-      newCells[index] = {
-        ...newCells[index],
-        source: newContent.split("\n").map((line, i, arr) =>
-          i < arr.length - 1 ? line + "\n" : line
-        ),
-      };
-      return { ...prevNotebook, cells: newCells };
-    });
+      const oldSource = newCells[index].source.join("");
 
-    setHasUnsavedChanges(true);
+      // Only mark as dirty if content actually changed
+      if (oldSource !== newContent) {
+        newCells[index] = {
+          ...newCells[index],
+          source: newContent.split("\n").map((line, i, arr) =>
+            i < arr.length - 1 ? line + "\n" : line
+          ),
+        };
+        setHasUnsavedChanges(true);
+        return { ...prevNotebook, cells: newCells };
+      }
+
+      return prevNotebook;
+    });
   };
 
   const deleteCell = (index) => {

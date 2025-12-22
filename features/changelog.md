@@ -6,6 +6,49 @@ This file tracks major features and improvements as they're completed.
 
 ### December 2025
 
+**AI Assistant: Request Cancellation (Dec 22, 2025)**
+- **Feature**: Added ability to cancel long-running AI agent requests
+  - **Backend**: Implemented cancellation channel using `tokio::oneshot` in agent.rs
+  - **State Tracking**: Added `active_agent_requests` HashMap to AppState for managing cancellation handles
+  - **Race Condition**: Used `tokio::select!` to race between HTTP request and cancellation signal
+  - **UI**: Added red "Cancel" button that appears next to loading indicator during active requests
+  - **Cleanup**: Properly removes active request tracking on completion, error, or cancellation
+  - **User Feedback**: Shows "Request cancelled by user" message when cancelled
+- **Implementation Files**:
+  - src-tauri/src/agent.rs:18,47-54,66-75,94-160,184-199 (cancellation logic)
+  - src-tauri/src/lib.rs:36,1717,1810 (AppState and command registration)
+  - src/components/AiSidebar.jsx:145-165,392-398 (cancel button and handler)
+
+**AI Assistant Fixes (Dec 22, 2025)**
+- **Fixed**: Agent communication errors resolved
+  - Fixed hardcoded port 8765 → Now uses dynamic engine server port (src-tauri/src/agent.rs:16,40,99-102)
+  - Fixed type error when concatenating list to string → Now handles content blocks properly (src-tauri/engine_server.py:1094-1121)
+  - Added engine server startup check in AiSidebar.jsx before sending messages (line 88)
+  - Improved error handling with 300s timeout and detailed logging
+  - Added comprehensive debug logging for stream events and chunk processing
+
+**AI Assistant Integration (Dec 21, 2025)**
+- **Feature**: Claude Agent SDK integration for inline chat assistance
+  - **Backend**: Python SDK installed in engine environment via UV
+  - **Endpoint**: `/agent/chat` in engine_server.py with SSE streaming
+  - **Storage**: SQLite database at `~/.tether/chat_sessions.db` for chat history
+  - **UI Component**: AiSidebar.jsx with session management and real-time chat
+  - **Integration**: Always-visible sidebar that prompts to enable AI when disabled
+  - **Tauri Commands**:
+    - `create_chat_session`, `list_chat_sessions`, `get_chat_session`
+    - `delete_chat_session`, `add_message_to_session`
+    - `send_agent_message` - Sends to agent and streams response
+  - **Toggle UI**: Floating action button in bottom-right with status indicator
+  - **Architecture**: Reuses existing engine_server.py, no additional processes needed
+  - **Security**: API key stored in system keychain, never logged
+- **Implementation Files**:
+  - src-tauri/engine_server.py:1028-1111 (agent endpoint)
+  - src-tauri/src/chat_sessions.rs (SQLite persistence)
+  - src-tauri/src/agent.rs (HTTP agent communication)
+  - src/components/AiSidebar.jsx (chat UI)
+  - src/App.jsx:12,31-32,57-64,909-941 (integration)
+- **Documentation**: features/ai-assistant/ (docs.md, todo.md, done.md)
+
 **Fixed: Tray Menu Behavior (Dec 21, 2025)**
 - **Bug Fix #1**: Tray menu items now work correctly when all windows are closed/hidden
   - **Root Cause**: Hidden windows are completely removed from Tauri's window HashMap

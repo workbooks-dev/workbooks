@@ -6,6 +6,7 @@
   - [ ] Show next scheduled run in UI (1 upcoming event only)
   - [ ] "Cancel Next Run" button to skip the upcoming execution
   - [ ] Re-calculates next run after cancellation
+- [ ] filename changes? We need a way to "reactivate" a scheduled notebook
 
 ## Medium Priority
 

@@ -5,10 +5,12 @@ import { listen } from "@tauri-apps/api/event";
 import { ask } from "@tauri-apps/plugin-dialog";
 import { getWindowScreenshot, getScreenshotableWindows } from "tauri-plugin-screenshots-api";
 import { writeImage } from "@tauri-apps/plugin-clipboard-manager";
+import { TbLayoutSidebarRight, TbLayoutSidebarRightFilled } from "react-icons/tb";
 import { ActionWindow } from "./components/ActionWindow";
 import { Welcome } from "./components/Welcome";
 import { CreateProject } from "./components/CreateProject";
 import { Sidebar } from "./components/Sidebar";
+import { AiSidebar } from "./components/AiSidebar";
 import { WorkbookViewer } from "./components/WorkbookViewer";
 import { FileViewer } from "./components/FileViewer";
 import { SecretsManager } from "./components/SecretsManager";
@@ -27,6 +29,13 @@ function App() {
   const [isDragging, setIsDragging] = useState(false);
   const [showSaveDialog, setShowSaveDialog] = useState(false);
   const [pendingClose, setPendingClose] = useState(null); // 'window' or 'tab'
+  const [aiSidebarOpen, setAiSidebarOpen] = useState(false);
+  const [aiEnabled, setAiEnabled] = useState(false);
+  const [aiSidebarWidth, setAiSidebarWidth] = useState(() => {
+    const saved = localStorage.getItem('tether_ai_sidebar_width');
+    return saved ? parseInt(saved, 10) : 384;
+  });
+  const [isResizingAiSidebar, setIsResizingAiSidebar] = useState(false);
 
   useEffect(() => {
     // Check URL parameters for initial view/project
@@ -46,7 +55,53 @@ function App() {
       // Check for current project
       checkCurrentProject();
     }
+
+    // Load global config to check if AI features are enabled
+    loadAiConfig();
   }, []);
+
+  async function loadAiConfig() {
+    try {
+      const config = await invoke("get_global_config");
+      setAiEnabled(config.ai?.enabled || false);
+    } catch (error) {
+      console.error("Failed to load AI config:", error);
+    }
+  }
+
+  // Persist AI sidebar width to localStorage
+  useEffect(() => {
+    localStorage.setItem('tether_ai_sidebar_width', aiSidebarWidth.toString());
+  }, [aiSidebarWidth]);
+
+  // Handle AI sidebar resizing
+  useEffect(() => {
+    if (!isResizingAiSidebar) return;
+
+    const handleMouseMove = (e) => {
+      const newWidth = window.innerWidth - e.clientX;
+      // Constrain width between 280px and 800px
+      const constrainedWidth = Math.min(Math.max(newWidth, 280), 800);
+      setAiSidebarWidth(constrainedWidth);
+    };
+
+    const handleMouseUp = () => {
+      setIsResizingAiSidebar(false);
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+    };
+
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+
+    window.addEventListener('mousemove', handleMouseMove);
+    window.addEventListener('mouseup', handleMouseUp);
+
+    return () => {
+      window.removeEventListener('mousemove', handleMouseMove);
+      window.removeEventListener('mouseup', handleMouseUp);
+    };
+  }, [isResizingAiSidebar]);
 
   // Listen for menu events from native menu
   useEffect(() => {
@@ -724,7 +779,11 @@ function App() {
   }
 
   if (view === "action") {
-    return <ActionWindow onAction={handleActionWindowAction} />;
+    return (
+      <div className="app">
+        <ActionWindow onAction={handleActionWindowAction} />
+      </div>
+    );
   }
 
   if (view === "welcome") {
@@ -741,7 +800,7 @@ function App() {
   // Settings view (accessible without a project)
   if (view === "settings") {
     return (
-      <div className="app settings-view h-screen">
+      <div className="app settings-view">
         <AppSettings onClose={() => setView("action")} />
       </div>
     );
@@ -750,7 +809,7 @@ function App() {
   if (view === "create") {
     return (
       <div className="min-h-screen bg-gradient-to-br from-gray-50 to-gray-100">
-        <div className="fixed top-0 left-0 right-0 bg-white border-b border-gray-200 px-6 py-4 flex items-center justify-between shadow-sm">
+        <div className="fixed top-0 left-0 right-0 bg-white border-b border-gray-200 px-6 py-4 flex items-center justify-between shadow-sm z-10">
           <h1 className="text-xl font-semibold text-gray-900">Tether</h1>
           <button
             onClick={() => setView("action")}
@@ -829,8 +888,13 @@ function App() {
         </div>
       )}
 
-      <div className="flex flex-1 overflow-hidden">
-        <aside className="w-64 border-r border-gray-200 bg-gray-50 overflow-y-auto flex-shrink-0">
+      <div
+        className="grid flex-1 overflow-hidden"
+        style={{
+          gridTemplateColumns: aiSidebarOpen ? `256px 1fr ${aiSidebarWidth}px` : '256px 1fr 0px'
+        }}
+      >
+        <aside className="border-r border-gray-200 bg-gray-50 overflow-y-auto">
           <Sidebar
             projectRoot={currentProject.root}
             projectName={currentProject.name}
@@ -840,13 +904,35 @@ function App() {
             activeFilePath={activeTab?.path}
           />
         </aside>
-        <main className="flex-1 overflow-auto bg-white">
-          <TabBar
-            tabs={tabs}
-            activeTabId={activeTabId}
-            onTabSelect={handleTabSelect}
-            onTabClose={handleTabClose}
-          />
+        <main className="overflow-auto bg-white flex flex-col min-w-0">
+          <div className="flex items-center border-b border-gray-200 bg-white">
+            <div className="flex-1">
+              <TabBar
+                tabs={tabs}
+                activeTabId={activeTabId}
+                onTabSelect={handleTabSelect}
+                onTabClose={handleTabClose}
+              />
+            </div>
+            {/* AI Assistant Toggle */}
+            <button
+              onClick={() => setAiSidebarOpen(!aiSidebarOpen)}
+              className={`px-3 py-2 border-l border-gray-200 hover:bg-gray-50 transition-colors flex items-center gap-2 ${
+                aiSidebarOpen ? 'bg-blue-50 text-blue-600' : 'text-gray-600'
+              }`}
+              title={aiEnabled ? "Toggle AI Assistant" : "AI Assistant (disabled)"}
+            >
+              {aiSidebarOpen ? (
+                <TbLayoutSidebarRightFilled className="w-5 h-5" />
+              ) : (
+                <TbLayoutSidebarRight className="w-5 h-5" />
+              )}
+              <span className="text-xs font-medium">AI</span>
+              {!aiEnabled && (
+                <span className="w-2 h-2 bg-gray-400 rounded-full" title="AI disabled"></span>
+              )}
+            </button>
+          </div>
           <div className="h-full">
             {activeTab ? (
               activeTab.type === "workbook" ? (
@@ -890,6 +976,16 @@ function App() {
             )}
           </div>
         </main>
+        {/* AI Sidebar - integrated into flex layout */}
+        <AiSidebar
+          projectRoot={currentProject.root}
+          isOpen={aiSidebarOpen}
+          onToggle={() => setAiSidebarOpen(!aiSidebarOpen)}
+          aiEnabled={aiEnabled}
+          onOpenSettings={handleOpenSettings}
+          width={aiSidebarWidth}
+          onResizeStart={() => setIsResizingAiSidebar(true)}
+        />
       </div>
 
       {/* Save confirmation dialog */}

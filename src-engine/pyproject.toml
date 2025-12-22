@@ -1,7 +1,7 @@
 [project]
 name = "tether-engine"
 version = "0.1.0"
-description = "Tether engine server dependencies"
+description = "Tether engine server - Jupyter kernel management and AI agent"
 requires-python = ">=3.12"
 dependencies = [
     "fastapi>=0.124.0",
@@ -10,3 +10,10 @@ dependencies = [
     "requests>=2.32.5",
     "claude-agent-sdk>=0.1.18",
 ]
+
+[project.scripts]
+tether-engine = "tether_engine.__main__:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

@@ -9,6 +9,8 @@ pub mod cli_install;
 mod recent_projects;
 pub mod app_credentials;
 pub mod global_config;
+mod chat_sessions;
+mod agent;
 
 #[cfg(target_os = "macos")]
 mod local_auth_macos;
@@ -31,6 +33,7 @@ pub struct AppState {
     pub engine_server: Arc<Mutex<Option<engine_http::EngineServer>>>,
     pub secrets_manager: Arc<Mutex<Option<secrets::SecretsManager>>>,
     pub scheduler_manager: Arc<Mutex<Option<scheduler::SchedulerManager>>>,
+    pub active_agent_requests: agent::ActiveRequests,
 }
 
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
@@ -1711,6 +1714,7 @@ pub fn run() {
             engine_server: Arc::new(Mutex::new(None)),
             secrets_manager: Arc::new(Mutex::new(None)),
             scheduler_manager: Arc::new(Mutex::new(None)),
+            active_agent_requests: Arc::new(Mutex::new(std::collections::HashMap::new())),
         })
         .invoke_handler(tauri::generate_handler![
             greet,
@@ -1788,6 +1792,8 @@ pub fn run() {
             app_credentials::load_anthropic_api_key,
             app_credentials::remove_anthropic_api_key,
             app_credentials::check_anthropic_api_key,
+            app_credentials::get_anthropic_api_key_authenticated,
+            app_credentials::verify_anthropic_api_key,
             global_config::get_global_config,
             global_config::update_global_config,
             global_config::set_ai_features_enabled,
@@ -1795,6 +1801,13 @@ pub fn run() {
             global_config::add_project_to_recent,
             global_config::get_default_project,
             global_config::get_global_recent_projects,
+            chat_sessions::create_chat_session,
+            chat_sessions::list_chat_sessions,
+            chat_sessions::get_chat_session,
+            chat_sessions::delete_chat_session,
+            chat_sessions::add_message_to_session,
+            agent::send_agent_message,
+            agent::cancel_agent_request,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
