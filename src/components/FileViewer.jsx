@@ -3,12 +3,13 @@ import { invoke } from "@tauri-apps/api/core";
 import Editor from "@monaco-editor/react";
 import { marked } from "marked";
 
-export function FileViewer({ filePath, projectRoot, onClose, onUnsavedChangesUpdate }) {
+export function FileViewer({ filePath, projectRoot, isDeleted, onClose, onUnsavedChangesUpdate, onFileRestored }) {
   const [content, setContent] = useState("");
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
   const [isEditing, setIsEditing] = useState(false);
+  const [fileNotFound, setFileNotFound] = useState(false);
   const [imageZoom, setImageZoom] = useState(100);
   const [imageDataUrl, setImageDataUrl] = useState("");
   const [imageDimensions, setImageDimensions] = useState({ width: 0, height: 0 });
@@ -149,7 +150,13 @@ export function FileViewer({ filePath, projectRoot, onClose, onUnsavedChangesUpd
       }
     } catch (err) {
       console.error("Failed to load file:", err);
-      setError(err.toString());
+      // Check if it's a "file not found" error
+      if (err.toString().includes("No such file") || err.toString().includes("not found") || isDeleted) {
+        setFileNotFound(true);
+        // Keep content in memory so user can re-save
+      } else {
+        setError(err.toString());
+      }
     } finally {
       setLoading(false);
     }
@@ -164,6 +171,16 @@ export function FileViewer({ filePath, projectRoot, onClose, onUnsavedChangesUpd
         content: content,
       });
       setHasUnsavedChanges(false);
+
+      // If file was deleted/not found, notify parent and refresh
+      if (fileNotFound || isDeleted) {
+        setFileNotFound(false);
+        if (onFileRestored) {
+          onFileRestored();
+        }
+        window.dispatchEvent(new CustomEvent("tether:files-changed"));
+      }
+
       console.log("File saved successfully");
     } catch (err) {
       console.error("Failed to save file:", err);
@@ -503,6 +520,26 @@ export function FileViewer({ filePath, projectRoot, onClose, onUnsavedChangesUpd
 
   return (
     <div className="flex flex-col h-full">
+      {/* Deleted file banner */}
+      {(fileNotFound || isDeleted) && (
+        <div className="bg-red-50 border-b border-red-200 px-4 py-3 flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <svg className="w-5 h-5 text-red-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+            </svg>
+            <span className="text-sm font-medium text-red-900">
+              This file has been deleted or moved. You can still save it to restore it.
+            </span>
+          </div>
+          <button
+            onClick={saveFile}
+            className="px-3 py-1.5 text-sm font-medium text-white bg-red-600 hover:bg-red-700 rounded transition-colors"
+          >
+            Save to Restore
+          </button>
+        </div>
+      )}
+
       {/* Header for images is built into the viewer */}
       {!isImage && (
         <div className="border-b border-gray-200 bg-white px-4 py-3 flex items-center justify-between flex-shrink-0">

@@ -6,6 +6,39 @@ This file tracks major features and improvements as they're completed.
 
 ### December 2025
 
+**File System: Auto-Sync, Inline Renaming & Tab Lifecycle (Dec 22, 2025)**
+- **Feature**: File list now stays current with external changes
+  - **Backend**: Implemented file system watching using `notify` crate (src-tauri/src/watcher.rs)
+  - **Debouncing**: 500ms debounce prevents event spam during rapid changes
+  - **Filtering**: Automatically ignores .git, .tether, node_modules, .venv, __pycache__, etc.
+  - **Event Architecture**: Emits 'file-system-changed' events to frontend via Tauri
+  - **Auto-Start**: File watcher automatically starts when project opens (src-tauri/src/lib.rs:204-230,256-275)
+  - **Frontend Integration**: Sidebar listens for file system events and auto-refreshes (src/components/Sidebar.jsx:237-258)
+- **Feature**: VS Code-style inline renaming
+  - **UI**: Right-click → Rename shows inline input field directly in tree
+  - **Smart Selection**: Auto-selects filename without extension for quick editing
+  - **Keyboard**: Enter confirms, Escape cancels, click-away cancels
+  - **Universal**: Works in file tree, nested folders, and search results
+  - **Visual**: Blue border highlight for active rename input
+- **Feature**: Tab filename propagation
+  - **Auto-Update**: Tab titles automatically update when files are renamed
+  - **Path Tracking**: Tab paths update to reflect new location
+  - **No Refresh Needed**: Changes propagate immediately via callbacks
+- **Feature**: Deleted file persistence in tabs
+  - **Keep Tabs Open**: Deleted files stay open in tabs (don't auto-close)
+  - **Visual Indicators**: Red tab background, "(deleted)" suffix, warning banner
+  - **Content Preservation**: File content remains in memory, editable
+  - **One-Click Restore**: "Save to Restore" button recreates the file
+  - **Graceful Recovery**: Tab returns to normal state after restoration
+- **Implementation Files**:
+  - src-tauri/Cargo.toml (added notify and notify-debouncer-mini dependencies)
+  - src-tauri/src/watcher.rs (new file - file watching implementation)
+  - src-tauri/src/lib.rs:14,204-230,256-275,686-712 (watcher integration, file lifecycle)
+  - src/components/Sidebar.jsx:43-90,162-197,209-221,229,243,477-479,561-595,881-912 (inline renaming, rename propagation)
+  - src/App.jsx:686-712,912,980-992 (tab lifecycle management)
+  - src/components/TabBar.jsx:19-32 (deleted file visual indicators)
+  - src/components/FileViewer.jsx:6,12,151-189,513-531 (deleted file handling, restore functionality)
+
 **AI Assistant: Request Cancellation (Dec 22, 2025)**
 - **Feature**: Added ability to cancel long-running AI agent requests
   - **Backend**: Implemented cancellation channel using `tokio::oneshot` in agent.rs

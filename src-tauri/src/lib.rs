@@ -11,6 +11,7 @@ pub mod app_credentials;
 pub mod global_config;
 mod chat_sessions;
 mod agent;
+mod watcher;
 
 #[cfg(target_os = "macos")]
 mod local_auth_macos;
@@ -200,7 +201,7 @@ async fn create_project(project_path: String, project_name: String, state: State
 }
 
 #[tauri::command]
-async fn open_folder(folder_path: String, state: State<'_, AppState>) -> Result<ProjectInfo, String> {
+async fn open_folder(folder_path: String, state: State<'_, AppState>, app_handle: tauri::AppHandle) -> Result<ProjectInfo, String> {
     let path = PathBuf::from(&folder_path);
 
     let project = project::open_folder(&path)
@@ -218,6 +219,13 @@ async fn open_folder(folder_path: String, state: State<'_, AppState>) -> Result<
     // Set as current project
     let mut current = state.current_project.lock().await;
     *current = Some(project);
+
+    // Start file watcher for this project
+    let project_root = path.clone();
+    if let Err(e) = watcher::start_watching(app_handle.clone(), project_root) {
+        log::warn!("Failed to start file watcher: {}", e);
+        // Don't fail the command if watcher fails - it's not critical
+    }
 
     Ok(project_info)
 }
@@ -245,14 +253,24 @@ async fn load_project(project_path: String, state: State<'_, AppState>) -> Resul
 }
 
 #[tauri::command]
-async fn get_current_project(state: State<'_, AppState>) -> Result<Option<ProjectInfo>, String> {
+async fn get_current_project(state: State<'_, AppState>, app_handle: tauri::AppHandle) -> Result<Option<ProjectInfo>, String> {
     let current = state.current_project.lock().await;
 
     if let Some(project) = current.as_ref() {
-        Ok(Some(ProjectInfo {
+        let project_info = ProjectInfo {
             name: project.name.clone(),
             root: project.root.to_string_lossy().to_string(),
-        }))
+        };
+
+        // Start file watcher if not already started
+        let project_root = project.root.clone();
+        drop(current); // Release lock before starting watcher
+
+        if let Err(e) = watcher::start_watching(app_handle.clone(), project_root) {
+            log::warn!("Failed to start file watcher: {}", e);
+        }
+
+        Ok(Some(project_info))
     } else {
         Ok(None)
     }

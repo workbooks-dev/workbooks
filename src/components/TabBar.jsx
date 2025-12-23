@@ -16,12 +16,19 @@ export function TabBar({ tabs, activeTabId, onTabSelect, onTabClose }) {
           <div
             key={tab.id}
             className={`flex items-center gap-1.5 px-3 h-9 border-r border-gray-200 cursor-pointer min-w-[120px] max-w-[200px] transition-colors ${
-              tab.id === activeTabId ? "bg-white" : "bg-gray-100 hover:bg-gray-200"
+              tab.isDeleted
+                ? "bg-red-50 hover:bg-red-100"
+                : tab.id === activeTabId
+                ? "bg-white"
+                : "bg-gray-100 hover:bg-gray-200"
             }`}
             onClick={() => onTabSelect(tab.id)}
           >
-            <span className="flex-1 overflow-hidden text-ellipsis whitespace-nowrap text-sm">
+            <span className={`flex-1 overflow-hidden text-ellipsis whitespace-nowrap text-sm ${
+              tab.isDeleted ? "text-red-700" : ""
+            }`}>
               {getFileName(tab.path, tab.name)}
+              {tab.isDeleted && " (deleted)"}
             </span>
             {tab.hasUnsavedChanges && <span className="text-amber-500 text-base leading-none flex-shrink-0">•</span>}
             <button

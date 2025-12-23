@@ -40,12 +40,24 @@ function SidebarSection({ title, children, defaultExpanded = true, onHeaderClick
 }
 
 // File tree item for Files section (filters out .ipynb)
-function FileTreeItem({ file, level = 0, onFileClick, onFileAction, activeFilePath, projectRoot, showPath = false }) {
+function FileTreeItem({ file, level = 0, onFileClick, onFileAction, activeFilePath, projectRoot, showPath = false, isRenaming, onRenameComplete, onRenameCancel, renamingFilePath }) {
   const [isExpanded, setIsExpanded] = useState(false);
   const [children, setChildren] = useState([]);
   const [loading, setLoading] = useState(false);
   const [showContextMenu, setShowContextMenu] = useState(false);
   const [contextMenuPos, setContextMenuPos] = useState({ x: 0, y: 0 });
+  const [renamingValue, setRenamingValue] = useState(file.name);
+  const renameInputRef = useRef(null);
+
+  // Focus and select text when renaming starts
+  useEffect(() => {
+    if (isRenaming && renameInputRef.current) {
+      renameInputRef.current.focus();
+      // Select filename without extension
+      const nameWithoutExt = file.name.replace(/\.[^/.]+$/, "");
+      renameInputRef.current.setSelectionRange(0, nameWithoutExt.length);
+    }
+  }, [isRenaming]);
 
   // Get relative path for display in search results
   const getRelativePath = () => {
@@ -56,6 +68,25 @@ function FileTreeItem({ file, level = 0, onFileClick, onFileAction, activeFilePa
       return pathParts.slice(0, -1).join('/');
     }
     return null;
+  };
+
+  const handleRenameKeyDown = (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      if (renamingValue.trim() && renamingValue !== file.name) {
+        onRenameComplete?.(file, renamingValue.trim());
+      } else {
+        onRenameCancel?.();
+      }
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      onRenameCancel?.();
+    }
+  };
+
+  const handleRenameBlur = () => {
+    // When clicking away, treat as cancel
+    onRenameCancel?.();
   };
 
   const handleToggle = async () => {
@@ -129,22 +160,37 @@ function FileTreeItem({ file, level = 0, onFileClick, onFileAction, activeFilePa
   return (
     <>
       <div
-        className={`flex items-center gap-2 px-3 py-1.5 cursor-pointer text-sm rounded mx-2 my-0.5 transition-all ${
+        className={`flex items-center gap-2 px-3 py-1.5 text-sm rounded mx-2 my-0.5 transition-all ${
           isActive
             ? 'bg-blue-50 text-blue-900 font-medium border-l-2 border-blue-500'
             : 'text-gray-700 hover:bg-white'
-        }`}
+        } ${!isRenaming ? 'cursor-pointer' : ''}`}
         style={{ paddingLeft: `${level * 12 + 12}px` }}
-        onClick={handleToggle}
-        onContextMenu={handleContextMenu}
+        onClick={!isRenaming ? handleToggle : undefined}
+        onContextMenu={!isRenaming ? handleContextMenu : undefined}
       >
         <span className="text-xs opacity-60 w-4 text-center flex-shrink-0">{getFileIcon()}</span>
         <div className="flex-1 overflow-hidden">
-          <span className="overflow-hidden text-ellipsis whitespace-nowrap block">{file.name}</span>
-          {relativePath && (
-            <span className="text-xs text-gray-500 overflow-hidden text-ellipsis whitespace-nowrap block">
-              {relativePath}
-            </span>
+          {isRenaming ? (
+            <input
+              ref={renameInputRef}
+              type="text"
+              value={renamingValue}
+              onChange={(e) => setRenamingValue(e.target.value)}
+              onKeyDown={handleRenameKeyDown}
+              onBlur={handleRenameBlur}
+              className="w-full px-1 py-0.5 text-xs border border-blue-500 rounded focus:outline-none focus:ring-1 focus:ring-blue-500 bg-white"
+              onClick={(e) => e.stopPropagation()}
+            />
+          ) : (
+            <>
+              <span className="overflow-hidden text-ellipsis whitespace-nowrap block">{file.name}</span>
+              {relativePath && (
+                <span className="text-xs text-gray-500 overflow-hidden text-ellipsis whitespace-nowrap block">
+                  {relativePath}
+                </span>
+              )}
+            </>
           )}
         </div>
         {loading && <span className="text-xs text-gray-400">...</span>}
@@ -168,6 +214,10 @@ function FileTreeItem({ file, level = 0, onFileClick, onFileAction, activeFilePa
               onFileAction={onFileAction}
               activeFilePath={activeFilePath}
               projectRoot={projectRoot}
+              isRenaming={child.path === renamingFilePath}
+              onRenameComplete={onRenameComplete}
+              onRenameCancel={onRenameCancel}
+              renamingFilePath={renamingFilePath}
             />
           ))}
         </div>
@@ -176,7 +226,7 @@ function FileTreeItem({ file, level = 0, onFileClick, onFileAction, activeFilePa
   );
 }
 
-export function Sidebar({ projectRoot, projectName, onOpenFile, onFileDeleted, activeFilePath, onOpenSettings }) {
+export function Sidebar({ projectRoot, projectName, onOpenFile, onFileDeleted, onFileRenamed, activeFilePath, onOpenSettings }) {
   const [files, setFiles] = useState([]);
   const [workbooks, setWorkbooks] = useState([]);
   const [loading, setLoading] = useState(false);
@@ -194,6 +244,7 @@ export function Sidebar({ projectRoot, projectName, onOpenFile, onFileDeleted, a
   const [newItemName, setNewItemName] = useState("");
   const [fileInfo, setFileInfo] = useState(null);
   const [creatingInFolder, setCreatingInFolder] = useState(null);
+  const [renamingFilePath, setRenamingFilePath] = useState(null);
 
   // Refs for file/folder creation inputs to ensure focus
   const fileInputRef = useRef(null);
@@ -234,12 +285,27 @@ export function Sidebar({ projectRoot, projectName, onOpenFile, onFileDeleted, a
       loadSecretsCount();
     };
 
+    // Listen for file system changes from file watcher
+    let unlistenFileSystem;
+    const setupFileWatcher = async () => {
+      const { listen } = await import("@tauri-apps/api/event");
+      unlistenFileSystem = await listen("file-system-changed", () => {
+        console.log("File system changed, refreshing file list");
+        loadProjectFiles();
+      });
+    };
+
+    setupFileWatcher();
+
     window.addEventListener("tether:files-changed", handleFilesChanged);
     window.addEventListener("tether:secrets-changed", handleSecretsChanged);
 
     return () => {
       window.removeEventListener("tether:files-changed", handleFilesChanged);
       window.removeEventListener("tether:secrets-changed", handleSecretsChanged);
+      if (unlistenFileSystem) {
+        unlistenFileSystem();
+      }
     };
   }, [projectRoot]);
 
@@ -413,7 +479,8 @@ export function Sidebar({ projectRoot, projectName, onOpenFile, onFileDeleted, a
   const handleFileAction = async (action, file, extraData) => {
     switch (action) {
       case 'rename':
-        setRenamingFile(file);
+        // Start inline renaming
+        setRenamingFilePath(file.path);
         break;
 
       case 'delete':
@@ -495,15 +562,46 @@ export function Sidebar({ projectRoot, projectName, onOpenFile, onFileDeleted, a
     if (!renamingFile) return;
 
     try {
-      await invoke("rename_file", {
+      const newPath = await invoke("rename_file", {
         oldPath: renamingFile.path,
         newName: newName,
       });
+
+      // Notify parent about the rename so tabs can be updated
+      if (onFileRenamed) {
+        onFileRenamed(renamingFile.path, newPath);
+      }
+
       setRenamingFile(null);
       await loadProjectFiles();
     } catch (err) {
       console.error("Failed to rename:", err);
     }
+  };
+
+  const handleInlineRenameComplete = async (file, newName) => {
+    try {
+      const newPath = await invoke("rename_file", {
+        oldPath: file.path,
+        newName: newName,
+      });
+
+      // Notify parent about the rename so tabs can be updated
+      if (onFileRenamed) {
+        onFileRenamed(file.path, newPath);
+      }
+
+      setRenamingFilePath(null);
+      await loadProjectFiles();
+    } catch (err) {
+      console.error("Failed to rename:", err);
+      alert(`Failed to rename: ${err}`);
+      setRenamingFilePath(null);
+    }
+  };
+
+  const handleInlineRenameCancel = () => {
+    setRenamingFilePath(null);
   };
 
   const handleCreateFile = async (e) => {
@@ -801,6 +899,10 @@ export function Sidebar({ projectRoot, projectName, onOpenFile, onFileDeleted, a
                     activeFilePath={activeFilePath}
                     projectRoot={projectRoot}
                     showPath={true}
+                    isRenaming={file.path === renamingFilePath}
+                    onRenameComplete={handleInlineRenameComplete}
+                    onRenameCancel={handleInlineRenameCancel}
+                    renamingFilePath={renamingFilePath}
                   />
                 ))}
               </>
@@ -815,6 +917,10 @@ export function Sidebar({ projectRoot, projectName, onOpenFile, onFileDeleted, a
                 onFileAction={handleFileAction}
                 activeFilePath={activeFilePath}
                 projectRoot={projectRoot}
+                isRenaming={file.path === renamingFilePath}
+                onRenameComplete={handleInlineRenameComplete}
+                onRenameCancel={handleInlineRenameCancel}
+                renamingFilePath={renamingFilePath}
               />
             ))}
           </div>

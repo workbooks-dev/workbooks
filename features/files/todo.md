@@ -2,9 +2,11 @@
 
 ## Priority
 
-- [ ] File list should stay current with the folder (it does not)
+- [x] File list should stay current with the folder (file system watching implemented)
 - [ ] Files need to able to be dragged into folders and subfolders (drag and drop to move files)
-- [ ] Renaming files or folders should happen inline (just like vscode)
+- [x] Renaming files or folders should happen inline (just like vscode)
+- [x] Renaming files does not propagate to tabs (old filename persists, old tab stays open)
+- [x] Opened file (in tabs) that's deleted should persist (until user closes) allowing user to re-save to re-persist
 - [ ] Notebooks in the Workbooks section should be able to be renamed.
 - [ ] when a file is open, the title should be editable in the viewer. 
 - [ ] If a filename is changed, the scheduler should be auto updated
@@ -53,6 +55,8 @@
   - [ ] Summary of uploaded files
 
 ## File Operations
+
+- [ ] Copy and paste files and folders from sidebar (just like vscode)
 
 - [ ] File templates
   - [ ] Common file types with starter content (CSV headers, JSON schema, .py template, .md template)

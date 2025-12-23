@@ -683,12 +683,32 @@ function App() {
     );
   }
 
+  function handleFileRenamed(oldPath, newPath) {
+    // Update tabs that have this file path
+    setTabs((prevTabs) =>
+      prevTabs.map((tab) =>
+        tab.path === oldPath ? { ...tab, path: newPath } : tab
+      )
+    );
+  }
+
   function handleFileDeleted(filePath) {
-    // Close any tabs for this deleted file
-    const tab = tabs.find((t) => t.path === filePath);
-    if (tab) {
-      handleTabClose(tab.id);
-    }
+    // Mark tabs as deleted instead of closing them
+    // This allows users to re-save if needed
+    setTabs((prevTabs) =>
+      prevTabs.map((tab) =>
+        tab.path === filePath ? { ...tab, isDeleted: true } : tab
+      )
+    );
+  }
+
+  function handleFileRestored(filePath) {
+    // Clear the isDeleted flag when file is restored
+    setTabs((prevTabs) =>
+      prevTabs.map((tab) =>
+        tab.path === filePath ? { ...tab, isDeleted: false } : tab
+      )
+    );
   }
 
   // Handle save dialog actions
@@ -900,6 +920,7 @@ function App() {
             projectName={currentProject.name}
             onOpenFile={handleOpenFile}
             onFileDeleted={handleFileDeleted}
+            onFileRenamed={handleFileRenamed}
             onOpenSettings={handleOpenSettings}
             activeFilePath={activeTab?.path}
           />
@@ -965,8 +986,10 @@ function App() {
                   key={activeTab.id}
                   filePath={activeTab.path}
                   projectRoot={currentProject.root}
+                  isDeleted={activeTab.isDeleted}
                   onClose={() => handleTabClose(activeTab.id)}
                   onUnsavedChangesUpdate={(hasChanges) => updateTabUnsavedState(activeTab.id, hasChanges)}
+                  onFileRestored={() => handleFileRestored(activeTab.path)}
                 />
               )
             ) : (

@@ -1,5 +1,49 @@
 # Files - Completed
 
+## File System Watching & Auto-Sync
+
+- [x] Implemented file system watching using `notify` crate
+- [x] Debounced file system events (500ms) to prevent spam
+- [x] Filtered ignored paths (.git, .tether, node_modules, .venv, etc.)
+- [x] Auto-refresh file list when files change externally
+- [x] Event-driven architecture emits 'file-system-changed' to frontend
+- [x] Frontend listens and reloads file list automatically
+- [x] File watcher starts automatically when project opens
+
+## Inline Renaming (VS Code Style)
+
+- [x] Inline renaming for files and folders (no dialog needed)
+- [x] Click rename in context menu activates inline edit mode
+- [x] Input field appears directly in the file tree
+- [x] Auto-focus and text selection (filename without extension)
+- [x] Enter key confirms rename
+- [x] Escape key cancels rename
+- [x] Click away cancels rename
+- [x] Works recursively in nested folders
+- [x] Works in search results
+- [x] Blue border highlight for active rename input
+
+## Tab & File Lifecycle Management
+
+- [x] Tab filename propagation on rename
+  - [x] When file is renamed, tab title automatically updates
+  - [x] Tab path updates to new location
+  - [x] Works with both inline rename and dialog-based rename
+  - [x] No manual refresh needed
+- [x] Deleted file persistence in tabs
+  - [x] When file is deleted, tab stays open (doesn't auto-close)
+  - [x] Tab shows "(deleted)" suffix in red
+  - [x] Tab background changes to red tint
+  - [x] Warning banner appears in file viewer
+  - [x] "Save to Restore" button recreates the file
+  - [x] Content preserved in memory until tab is closed
+  - [x] File system watcher picks up restoration
+  - [x] Tab returns to normal state after successful save
+- [x] Graceful error handling
+  - [x] File not found errors don't crash the viewer
+  - [x] Content remains editable even when file is missing
+  - [x] User can work with file and decide to save later
+
 ## Files Sidebar Section
 
 - [x] Tree view of all project files
