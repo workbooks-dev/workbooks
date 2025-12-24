@@ -1,6 +1,6 @@
 # Wishlist - Future Benefits
 
-Compelling features that would make Tether exceptional. Not currently planned, but worth considering.
+Compelling features that would make Workbooks exceptional. Not currently planned, but worth considering.
 
 ## Time Travel Debugging
 
@@ -10,7 +10,7 @@ Capture full kernel state after each successful cell execution. Step backwards t
 
 **Why it would be amazing:** Debugging notebooks is painful because you can't "go back" without re-running everything. Time travel would make notebooks debuggable like real code.
 
-**Technical approach:** Serialize kernel namespace after each cell using `dill` or `cloudpickle`. Store snapshots in `.tether/snapshots/{run-id}/`. UI shows timeline slider to jump between states.
+**Technical approach:** Serialize kernel namespace after each cell using `dill` or `cloudpickle`. Store snapshots in `.workbooks/snapshots/{run-id}/`. UI shows timeline slider to jump between states.
 
 ## DataFrame Diff Viewer
 
@@ -50,7 +50,7 @@ Drag-and-drop canvas showing notebooks as nodes and data flow as edges. Connect 
 
 **Why it would be amazing:** Multi-notebook workflows are hard to understand. Visual canvas makes architecture obvious and pipelines easier to manage.
 
-**Technical approach:** React Flow is already installed! Build canvas UI. Store graph structure in `.tether/pipeline.json`. Execute nodes in topological order. Show real-time status for each node.
+**Technical approach:** React Flow is already installed! Build canvas UI. Store graph structure in `.workbooks/pipeline.json`. Execute nodes in topological order. Show real-time status for each node.
 
 ## Export to Production
 
@@ -80,7 +80,7 @@ Pre-built notebook templates with cells, packages, and sample data. Browse libra
 
 **Why it would be amazing:** Starting from scratch is slow. Templates accelerate common workflows and teach best practices.
 
-**Technical approach:** Store templates in `~/.tether/templates/` or remote registry. Template format: `.ipynb` + `manifest.json` with dependencies and sample data URLs. UI shows gallery with previews.
+**Technical approach:** Store templates in `~/.workbooks/templates/` or remote registry. Template format: `.ipynb` + `manifest.json` with dependencies and sample data URLs. UI shows gallery with previews.
 
 ## GPU Task Queue
 
@@ -100,7 +100,7 @@ Connect to external tools via MCP: databases, APIs, file systems, and AI service
 
 **Why it would be amazing:** Notebooks need external data. MCP standardizes connections and makes integrations trivial.
 
-**Technical approach:** Spawn MCP servers as sidecars. Register MCP resources as magic commands or import `from tether.mcp import database, api`. Route calls through MCP protocol. Cache responses intelligently.
+**Technical approach:** Spawn MCP servers as sidecars. Register MCP resources as magic commands or import `from workbooks.mcp import database, api`. Route calls through MCP protocol. Cache responses intelligently.
 
 ## Distributed Notebook Execution
 
@@ -110,7 +110,7 @@ Run notebook cells across multiple machines. Heavy computations distribute to re
 
 **Why it would be amazing:** Local machines have limited resources. Cloud execution without leaving the desktop app.
 
-**Technical approach:** Deploy Tether engine server to remote machines. Frontend sends execution requests to remote HTTP endpoint. Stream outputs back via SSE. Sync variables via pickle over HTTP.
+**Technical approach:** Deploy Workbooks engine server to remote machines. Frontend sends execution requests to remote HTTP endpoint. Stream outputs back via SSE. Sync variables via pickle over HTTP.
 
 ## Dependency Graph Visualization
 
@@ -130,7 +130,7 @@ Take named snapshots of kernel state ("before-feature-x"). Create branches to ex
 
 **Why it would be amazing:** Experimentation is risky when you can't undo. Snapshots enable fearless exploration.
 
-**Technical approach:** Serialize kernel namespace with `cloudpickle`. Store in `.tether/snapshots/{name}.pkl`. UI shows snapshot list. Restore by loading pickle into kernel. Branch by copying snapshot.
+**Technical approach:** Serialize kernel namespace with `cloudpickle`. Store in `.workbooks/snapshots/{name}.pkl`. UI shows snapshot list. Restore by loading pickle into kernel. Branch by copying snapshot.
 
 ## AI-Powered Cell Suggestions
 

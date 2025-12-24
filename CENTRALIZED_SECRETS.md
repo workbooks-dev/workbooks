@@ -7,7 +7,7 @@ Secrets are now stored **centrally** in your home directory, **NOT** in the proj
 ### Storage Location
 
 ```
-~/.tether/
+~/.workbooks/
 ├── secrets/
 │   └── {project-hash}/
 │       ├── secrets.db          # Encrypted secrets for this project
@@ -18,7 +18,7 @@ Secrets are now stored **centrally** in your home directory, **NOT** in the proj
 **Your project folder stays clean:**
 ```
 my-project/
-├── .tether/
+├── .workbooks/
 │   ├── state.db               # ✅ Shareable - state metadata
 │   ├── state/                 # ✅ Shareable - state blobs (can be synced)
 │   ├── runs/                  # ✅ Shareable - execution history
@@ -33,31 +33,31 @@ my-project/
 
 ### ✅ Benefits
 
-1. **Keeps projects clean** - `.tether/` only contains shareable data
+1. **Keeps projects clean** - `.workbooks/` only contains shareable data
 2. **Machine-specific** - Each developer has their own secrets
 3. **Safe for version control** - No risk of committing secrets
-4. **Organized** - All your secrets in one place (`~/.tether/secrets/`)
-5. **Easy cleanup** - Delete `~/.tether/secrets/{hash}` to remove project secrets
+4. **Organized** - All your secrets in one place (`~/.workbooks/secrets/`)
+5. **Easy cleanup** - Delete `~/.workbooks/secrets/{hash}` to remove project secrets
 
 ### 🔐 Security
 
-- Secrets stored in `~/.tether/secrets/` (encrypted with AES-256-GCM)
+- Secrets stored in `~/.workbooks/secrets/` (encrypted with AES-256-GCM)
 - Encryption keys in system keychain (Touch ID protected)
 - Project folder can be safely committed to git
 
 ## Migration from Old Location
 
-If you had secrets in the old location (`project/.tether/secrets.db`), they won't work anymore.
+If you had secrets in the old location (`project/.workbooks/secrets.db`), they won't work anymore.
 
 **To migrate:**
 
 1. **Note your existing secrets** (write them down or screenshot)
 2. **Delete old database:**
    ```bash
-   rm "/path/to/project/.tether/secrets.db"
+   rm "/path/to/project/.workbooks/secrets.db"
    ```
 3. **Restart the app** and **re-add your secrets** via the UI
-4. Secrets will now be stored at: `~/.tether/secrets/{project-hash}/secrets.db`
+4. Secrets will now be stored at: `~/.workbooks/secrets/{project-hash}/secrets.db`
 
 ## Finding Your Secrets
 
@@ -68,9 +68,9 @@ To find where a project's secrets are stored:
 # Look for: "DEBUG: Secrets stored at: ..."
 
 # Or check manually:
-ls ~/.tether/secrets/
+ls ~/.workbooks/secrets/
 # Each folder has a project_path.txt showing which project it's for
-cat ~/.tether/secrets/*/project_path.txt
+cat ~/.workbooks/secrets/*/project_path.txt
 ```
 
 ## Cleanup
@@ -79,26 +79,26 @@ To delete secrets for a project:
 
 ```bash
 # Find the hash for your project
-grep -l "/path/to/your/project" ~/.tether/secrets/*/project_path.txt
+grep -l "/path/to/your/project" ~/.workbooks/secrets/*/project_path.txt
 
 # Delete that folder
-rm -rf ~/.tether/secrets/{hash-from-above}/
+rm -rf ~/.workbooks/secrets/{hash-from-above}/
 ```
 
 Or just delete the entire secrets directory:
 ```bash
-rm -rf ~/.tether/secrets/
+rm -rf ~/.workbooks/secrets/
 ```
 
 Then re-add secrets via the UI.
 
-## Future: `.env.tether` Support
+## Future: `.env.workbooks` Support
 
-**Coming soon:** Optional encrypted `.env.tether` file for team sharing:
+**Coming soon:** Optional encrypted `.env.workbooks` file for team sharing:
 - Encrypted with a team-shared key
 - Can be committed to git
 - Team members decrypt with shared passphrase
-- Falls back to machine-specific secrets in `~/.tether/secrets/`
+- Falls back to machine-specific secrets in `~/.workbooks/secrets/`
 
 ## Testing the New Location
 
@@ -115,13 +115,13 @@ After rebuilding:
 
 3. **Check the terminal** - you should see:
    ```
-   DEBUG: Secrets stored at: /Users/you/.tether/secrets/1617280d59bcfd33/secrets.db
-   DEBUG: Using keyring entry: service='tether' user='secrets-1617280d59bcfd33'
+   DEBUG: Secrets stored at: /Users/you/.workbooks/secrets/1617280d59bcfd33/secrets.db
+   DEBUG: Using keyring entry: service='workbooks' user='secrets-1617280d59bcfd33'
    ```
 
 4. **Verify the file was created:**
    ```bash
-   ls ~/.tether/secrets/
+   ls ~/.workbooks/secrets/
    ```
 
 5. **Restart kernel and test:**
@@ -132,11 +132,11 @@ After rebuilding:
 
 ## Project Folder is Now Git-Safe
 
-You can safely commit `.tether/` to git:
+You can safely commit `.workbooks/` to git:
 
 ```bash
-# .gitignore (optional - you may want to commit .tether/ for state sharing)
-# .tether/runs/           # Execution logs (optional)
+# .gitignore (optional - you may want to commit .workbooks/ for state sharing)
+# .workbooks/runs/           # Execution logs (optional)
 ```
 
 Secrets are never in the project folder, so they can't be accidentally committed!

@@ -40,25 +40,25 @@ fn slugify_package_name(name: &str) -> String {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct TetherProject {
+pub struct WorkbooksProject {
     pub name: String,          // Display name (can have spaces)
     pub package_name: String,  // Slugified name for uv/Python
     pub root: PathBuf,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct TetherShortcut {
+pub struct WorkbooksShortcut {
     pub version: u32,
     pub name: String,
     pub project_root: String,
 }
 
-/// Create a new Tether project from scratch
-pub async fn create_new_project(project_path: &Path, project_name: &str) -> Result<TetherProject> {
+/// Create a new Workbooks project from scratch
+pub async fn create_new_project(project_path: &Path, project_name: &str) -> Result<WorkbooksProject> {
     let project_root = project_path.to_path_buf();
     let package_name = slugify_package_name(project_name);
 
-    println!("Creating new Tether project at {:?}", project_root);
+    println!("Creating new Workbooks project at {:?}", project_root);
     println!("Display name: '{}', Package name: '{}'", project_name, package_name);
 
     // Create project directory if it doesn't exist
@@ -70,8 +70,8 @@ pub async fn create_new_project(project_path: &Path, project_name: &str) -> Resu
     // Initialize uv project with slugified name
     init_uv_project(&project_root, &package_name).await?;
 
-    // Create Tether directory structure
-    create_tether_structure(&project_root)?;
+    // Create Workbooks directory structure
+    create_wbs_structure(&project_root)?;
 
     // Create notebooks directory
     let notebooks_dir = project_root.join("notebooks");
@@ -83,20 +83,20 @@ pub async fn create_new_project(project_path: &Path, project_name: &str) -> Resu
     // Initialize Python environment and install core dependencies
     python::init_project(&project_root, &package_name).await?;
 
-    println!("Tether project created successfully");
+    println!("Workbooks project created successfully");
 
-    Ok(TetherProject {
+    Ok(WorkbooksProject {
         name: project_name.to_string(),
         package_name,
         root: project_root,
     })
 }
 
-/// Open an existing folder as a Tether project (like VS Code's "Open Folder")
-pub async fn open_folder(folder_path: &Path) -> Result<TetherProject> {
+/// Open an existing folder as a Workbooks project (like VS Code's "Open Folder")
+pub async fn open_folder(folder_path: &Path) -> Result<WorkbooksProject> {
     let project_root = folder_path.to_path_buf();
 
-    println!("Opening folder as Tether project: {:?}", project_root);
+    println!("Opening folder as Workbooks project: {:?}", project_root);
 
     // Verify folder exists
     if !project_root.exists() {
@@ -118,13 +118,13 @@ pub async fn open_folder(folder_path: &Path) -> Result<TetherProject> {
             slugify_package_name(&folder_name)
         });
 
-    // Ensure pyproject.toml exists and has tether dependencies
+    // Ensure pyproject.toml exists and has wbs dependencies
     let pyproject_path = project_root.join("pyproject.toml");
     if !pyproject_path.exists() {
         // Initialize uv project if pyproject.toml doesn't exist
         init_uv_project(&project_root, &package_name).await?;
     } else {
-        ensure_tether_dependency_group(&pyproject_path)?;
+        ensure_wbs_dependency_group(&pyproject_path)?;
     }
 
     // Initialize Python environment and sync dependencies
@@ -139,39 +139,39 @@ pub async fn open_folder(folder_path: &Path) -> Result<TetherProject> {
 
     println!("Opened folder as project: {}", display_name);
 
-    Ok(TetherProject {
+    Ok(WorkbooksProject {
         name: display_name,
         package_name,
         root: project_root,
     })
 }
 
-/// Ensure .tether directory structure exists (called lazily when needed)
+/// Ensure .workbooks directory structure exists (called lazily when needed)
 #[allow(dead_code)]
-pub fn ensure_tether_structure(project_root: &Path) -> Result<()> {
-    let tether_dir = project_root.join(".tether");
+pub fn ensure_wbs_structure(project_root: &Path) -> Result<()> {
+    let wbs_dir = project_root.join(".workbooks");
 
-    // If .tether already exists, nothing to do
-    if tether_dir.exists() {
+    // If .workbooks already exists, nothing to do
+    if wbs_dir.exists() {
         return Ok(());
     }
 
-    println!("Creating .tether directory structure");
+    println!("Creating .workbooks directory structure");
 
-    // Create .tether directory
-    fs::create_dir(&tether_dir)
-        .context("Failed to create .tether directory")?;
+    // Create .workbooks directory
+    fs::create_dir(&wbs_dir)
+        .context("Failed to create .workbooks directory")?;
 
     // Create subdirectories
     let subdirs = ["state", "runs"];
     for subdir in &subdirs {
-        let dir_path = tether_dir.join(subdir);
+        let dir_path = wbs_dir.join(subdir);
         fs::create_dir(&dir_path)
-            .with_context(|| format!("Failed to create .tether/{} directory", subdir))?;
+            .with_context(|| format!("Failed to create .workbooks/{} directory", subdir))?;
     }
 
     // Create config.toml
-    let config_path = tether_dir.join("config.toml");
+    let config_path = wbs_dir.join("config.toml");
     let default_config = r#"[project]
 version = "1"
 
@@ -184,7 +184,7 @@ checkpoint_enabled = true
     fs::write(&config_path, default_config)
         .context("Failed to create config.toml")?;
 
-    println!("Created .tether directory structure");
+    println!("Created .workbooks directory structure");
     Ok(())
 }
 
@@ -238,30 +238,32 @@ async fn init_uv_project(project_root: &Path, project_name: &str) -> Result<()> 
         println!("pyproject.toml already exists");
     }
 
-    // Ensure tether dependency group exists
-    ensure_tether_dependency_group(&pyproject_path)?;
+    // Ensure workbooks dependency group exists
+    ensure_wbs_dependency_group(&pyproject_path)?;
 
     Ok(())
 }
 
-/// Ensure pyproject.toml has the tether dependency group
-fn ensure_tether_dependency_group(pyproject_path: &Path) -> Result<()> {
+/// Ensure pyproject.toml has the workbooks dependency group
+fn ensure_wbs_dependency_group(pyproject_path: &Path) -> Result<()> {
     let content = fs::read_to_string(pyproject_path)
         .context("Failed to read pyproject.toml")?;
 
     // Check if [dependency-groups] section exists
-    if content.contains("[dependency-groups]") && content.contains("tether = [") {
-        println!("Tether dependency group already exists");
+    if content.contains("[dependency-groups]") {
+        // If dependency-groups section already exists, don't modify it
+        // This prevents duplicate section headers and respects user's existing configuration
+        println!("Dependency groups section already exists, skipping modification");
         return Ok(());
     }
 
-    println!("Adding tether dependency group to pyproject.toml");
+    println!("Adding workbooks dependency group to pyproject.toml");
 
     // Append the dependency group section
-    let tether_deps = r#"
+    let wbs_deps = r#"
 
 [dependency-groups]
-tether = [
+workbooks = [
     "pip>=24.0.0",
     "jupyter>=1.0.0",
     "jupyter-client>=8.0.0",
@@ -276,35 +278,35 @@ tether = [
 ]
 "#;
 
-    let new_content = format!("{}{}", content, tether_deps);
+    let new_content = format!("{}{}", content, wbs_deps);
     fs::write(pyproject_path, new_content)
         .context("Failed to write pyproject.toml")?;
 
-    println!("Tether dependency group added");
+    println!("Workbooks dependency group added");
     Ok(())
 }
 
-/// Create Tether directory structure
-fn create_tether_structure(project_root: &Path) -> Result<()> {
-    let tether_dir = project_root.join(".tether");
+/// Create Workbooks directory structure
+fn create_wbs_structure(project_root: &Path) -> Result<()> {
+    let wbs_dir = project_root.join(".workbooks");
 
-    if !tether_dir.exists() {
-        fs::create_dir(&tether_dir)
-            .context("Failed to create .tether directory")?;
+    if !wbs_dir.exists() {
+        fs::create_dir(&wbs_dir)
+            .context("Failed to create .workbooks directory")?;
     }
 
     // Create subdirectories
     let subdirs = ["state", "runs"];
     for subdir in &subdirs {
-        let dir_path = tether_dir.join(subdir);
+        let dir_path = wbs_dir.join(subdir);
         if !dir_path.exists() {
             fs::create_dir(&dir_path)
-                .with_context(|| format!("Failed to create .tether/{} directory", subdir))?;
+                .with_context(|| format!("Failed to create .workbooks/{} directory", subdir))?;
         }
     }
 
     // Create config.toml
-    let config_path = tether_dir.join("config.toml");
+    let config_path = wbs_dir.join("config.toml");
     if !config_path.exists() {
         let default_config = r#"[project]
 version = "1"
@@ -319,25 +321,25 @@ checkpoint_enabled = true
             .context("Failed to create config.toml")?;
     }
 
-    println!("Created .tether directory structure");
+    println!("Created .workbooks directory structure");
     Ok(())
 }
 
 
-/// Load a Tether project from a path
-pub fn load_project(project_path: &Path) -> Result<TetherProject> {
-    // Check if path is a .tether shortcut file
-    if project_path.extension().and_then(|s| s.to_str()) == Some("tether") {
+/// Load a Workbooks project from a path
+pub fn load_project(project_path: &Path) -> Result<WorkbooksProject> {
+    // Check if path is a .workbooks shortcut file
+    if project_path.extension().and_then(|s| s.to_str()) == Some("wbs") {
         return load_project_from_shortcut(project_path);
     }
 
     // Otherwise treat as project directory
     let project_root = project_path.to_path_buf();
 
-    // Verify it's a Tether project
-    let tether_dir = project_root.join(".tether");
-    if !tether_dir.exists() {
-        anyhow::bail!("Not a Tether project: .tether directory not found");
+    // Verify it's a Workbooks project
+    let wbs_dir = project_root.join(".workbooks");
+    if !wbs_dir.exists() {
+        anyhow::bail!("Not a Workbooks project: .workbooks directory not found");
     }
 
     // Try to get package name from pyproject.toml
@@ -358,20 +360,20 @@ pub fn load_project(project_path: &Path) -> Result<TetherProject> {
         .unwrap_or("unknown")
         .to_string();
 
-    Ok(TetherProject {
+    Ok(WorkbooksProject {
         name: display_name,
         package_name,
         root: project_root,
     })
 }
 
-/// Load project from a .tether shortcut file
-fn load_project_from_shortcut(shortcut_path: &Path) -> Result<TetherProject> {
+/// Load project from a .workbooks shortcut file
+fn load_project_from_shortcut(shortcut_path: &Path) -> Result<WorkbooksProject> {
     let content = fs::read_to_string(shortcut_path)
-        .context("Failed to read .tether shortcut file")?;
+        .context("Failed to read .workbooks shortcut file")?;
 
-    let shortcut: TetherShortcut = serde_json::from_str(&content)
-        .context("Failed to parse .tether shortcut file")?;
+    let shortcut: WorkbooksShortcut = serde_json::from_str(&content)
+        .context("Failed to parse .workbooks shortcut file")?;
 
     let shortcut_dir = shortcut_path.parent()
         .context("Failed to get shortcut directory")?;
@@ -391,7 +393,7 @@ fn load_project_from_shortcut(shortcut_path: &Path) -> Result<TetherProject> {
     let package_name = get_project_name(&project_root)
         .unwrap_or_else(|_| slugify_package_name(&shortcut.name));
 
-    Ok(TetherProject {
+    Ok(WorkbooksProject {
         name: shortcut.name,
         package_name,
         root: project_root,

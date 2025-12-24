@@ -3,16 +3,16 @@
 ## Phase 1: Core Infrastructure
 
 ### CLI & Engine Server Integration
-- [ ] Add `tether mcp` CLI subcommand
+- [ ] Add `workbooks mcp` CLI subcommand
   - [ ] Accept `--project <path>` argument
-  - [ ] Validate project path exists and has `.tether/` directory
+  - [ ] Validate project path exists and has `.workbooks/` directory
   - [ ] Start or connect to existing engine server for project
 - [ ] Integrate FastMCP into `engine_server.py`
   - [ ] Add FastMCP dependency to engine requirements
   - [ ] Create MCP server instance alongside FastAPI
   - [ ] Run MCP on stdio (for Claude Desktop communication)
   - [ ] Share AsyncKernelManager between HTTP and MCP handlers
-- [ ] Add MCP feature flag/settings to `.tether/config.toml`
+- [ ] Add MCP feature flag/settings to `.workbooks/config.toml`
   - [ ] `mcp.enabled = true`
   - [ ] `mcp.allow_list_notebooks = true`
   - [ ] `mcp.allow_read_outputs = true`
@@ -91,7 +91,7 @@
 
 ### Run History
 - [ ] Implement `inspect_runs` tool
-  - [ ] Query run history from `.tether/runs/`
+  - [ ] Query run history from `.workbooks/runs/`
   - [ ] Support filtering by notebook
   - [ ] Support limit parameter
   - [ ] Return run ID, notebook, time, status, source
@@ -107,9 +107,9 @@
     - [ ] Windows: `%APPDATA%\Claude\claude_desktop_config.json`
     - [ ] Linux: `~/.config/Claude/claude_desktop_config.json`
   - [ ] Read existing config (create if doesn't exist)
-  - [ ] Add/update entry: `tether-{project-name}`
+  - [ ] Add/update entry: `workbooks-{project-name}`
   - [ ] Include correct `command` and `args` with project path
-  - [ ] Validate `tether` CLI is in PATH (warn if not)
+  - [ ] Validate `workbooks` CLI is in PATH (warn if not)
   - [ ] Backup config before modifying
   - [ ] Write updated config
   - [ ] Show success message: "Added to Claude Desktop. Restart Claude to connect."
@@ -118,15 +118,15 @@
 ### Multi-Project Management
 - [ ] Implement "Manage Claude Projects" dialog/section
   - [ ] Read Claude config file
-  - [ ] Parse and list all `tether-*` entries
+  - [ ] Parse and list all `workbooks-*` entries
   - [ ] Show checkboxes to enable/disable each project
-  - [ ] Add "Remove all other Tether projects" button
+  - [ ] Add "Remove all other Workbooks projects" button
   - [ ] Confirm before removing projects
   - [ ] Update config file safely
   - [ ] Show current project status (active/inactive)
 
 ### CLI Installation Helper
-- [ ] Detect if `tether` CLI is accessible
+- [ ] Detect if `workbooks` CLI is accessible
 - [ ] Show installation instructions if missing
 - [ ] Consider: symlink bundled Tauri app CLI to system PATH on install
 - [ ] Add Tauri installer script to add CLI to PATH
@@ -144,7 +144,7 @@
 - [ ] Include suggested fixes in error messages
 
 ### Settings UI
-- [ ] Add MCP settings panel to Tether app
+- [ ] Add MCP settings panel to Workbooks app
 - [ ] Toggles for each MCP permission
 - [ ] Explain what each permission allows
 - [ ] Show which features Claude can access
@@ -155,7 +155,7 @@
 ### Scheduling
 - [ ] Implement `schedule_notebook` tool
   - [ ] Create cron schedule for notebook
-  - [ ] Store in `.tether/schedules/`
+  - [ ] Store in `.workbooks/schedules/`
   - [ ] Return schedule ID and next run time
   - [ ] Integrate with scheduling system (once built)
 
@@ -170,7 +170,7 @@
   - [ ] Scheduled runs completing
   - [ ] Long-running executions finishing
   - [ ] Errors in background runs
-  - [ ] Custom `tether.notify("message")` from Python
+  - [ ] Custom `workbooks.notify("message")` from Python
 - [ ] UI for notification preferences
 
 ### Documentation

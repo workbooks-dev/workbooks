@@ -7,7 +7,7 @@
   - [ ] Add `change_sets` table
   - [ ] Add `file_changes` table
   - [ ] Add indexes for session and change set lookups
-- [ ] Create `.tether/snapshots/` directory structure
+- [ ] Create `.workbooks/snapshots/` directory structure
 - [ ] Add Rust module for change tracking database operations
   - [ ] Insert change sets
   - [ ] Insert file changes
@@ -157,7 +157,7 @@
 - [ ] Log cleanup results (files deleted, space freed)
 
 ### Settings Persistence
-- [ ] Store config in `.tether/config.toml` or global settings
+- [ ] Store config in `.workbooks/config.toml` or global settings
 - [ ] Load config on app startup
 - [ ] Apply retention policy based on user settings
 - [ ] Validate settings (min > 0, reasonable size limits)

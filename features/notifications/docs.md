@@ -4,7 +4,7 @@ Unified notification system for background events, errors, run completions, and 
 
 ## Overview
 
-Tether runs in the background via system tray. When important events happen (scheduled runs complete, errors occur, updates available), users need to be informed without being intrusive.
+Workbooks runs in the background via system tray. When important events happen (scheduled runs complete, errors occur, updates available), users need to be informed without being intrusive.
 
 ## Notification Types
 
@@ -22,7 +22,7 @@ Tether runs in the background via system tray. When important events happen (sch
 - Action: Click to view full error details or logs
 
 ### 3. **Updates Available**
-- New version of Tether available
+- New version of Workbooks available
 - Show: current version → new version, changelog highlights
 - Action: Click to view changelog and install update
 
@@ -83,7 +83,7 @@ pub enum NotificationType {
 
 ## Storage
 
-**SQLite database**: `~/.tether/notifications.db`
+**SQLite database**: `~/.workbooks/notifications.db`
 - Global across all projects
 - Stores last 30 days, auto-prune older
 - Indexes on: timestamp, type, read status

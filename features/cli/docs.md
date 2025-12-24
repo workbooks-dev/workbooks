@@ -1,8 +1,8 @@
-# Tether CLI
+# Workbooks CLI
 
 ## Overview
 
-The Tether CLI (`tether`) provides command-line access to Tether projects. It enables:
+The Workbooks CLI (`workbooks`) provides command-line access to Workbooks projects. It enables:
 - Project creation and initialization
 - Notebook execution from terminal
 - MCP server for Claude Desktop integration
@@ -19,21 +19,21 @@ The CLI is a **separate binary in the same Cargo workspace** as the Tauri app. T
 **`src-tauri/Cargo.toml`:**
 ```toml
 [package]
-name = "tether"
+name = "workbooks"
 version = "0.0.1"
 
 [lib]
-name = "tether_core"
+name = "workbooks_core"
 path = "src/lib.rs"
 
 # Tauri GUI app
 [[bin]]
-name = "tether-app"
+name = "workbooks-app"
 path = "src/main.rs"
 
 # CLI tool
 [[bin]]
-name = "tether"
+name = "workbooks"
 path = "src/bin/cli.rs"
 
 [dependencies]
@@ -44,7 +44,7 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 # ... other shared deps
 
-# Tauri-specific (only for tether-app binary)
+# Tauri-specific (only for workbooks-app binary)
 [target.'cfg(not(target_os = "ios"))'.dependencies]
 tauri = { version = "2.1", features = [] }
 # ... other Tauri deps
@@ -59,13 +59,13 @@ Common functionality lives in `src/lib.rs` and modules:
 - `src/config.rs` - Config file management
 - `src/python.rs` - UV/Python environment management
 
-Both CLI and GUI import from `tether_core`.
+Both CLI and GUI import from `workbooks_core`.
 
 ## Global Configuration
 
-Tether maintains a **global config file** separate from individual project configs. This enables convenient defaults and shared settings across both the CLI and desktop app.
+Workbooks maintains a **global config file** separate from individual project configs. This enables convenient defaults and shared settings across both the CLI and desktop app.
 
-**Location:** `~/.tether/config.toml`
+**Location:** `~/.workbooks/config.toml`
 
 **Structure:**
 ```toml
@@ -92,22 +92,22 @@ The global config's `default_project` enables convenient CLI usage without expli
 
 **Project Resolution Order (CLI):**
 1. Explicit `--project <path>` flag
-2. Current directory (if it's a Tether project)
-3. Global `default_project` from `~/.tether/config.toml`
+2. Current directory (if it's a Workbooks project)
+3. Global `default_project` from `~/.workbooks/config.toml`
 4. Error if none found
 
 **Examples:**
 ```bash
 # Works from anywhere if default project is set
-tether run notebooks/analysis.ipynb  # Uses default project
-tether status                        # Shows default project
+workbooks run notebooks/analysis.ipynb  # Uses default project
+workbooks status                        # Shows default project
 
 # Override with explicit flag
-tether run --project ~/other-project notebooks/test.ipynb
+workbooks run --project ~/other-project notebooks/test.ipynb
 
-# Works if in a Tether project directory
+# Works if in a Workbooks project directory
 cd ~/Projects/my-pipeline
-tether run notebooks/test.ipynb  # Uses current directory project
+workbooks run notebooks/test.ipynb  # Uses current directory project
 ```
 
 **Desktop App Behavior:**
@@ -119,20 +119,20 @@ tether run notebooks/test.ipynb  # Uses current directory project
 **Managing Default Project:**
 ```bash
 # Set default project
-tether config set-default /path/to/project
+workbooks config set-default /path/to/project
 
 # Show current default
-tether config get-default
+workbooks config get-default
 
 # Remove default (CLI will require --project or cwd)
-tether config unset-default
+workbooks config unset-default
 ```
 
 ### Binary Entry Points
 
 **GUI App: `src/main.rs`** (or `src/bin/app.rs`)
 ```rust
-use tether_core::*;
+use workbooks_core::*;
 
 fn main() {
     tauri::Builder::default()
@@ -145,10 +145,10 @@ fn main() {
 **CLI: `src/bin/cli.rs`**
 ```rust
 use clap::{Parser, Subcommand};
-use tether_core::*;
+use workbooks_core::*;
 
 #[derive(Parser)]
-#[command(name = "tether")]
+#[command(name = "workbooks")]
 #[command(about = "Durable workbook orchestration for local-first data pipelines")]
 struct Cli {
     #[command(subcommand)]
@@ -183,19 +183,19 @@ The Tauri installer can optionally install the CLI to system PATH:
 **macOS/Linux:**
 ```bash
 # Copy binary to /usr/local/bin
-sudo cp tether-app.app/Contents/MacOS/tether /usr/local/bin/tether
-sudo chmod +x /usr/local/bin/tether
+sudo cp workbooks-app.app/Contents/MacOS/workbooks /usr/local/bin/workbooks
+sudo chmod +x /usr/local/bin/workbooks
 ```
 
 **Windows:**
 ```powershell
-# Copy to %LOCALAPPDATA%\Programs\Tether\
+# Copy to %LOCALAPPDATA%\Programs\Workbooks\
 # Add to PATH in installer
 ```
 
 **Implementation:**
 - Add post-install script to Tauri bundler config
-- Prompt user: "Install tether CLI to system PATH?"
+- Prompt user: "Install workbooks CLI to system PATH?"
 - Show installation path and verify it's accessible
 
 ### Manual Install
@@ -203,8 +203,8 @@ sudo chmod +x /usr/local/bin/tether
 ```bash
 # From source
 cd src-tauri
-cargo build --release --bin tether
-sudo cp target/release/tether /usr/local/bin/
+cargo build --release --bin workbooks
+sudo cp target/release/workbooks /usr/local/bin/
 
 # Or via installer option (if user skipped during app install)
 # Run from Tauri app: Settings → Install CLI
@@ -213,18 +213,18 @@ sudo cp target/release/tether /usr/local/bin/
 ### Verification
 
 ```bash
-tether --version
-# Output: tether 0.1.0
+workbooks --version
+# Output: workbooks 0.1.0
 ```
 
 ## CLI Commands
 
-### `tether init <name>`
+### `workbooks init <name>`
 
-Create a new Tether project.
+Create a new Workbooks project.
 
 ```bash
-tether init my-pipeline
+workbooks init my-pipeline
 cd my-pipeline
 ```
 
@@ -232,17 +232,17 @@ cd my-pipeline
 - Creates project directory structure:
   ```
   my-pipeline/
-  ├── .tether/
+  ├── .workbooks/
   │   └── config.toml
   ├── notebooks/
   ├── pyproject.toml
   ├── uv.lock
-  └── My Pipeline.tether  # Shortcut file
+  └── My Pipeline.workbooks  # Shortcut file
   ```
 - Initializes UV environment (`.venv`)
 - Creates default `config.toml`
-- Generates `.tether` shortcut file for GUI
-- Installs `tether-core` Python package (for state API)
+- Generates `.workbooks` shortcut file for GUI
+- Installs `workbooks-core` Python package (for state API)
 
 **Options:**
 - `--path <path>` - Create at specific location (default: `./<name>`)
@@ -251,22 +251,22 @@ cd my-pipeline
 
 **Example:**
 ```bash
-tether init data-pipeline --template data-analysis
+workbooks init data-pipeline --template data-analysis
 ```
 
-### `tether run [notebook]`
+### `workbooks run [notebook]`
 
 Run a notebook or entire pipeline.
 
 ```bash
 # Run specific notebook
-tether run notebooks/load_data.ipynb
+workbooks run notebooks/load_data.ipynb
 
 # Run all notebooks (inferred dependency order)
-tether run --all
+workbooks run --all
 
 # Resume interrupted run
-tether resume
+workbooks resume
 ```
 
 **Behavior:**
@@ -295,16 +295,16 @@ Run completed in 3.1s
 Run ID: run_20250118_143052
 ```
 
-### `tether mcp --project <path>`
+### `workbooks mcp --project <path>`
 
 Start MCP server for Claude Desktop integration.
 
 ```bash
-tether mcp --project /Users/you/Projects/my-pipeline
+workbooks mcp --project /Users/you/Projects/my-pipeline
 ```
 
 **Behavior:**
-- Validates project path exists and has `.tether/` directory
+- Validates project path exists and has `.workbooks/` directory
 - Starts or connects to existing engine server for project
 - Starts FastMCP server on stdio (for Claude Desktop)
 - Registers MCP tools with project context
@@ -316,27 +316,27 @@ tether mcp --project /Users/you/Projects/my-pipeline
 - Can be run manually for debugging
 
 **Options:**
-- `--project <path>` - Required: Path to Tether project
+- `--project <path>` - Required: Path to Workbooks project
 - `--debug` - Enable debug logging
 
 **Example Claude Desktop Config:**
 ```json
 {
   "mcpServers": {
-    "tether-my-pipeline": {
-      "command": "tether",
+    "workbooks-my-pipeline": {
+      "command": "workbooks",
       "args": ["mcp", "--project", "/Users/you/Projects/my-pipeline"]
     }
   }
 }
 ```
 
-### `tether status`
+### `workbooks status`
 
 Show project and pipeline status.
 
 ```bash
-tether status
+workbooks status
 ```
 
 **Output:**
@@ -363,52 +363,52 @@ Engine: Running (port 8765)
 - `--verbose` - Show detailed status (cell counts, state variables, etc.)
 - `--json` - Output as JSON for scripting
 
-### `tether state <subcommand>`
+### `workbooks state <subcommand>`
 
 Manage state system (future feature, once state is implemented).
 
 ```bash
 # List state variables
-tether state list
+workbooks state list
 
 # Inspect a state variable
-tether state inspect customers
+workbooks state inspect customers
 
 # Delete a state variable
-tether state delete customers
+workbooks state delete customers
 
 # Fork state to new branch
-tether state fork experiment-1
+workbooks state fork experiment-1
 
 # Switch to state branch
-tether state switch experiment-1
+workbooks state switch experiment-1
 ```
 
-### `tether config <subcommand>`
+### `workbooks config <subcommand>`
 
 Manage global configuration.
 
 ```bash
 # Set default project
-tether config set-default /path/to/project
-tether config set-default .  # Use current directory
+workbooks config set-default /path/to/project
+workbooks config set-default .  # Use current directory
 
 # Show current default project
-tether config get-default
+workbooks config get-default
 # Output: /Users/you/Projects/my-pipeline
 
 # Remove default project
-tether config unset-default
+workbooks config unset-default
 
 # Show all global config
-tether config show
+workbooks config show
 
 # Edit config file directly
-tether config edit  # Opens in $EDITOR
+workbooks config edit  # Opens in $EDITOR
 ```
 
 **Behavior:**
-- Reads/writes `~/.tether/config.toml`
+- Reads/writes `~/.workbooks/config.toml`
 - Validates project paths exist
 - Creates config file if doesn't exist
 - Provides helpful error messages
@@ -418,22 +418,22 @@ tether config edit  # Opens in $EDITOR
 - Share config between CLI and desktop app
 - Manage recent projects list
 
-### `tether logs [notebook]`
+### `workbooks logs [notebook]`
 
 View execution logs.
 
 ```bash
 # View all recent logs
-tether logs
+workbooks logs
 
 # View logs for specific notebook
-tether logs notebooks/train_model.ipynb
+workbooks logs notebooks/train_model.ipynb
 
 # View logs for specific run
-tether logs --run run_20250118_141230
+workbooks logs --run run_20250118_141230
 
 # Follow logs in real-time
-tether logs --follow
+workbooks logs --follow
 ```
 
 **Output:**
@@ -445,19 +445,19 @@ tether logs --follow
 [2025-01-18 14:12:33] [train_model.ipynb] Execution failed
 ```
 
-### `tether resume [notebook|run-id]`
+### `workbooks resume [notebook|run-id]`
 
 Resume interrupted execution.
 
 ```bash
 # Resume last interrupted run
-tether resume
+workbooks resume
 
 # Resume specific notebook
-tether resume notebooks/train_model.ipynb
+workbooks resume notebooks/train_model.ipynb
 
 # Resume specific run ID
-tether resume run_20250118_141230
+workbooks resume run_20250118_141230
 ```
 
 **Behavior:**
@@ -466,50 +466,50 @@ tether resume run_20250118_141230
 - Validates code hasn't changed (hash chain)
 - Warns if code changed since checkpoint
 
-### `tether schedule <subcommand>`
+### `workbooks schedule <subcommand>`
 
 Manage scheduled runs (future feature).
 
 ```bash
 # Schedule a notebook
-tether schedule add notebooks/daily_report.ipynb --cron "0 9 * * *"
+workbooks schedule add notebooks/daily_report.ipynb --cron "0 9 * * *"
 
 # List schedules
-tether schedule list
+workbooks schedule list
 
 # Disable a schedule
-tether schedule disable daily_report
+workbooks schedule disable daily_report
 
 # View schedule history
-tether schedule history daily_report
+workbooks schedule history daily_report
 ```
 
-### `tether open [path]`
+### `workbooks open [path]`
 
-Open project in Tether GUI app.
+Open project in Workbooks GUI app.
 
 ```bash
 # Open current project
-tether open
+workbooks open
 
 # Open specific project
-tether open /path/to/project
+workbooks open /path/to/project
 
 # Open specific notebook in GUI
-tether open notebooks/analysis.ipynb
+workbooks open notebooks/analysis.ipynb
 ```
 
 **Behavior:**
 - Launches Tauri app with project loaded
 - If app already running, opens in new tab
-- Uses `.tether` shortcut file format
+- Uses `.workbooks` shortcut file format
 
-### `tether install-cli`
+### `workbooks install-cli`
 
 Install CLI to system PATH (helper command).
 
 ```bash
-tether install-cli
+workbooks install-cli
 ```
 
 **Behavior:**
@@ -520,44 +520,44 @@ tether install-cli
 
 This can be used if the user skipped CLI installation during app setup.
 
-### `tether version`
+### `workbooks version`
 
 Show version information.
 
 ```bash
-tether version
+workbooks version
 ```
 
 **Output:**
 ```
-tether 0.1.0
-tether-app 0.1.0
+workbooks 0.1.0
+workbooks-app 0.1.0
 engine-server 0.1.0
 Python: 3.11.7
 UV: 0.5.0
 ```
 
-### `tether doctor`
+### `workbooks doctor`
 
 Diagnose installation and configuration issues.
 
 ```bash
-tether doctor
+workbooks doctor
 ```
 
 **Output:**
 ```
-Checking Tether installation...
-✓ tether CLI installed
+Checking Workbooks installation...
+✓ workbooks CLI installed
 ✓ Tauri app installed
 ✓ UV available
 ✓ Python 3.11+ available
-✗ Project .tether/ directory missing
-  Fix: Run 'tether init <name>' to create a project
+✗ Project .workbooks/ directory missing
+  Fix: Run 'workbooks init <name>' to create a project
 
 Engine server: ✓ Running on port 8765
 Claude Desktop config: ✓ Found at ~/Library/Application Support/Claude/
-  - tether-my-pipeline: ✓ Configured correctly
+  - workbooks-my-pipeline: ✓ Configured correctly
 ```
 
 ## CLI Architecture Benefits
@@ -565,7 +565,7 @@ Claude Desktop config: ✓ Found at ~/Library/Application Support/Claude/
 ### Code Sharing
 - **Project management** - Same code for init, loading, validation
 - **Engine communication** - Shared HTTP client for engine server
-- **Config handling** - Single source of truth for `.tether/config.toml`
+- **Config handling** - Single source of truth for `.workbooks/config.toml`
 - **File operations** - Consistent file system abstractions
 
 ### Distribution
@@ -587,7 +587,7 @@ Use `clap` with derive macros for clean command definitions:
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
-#[command(name = "tether")]
+#[command(name = "workbooks")]
 #[command(version = env!("CARGO_PKG_VERSION"))]
 #[command(about = "Durable workbook orchestration")]
 struct Cli {
@@ -649,8 +649,8 @@ async fn main() {
 ## Future Enhancements
 
 - **Shell completions** - Generate for bash, zsh, fish
-- **Interactive mode** - `tether shell` for REPL-like experience
-- **Notebook diffing** - `tether diff notebook.ipynb`
-- **Export/import** - `tether export`, `tether import`
-- **Remote execution** - `tether run --remote` (cloud execution)
-- **Watch mode** - `tether watch` (auto-run on file changes)
+- **Interactive mode** - `workbooks shell` for REPL-like experience
+- **Notebook diffing** - `workbooks diff notebook.ipynb`
+- **Export/import** - `workbooks export`, `workbooks import`
+- **Remote execution** - `workbooks run --remote` (cloud execution)
+- **Watch mode** - `workbooks watch` (auto-run on file changes)

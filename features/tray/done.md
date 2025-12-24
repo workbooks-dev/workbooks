@@ -3,7 +3,7 @@
 ## Backend Implementation (Rust)
 
 - [x] Created `src-tauri/src/recent_projects.rs` module
-  - Stores recent projects in `~/.tether/recent_projects.json`
+  - Stores recent projects in `~/.workbooks/recent_projects.json`
   - Maintains max 3 recent projects, sorted by last opened
   - Auto-updates when projects are created/opened/loaded
 
@@ -15,7 +15,7 @@
   - "View Scheduler" menu item
   - "Install MCP..." menu item
   - "Scheduler: Running" status indicator (disabled)
-  - "Quit Tether" menu item
+  - "Quit Workbooks" menu item
 
 - [x] Tray event handler
   - Emits `open-project` event for recent project clicks

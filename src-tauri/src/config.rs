@@ -7,8 +7,8 @@ use std::path::Path;
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "kebab-case")]
 pub enum VenvStrategy {
-    /// Let Tether manage a centralized virtual environment
-    TetherManaged,
+    /// Let Workbooks manage a centralized virtual environment
+    WorkbooksManaged,
     /// Use the user's own virtual environment
     UserManaged,
     /// Auto-detect based on project markers (uv.lock, requirements.txt, etc.)
@@ -41,47 +41,47 @@ impl Default for PythonConfig {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub struct TetherConfig {
+pub struct WorkbooksConfig {
     #[serde(default)]
     pub python: PythonConfig,
 }
 
-impl Default for TetherConfig {
+impl Default for WorkbooksConfig {
     fn default() -> Self {
-        TetherConfig {
+        WorkbooksConfig {
             python: PythonConfig::default(),
         }
     }
 }
 
-/// Load Tether configuration from .tether/config.toml
-pub fn load_config(project_root: &Path) -> Result<TetherConfig> {
-    let config_path = project_root.join(".tether").join("config.toml");
+/// Load Workbooks configuration from .workbooks/config.toml
+pub fn load_config(project_root: &Path) -> Result<WorkbooksConfig> {
+    let config_path = project_root.join(".workbooks").join("config.toml");
 
     if !config_path.exists() {
-        return Ok(TetherConfig::default());
+        return Ok(WorkbooksConfig::default());
     }
 
     let config_str = fs::read_to_string(&config_path)
         .context("Failed to read config.toml")?;
 
-    let config: TetherConfig = toml::from_str(&config_str)
-        .unwrap_or_else(|_| TetherConfig::default());
+    let config: WorkbooksConfig = toml::from_str(&config_str)
+        .unwrap_or_else(|_| WorkbooksConfig::default());
 
     Ok(config)
 }
 
-/// Save Tether configuration to .tether/config.toml
-pub fn save_config(project_root: &Path, config: &TetherConfig) -> Result<()> {
-    let tether_dir = project_root.join(".tether");
+/// Save Workbooks configuration to .workbooks/config.toml
+pub fn save_config(project_root: &Path, config: &WorkbooksConfig) -> Result<()> {
+    let workbooks_dir = project_root.join(".workbooks");
 
-    // Ensure .tether directory exists
-    if !tether_dir.exists() {
-        fs::create_dir_all(&tether_dir)
-            .context("Failed to create .tether directory")?;
+    // Ensure .workbooks directory exists
+    if !workbooks_dir.exists() {
+        fs::create_dir_all(&workbooks_dir)
+            .context("Failed to create .workbooks directory")?;
     }
 
-    let config_path = tether_dir.join("config.toml");
+    let config_path = workbooks_dir.join("config.toml");
 
     // Read existing config to preserve other sections
     let existing_toml: toml::Value = if config_path.exists() {

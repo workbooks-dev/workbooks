@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-FastAPI-based Jupyter engine manager for Tether.
+FastAPI-based Jupyter engine manager for Workbooks.
 Manages engine lifecycle and code execution.
 """
 import sys
@@ -118,7 +118,7 @@ async def lifespan(app: FastAPI):
     secret_values.clear()
 
 
-app = FastAPI(title="Tether Engine Server", lifespan=lifespan)
+app = FastAPI(title="Workbooks Engine Server", lifespan=lifespan)
 
 # Enable CORS for Tauri
 app.add_middleware(
@@ -225,12 +225,12 @@ async def start_engine(request: StartEngineRequest):
         # Slugify the project name to ensure it's a valid kernel spec name (no spaces)
         project_name = os.path.basename(project_root)
         slugified_name = slugify_kernel_name(project_name)
-        engine_spec_name = f"tether_{slugified_name}"
+        engine_spec_name = f"workbooks_{slugified_name}"
         # print(f"DEBUG: project_name = '{project_name}', slugified = '{slugified_name}', engine_spec_name = '{engine_spec_name}'")
 
         # First install the basic kernel spec
         install_result = subprocess.run(
-            [venv_python, "-m", "ipykernel", "install", "--user", "--name", engine_spec_name, "--display-name", f"Tether ({os.path.basename(project_root)})"],
+            [venv_python, "-m", "ipykernel", "install", "--user", "--name", engine_spec_name, "--display-name", f"Workbooks ({os.path.basename(project_root)})"],
             capture_output=True,
             text=True
         )
@@ -266,7 +266,7 @@ async def start_engine(request: StartEngineRequest):
                 current_path = os.environ.get('PATH', '/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin')
                 kernel_spec['env']['PATH'] = f"{venv_bin}:{current_path}"
 
-                # Inject custom environment variables (like TETHER_PROJECT_FOLDER)
+                # Inject custom environment variables (like WORKBOOKS_PROJECT_FOLDER)
                 if request.env_vars:
                     for key, value in request.env_vars.items():
                         kernel_spec['env'][key] = value
@@ -1066,7 +1066,7 @@ async def agent_chat(request: AgentChatRequest):
             # If project_root is provided, set working directory context
             if request.project_root:
                 # Add project context to the prompt
-                context_prompt = f"""You are helping with a Tether project at: {request.project_root}
+                context_prompt = f"""You are helping with a Workbooks project at: {request.project_root}
 
 User request: {request.message}"""
             else:
@@ -1136,7 +1136,7 @@ User request: {request.message}"""
 
 if __name__ == "__main__":
     port = int(sys.argv[1]) if len(sys.argv) > 1 else 8765
-    logger.info(f"=== Tether Engine Server Starting ===")
+    logger.info(f"=== Workbooks Engine Server Starting ===")
     logger.info(f"Port: {port}")
     logger.info(f"Python: {sys.executable}")
     logger.info(f"Working directory: {os.getcwd()}")

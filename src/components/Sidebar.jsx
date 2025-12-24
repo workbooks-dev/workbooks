@@ -297,12 +297,12 @@ export function Sidebar({ projectRoot, projectName, onOpenFile, onFileDeleted, o
 
     setupFileWatcher();
 
-    window.addEventListener("tether:files-changed", handleFilesChanged);
-    window.addEventListener("tether:secrets-changed", handleSecretsChanged);
+    window.addEventListener("workbooks:files-changed", handleFilesChanged);
+    window.addEventListener("workbooks:secrets-changed", handleSecretsChanged);
 
     return () => {
-      window.removeEventListener("tether:files-changed", handleFilesChanged);
-      window.removeEventListener("tether:secrets-changed", handleSecretsChanged);
+      window.removeEventListener("workbooks:files-changed", handleFilesChanged);
+      window.removeEventListener("workbooks:secrets-changed", handleSecretsChanged);
       if (unlistenFileSystem) {
         unlistenFileSystem();
       }
@@ -342,7 +342,7 @@ export function Sidebar({ projectRoot, projectName, onOpenFile, onFileDeleted, o
 
   const loadRecentWorkbooks = () => {
     // Load recent workbooks from localStorage
-    const projectKey = `tether_recent_workbooks_${projectRoot}`;
+    const projectKey = `workbooks_recent_workbooks_${projectRoot}`;
     const recent = localStorage.getItem(projectKey);
     if (recent) {
       try {
@@ -368,7 +368,7 @@ export function Sidebar({ projectRoot, projectName, onOpenFile, onFileDeleted, o
 
   const updateRecentWorkbook = (workbookPath) => {
     // Update recent workbooks list
-    const projectKey = `tether_recent_workbooks_${projectRoot}`;
+    const projectKey = `workbooks_recent_workbooks_${projectRoot}`;
     const recent = recentWorkbooks.filter(path => path !== workbookPath);
     recent.unshift(workbookPath); // Add to front
     const trimmed = recent.slice(0, 20); // Keep only 20 most recent

@@ -40,10 +40,10 @@ for key, value in os.environ.items():
     if 'DJANGO' in key.upper():
         print(f"  {key} = {value}")
 
-# Test 4: List all environment variables containing 'TETHER'
-print("\nAll environment variables containing 'TETHER':")
+# Test 4: List all environment variables containing 'WORKBOOKS'
+print("\nAll environment variables containing 'WORKBOOKS':")
 for key, value in os.environ.items():
-    if 'TETHER' in key.upper():
+    if 'WORKBOOKS' in key.upper():
         print(f"  {key} = {value}")
 ```
 
@@ -71,8 +71,8 @@ django_active == "yes": True
 All environment variables containing 'DJANGO':
   DJANGO_ACTIVE = yes
 
-All environment variables containing 'TETHER':
-  TETHER_PROJECT_FOLDER = /path/to/project
+All environment variables containing 'WORKBOOKS':
+  WORKBOOKS_PROJECT_FOLDER = /path/to/project
 ```
 
 ## Troubleshooting
@@ -80,11 +80,11 @@ All environment variables containing 'TETHER':
 If the secret is `None`:
 
 1. **Check terminal for DEBUG output** - Did the secrets load?
-2. **Check the .tether folder exists** - Is there a `.tether/secrets.db` file?
+2. **Check the .workbooks folder exists** - Is there a `.workbooks/secrets.db` file?
 3. **Restart the kernel** - Click "Restart" button in the workbook toolbar
 4. **Check the secrets.db** - You can inspect it with:
    ```bash
-   sqlite3 .tether/secrets.db "SELECT id, key, created_at FROM secrets;"
+   sqlite3 .workbooks/secrets.db "SELECT id, key, created_at FROM secrets;"
    ```
 
 If you see errors like "Failed to initialize SecretsManager", the database file might not exist yet. Make sure you added a secret through the UI first.

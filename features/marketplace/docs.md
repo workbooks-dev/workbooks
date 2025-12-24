@@ -10,12 +10,12 @@ The Marketplace provides users with pre-built notebook templates for common task
 
 ### Two-Repo Model
 
-1. **Official Templates** (`tether-dev/templates-official`)
-   - Curated, reviewed templates maintained by Tether team
+1. **Official Templates** (`workbooks-dev/templates-official`)
+   - Curated, reviewed templates maintained by Workbooks team
    - High quality, well-documented, secure
    - Examples: AWS S3 sync, Postgres ETL, Slack notifications
 
-2. **Community Templates** (`tether-dev/templates-community`)
+2. **Community Templates** (`workbooks-dev/templates-community`)
    - User-contributed templates via PR
    - Reviewed for malicious code but not quality-guaranteed
    - Wider variety, experimental workflows
@@ -36,7 +36,7 @@ template-name/
 {
   "name": "AWS S3 Sync",
   "description": "Sync files between local storage and S3",
-  "author": "Tether",
+  "author": "Workbooks",
   "category": "Cloud Storage",
   "tags": ["aws", "s3", "sync", "cloud"],
   "version": "1.0.0",
@@ -49,7 +49,7 @@ template-name/
 
 Templates are normal notebooks - **no special placeholder injection system**.
 
-Instead, Tether automatically detects missing secrets:
+Instead, Workbooks automatically detects missing secrets:
 
 1. Parse notebook for `os.environ["KEY"]` or `os.getenv("KEY")` usage
 2. Check if each KEY exists in project secrets
@@ -97,7 +97,7 @@ On template install:
 - Template versioning (user chooses version to install)
 - Private template repos (enterprise use case)
 - Template creation wizard in app
-- Direct URL import: `tether install https://github.com/user/template`
+- Direct URL import: `workbooks install https://github.com/user/template`
 
 ## Security & Moderation
 

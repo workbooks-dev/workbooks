@@ -14,7 +14,7 @@
 - [ ] Implement `UpdateManager` struct
 - [ ] Implement GitHub Releases API client
 - [ ] Implement version comparison using semver
-- [ ] Implement update cache (read/write `~/.tether/update_cache.json`)
+- [ ] Implement update cache (read/write `~/.workbooks/update_cache.json`)
 - [ ] Implement background update checker (every 24 hours)
 - [ ] Add UpdateManager to AppState
 - [ ] Register updater Tauri commands in lib.rs

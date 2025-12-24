@@ -306,10 +306,10 @@ function WorkbookCell({ cell, index, workbookPath, onUpdate, onDelete, onExecute
 
                       // If it's a relative path or absolute local path, convert it
                       if (src && !src.startsWith('http://') && !src.startsWith('https://') && !src.startsWith('data:')) {
-                        // Replace $TETHER_PROJECT_FOLDER with actual project root
-                        // This supports both $TETHER_PROJECT_FOLDER and ${TETHER_PROJECT_FOLDER}
+                        // Replace $WORKBOOKS_PROJECT_FOLDER with actual project root
+                        // This supports both $WORKBOOKS_PROJECT_FOLDER and ${WORKBOOKS_PROJECT_FOLDER}
                         const projectRootPath = workbookPath.substring(0, workbookPath.lastIndexOf('/notebooks'));
-                        imgSrc = imgSrc.replace(/\$\{?TETHER_PROJECT_FOLDER\}?/g, projectRootPath);
+                        imgSrc = imgSrc.replace(/\$\{?WORKBOOKS_PROJECT_FOLDER\}?/g, projectRootPath);
 
                         // Check if it's a relative path (after variable replacement)
                         if (!imgSrc.startsWith('/')) {
@@ -479,9 +479,9 @@ function WorkbookCell({ cell, index, workbookPath, onUpdate, onDelete, onExecute
                 {(executionElapsed / 1000).toFixed(1)}s
               </div>
             )}
-            {!isRunning && cell.metadata?.tether?.duration_ms && (
-              <div className={STYLES.execution.metadata} title={`Last run: ${cell.metadata.tether.last_run ? new Date(cell.metadata.tether.last_run).toLocaleString() : 'Unknown'}`}>
-                {(cell.metadata.tether.duration_ms / 1000).toFixed(2)}s
+            {!isRunning && cell.metadata?.workbooks?.duration_ms && (
+              <div className={STYLES.execution.metadata} title={`Last run: ${cell.metadata.workbooks.last_run ? new Date(cell.metadata.workbooks.last_run).toLocaleString() : 'Unknown'}`}>
+                {(cell.metadata.workbooks.duration_ms / 1000).toFixed(2)}s
               </div>
             )}
           </div>
@@ -935,8 +935,8 @@ export function WorkbookViewer({ workbookPath, projectRoot, autosaveEnabled = tr
       }
     };
 
-    window.addEventListener("tether:save-all", handleSaveAll);
-    return () => window.removeEventListener("tether:save-all", handleSaveAll);
+    window.addEventListener("workbooks:save-all", handleSaveAll);
+    return () => window.removeEventListener("workbooks:save-all", handleSaveAll);
   }, [hasUnsavedChanges]);
 
   // Scan for secrets whenever notebook changes

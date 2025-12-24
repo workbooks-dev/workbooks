@@ -1,12 +1,12 @@
-# TETHER_PROJECT_FOLDER Environment Variable
+# WORKBOOKS_PROJECT_FOLDER Environment Variable
 
 ## What is it?
 
-`TETHER_PROJECT_FOLDER` is an environment variable automatically injected into every workbook kernel when it starts. It contains the **absolute path** to your project root directory.
+`WORKBOOKS_PROJECT_FOLDER` is an environment variable automatically injected into every workbook kernel when it starts. It contains the **absolute path** to your project root directory.
 
 ## Why use it?
 
-Instead of hardcoding file paths or using relative paths that might break, you can use `TETHER_PROJECT_FOLDER` to access files in your project reliably.
+Instead of hardcoding file paths or using relative paths that might break, you can use `WORKBOOKS_PROJECT_FOLDER` to access files in your project reliably.
 
 ## How to use it
 
@@ -17,7 +17,7 @@ import os
 import pandas as pd
 
 # Get the project folder path
-project_folder = os.environ["TETHER_PROJECT_FOLDER"]
+project_folder = os.environ["WORKBOOKS_PROJECT_FOLDER"]
 
 # Read a CSV file from the project
 df = pd.read_csv(os.path.join(project_folder, "data", "sales.csv"))
@@ -30,11 +30,11 @@ print(df.head())
 import os
 
 # Save a file to the project root
-project_folder = os.environ["TETHER_PROJECT_FOLDER"]
+project_folder = os.environ["WORKBOOKS_PROJECT_FOLDER"]
 output_path = os.path.join(project_folder, "output.txt")
 
 with open(output_path, "w") as f:
-    f.write("Hello from Tether!")
+    f.write("Hello from Workbooks!")
 
 print(f"File saved to: {output_path}")
 ```
@@ -45,10 +45,10 @@ print(f"File saved to: {output_path}")
 import os
 
 # Verify the environment variable is set
-if "TETHER_PROJECT_FOLDER" in os.environ:
-    print(f"Project folder: {os.environ['TETHER_PROJECT_FOLDER']}")
+if "WORKBOOKS_PROJECT_FOLDER" in os.environ:
+    print(f"Project folder: {os.environ['WORKBOOKS_PROJECT_FOLDER']}")
 else:
-    print("TETHER_PROJECT_FOLDER not set (are you running outside Tether?)")
+    print("WORKBOOKS_PROJECT_FOLDER not set (are you running outside Workbooks?)")
 ```
 
 ## Common patterns
@@ -73,7 +73,7 @@ my-project/
 ```python
 import os
 
-project = os.environ["TETHER_PROJECT_FOLDER"]
+project = os.environ["WORKBOOKS_PROJECT_FOLDER"]
 
 # Read raw data
 raw_data = os.path.join(project, "data", "raw", "sales.csv")
@@ -98,7 +98,7 @@ def project_path(*parts):
     Example:
         project_path("data", "sales.csv")  # Returns /path/to/project/data/sales.csv
     """
-    return str(Path(os.environ["TETHER_PROJECT_FOLDER"]).joinpath(*parts))
+    return str(Path(os.environ["WORKBOOKS_PROJECT_FOLDER"]).joinpath(*parts))
 
 # Usage
 df = pd.read_csv(project_path("data", "sales.csv"))
@@ -113,22 +113,22 @@ df = pd.read_csv(project_path("data", "sales.csv"))
 
 ## Troubleshooting
 
-**Q: What if I'm not in Tether?**
+**Q: What if I'm not in Workbooks?**
 
-If you run the notebook in Jupyter or VS Code, `TETHER_PROJECT_FOLDER` won't be set. You can add a fallback:
+If you run the notebook in Jupyter or VS Code, `WORKBOOKS_PROJECT_FOLDER` won't be set. You can add a fallback:
 
 ```python
 import os
 
 project_folder = os.environ.get(
-    "TETHER_PROJECT_FOLDER",
-    "/path/to/default/project"  # Fallback for non-Tether environments
+    "WORKBOOKS_PROJECT_FOLDER",
+    "/path/to/default/project"  # Fallback for non-Workbooks environments
 )
 ```
 
 **Q: Can I change it?**
 
-While you technically can modify `os.environ["TETHER_PROJECT_FOLDER"]`, it's not recommended. It's meant to be read-only and always point to your project root.
+While you technically can modify `os.environ["WORKBOOKS_PROJECT_FOLDER"]`, it's not recommended. It's meant to be read-only and always point to your project root.
 
 ## Migration from hardcoded paths
 
@@ -138,11 +138,11 @@ While you technically can modify `os.environ["TETHER_PROJECT_FOLDER"]`, it's not
 df = pd.read_csv("/Users/you/projects/my-project/data/sales.csv")
 ```
 
-**After (with TETHER_PROJECT_FOLDER):**
+**After (with WORKBOOKS_PROJECT_FOLDER):**
 
 ```python
 import os
-project = os.environ["TETHER_PROJECT_FOLDER"]
+project = os.environ["WORKBOOKS_PROJECT_FOLDER"]
 df = pd.read_csv(os.path.join(project, "data", "sales.csv"))
 ```
 

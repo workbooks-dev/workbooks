@@ -2,7 +2,7 @@
 
 ## Overview
 
-Tether's state system allows workbooks to share data through a persistent, durable key-value store. This enables workbook orchestration without explicit wiring.
+Workbooks's state system allows workbooks to share data through a persistent, durable key-value store. This enables workbook orchestration without explicit wiring.
 
 **Status:** Not yet implemented. This is a future feature.
 
@@ -29,7 +29,7 @@ Tether's state system allows workbooks to share data through a persistent, durab
 ### Python API
 
 ```python
-from tether import state
+from workbooks import state
 
 # Read from state (blocks until available or uses cached)
 customers_df = state.get("customers")
@@ -73,12 +73,12 @@ print(state.workbook_name)  # Current workbook name
 ### Storage Layer
 
 **SQLite Database:**
-- `.tether/state.db` - Metadata and small values
+- `.workbooks/state.db` - Metadata and small values
 - Index on keys for fast lookups
 - Tracks creation/modification times
 
 **Blob Storage:**
-- `.tether/state/` - Directory for large pickled objects
+- `.workbooks/state/` - Directory for large pickled objects
 - Filenames: `{key}.pkl`
 - Uses `cloudpickle` for serialization
 - Supports DataFrames, models, complex objects
@@ -106,13 +106,13 @@ CREATE TABLE state_dependencies (
 );
 ```
 
-### Python Package: tether-core
+### Python Package: workbooks-core
 
-**Location:** `tether-core/` (to be created)
+**Location:** `workbooks-core/` (to be created)
 
 **API Implementation:**
 ```python
-# tether/state.py
+# workbooks/state.py
 class StateManager:
     def get(self, key: str, default=None, wait=False, timeout=None):
         """
@@ -184,13 +184,13 @@ impl StateManager {
 **Cell-by-Cell Checkpoints:**
 1. Before each cell executes, save current namespace
 2. Filter to picklable objects only
-3. Store in `.tether/runs/{run_id}/checkpoints/cell-{n}.pkl`
+3. Store in `.workbooks/runs/{run_id}/checkpoints/cell-{n}.pkl`
 4. On resume, load latest checkpoint and continue from next cell
 5. Chain cell hashes so code changes invalidate downstream checkpoints
 
 **Checkpoint Structure:**
 ```
-.tether/runs/{run_id}/
+.workbooks/runs/{run_id}/
 ├── checkpoints/
 │   ├── cell-0.pkl
 │   ├── cell-1.pkl
@@ -264,7 +264,7 @@ train_model.ipynb
 ```
 
 **Execution Order:**
-- Tether can determine execution order from dependencies
+- Workbooks can determine execution order from dependencies
 - Run workbooks in correct sequence
 - Parallel execution where possible
 

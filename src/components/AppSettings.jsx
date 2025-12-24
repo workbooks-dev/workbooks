@@ -341,7 +341,7 @@ export function AppSettings({ onClose }) {
               )}
 
               <div className="mt-3 space-y-1.5 text-xs text-gray-500">
-                <p>✓ Encrypted and stored locally in ~/.tether/app/</p>
+                <p>✓ Encrypted and stored locally in ~/.workbooks/app/</p>
                 <p>✓ Protected by AES-256-GCM encryption</p>
                 <p>
                   Get your API key from{" "}

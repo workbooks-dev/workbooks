@@ -161,7 +161,7 @@ Supports rich Jupyter output types:
 **With Engine:**
 - One engine per workbook
 - Engine lifecycle tied to workbook tab
-- TETHER_PROJECT_FOLDER environment variable injected
+- WORKBOOKS_PROJECT_FOLDER environment variable injected
 
 **With Secrets (Future):**
 - Lock icon when secrets active

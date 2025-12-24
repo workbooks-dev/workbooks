@@ -1,4 +1,4 @@
-# Tether Development Changelog
+# Workbooks Development Changelog
 
 This file tracks major features and improvements as they're completed.
 
@@ -10,7 +10,7 @@ This file tracks major features and improvements as they're completed.
 - **Feature**: File list now stays current with external changes
   - **Backend**: Implemented file system watching using `notify` crate (src-tauri/src/watcher.rs)
   - **Debouncing**: 500ms debounce prevents event spam during rapid changes
-  - **Filtering**: Automatically ignores .git, .tether, node_modules, .venv, __pycache__, etc.
+  - **Filtering**: Automatically ignores .git, .workbooks, node_modules, .venv, __pycache__, etc.
   - **Event Architecture**: Emits 'file-system-changed' events to frontend via Tauri
   - **Auto-Start**: File watcher automatically starts when project opens (src-tauri/src/lib.rs:204-230,256-275)
   - **Frontend Integration**: Sidebar listens for file system events and auto-refreshes (src/components/Sidebar.jsx:237-258)
@@ -64,7 +64,7 @@ This file tracks major features and improvements as they're completed.
 - **Feature**: Claude Agent SDK integration for inline chat assistance
   - **Backend**: Python SDK installed in engine environment via UV
   - **Endpoint**: `/agent/chat` in engine_server.py with SSE streaming
-  - **Storage**: SQLite database at `~/.tether/chat_sessions.db` for chat history
+  - **Storage**: SQLite database at `~/.workbooks/chat_sessions.db` for chat history
   - **UI Component**: AiSidebar.jsx with session management and real-time chat
   - **Integration**: Always-visible sidebar that prompts to enable AI when disabled
   - **Tauri Commands**:
@@ -120,8 +120,8 @@ This file tracks major features and improvements as they're completed.
 - **Result**: Full tray functionality with correct window lifecycle management
 
 **Action Window - Central Launcher and Entry Point (Dec 20, 2025)**
-- **New Entry Point**: Action Window now serves as the main entry point to Tether
-  - Clean, centered launcher UI with Tether branding
+- **New Entry Point**: Action Window now serves as the main entry point to Workbooks
+  - Clean, centered launcher UI with Workbooks branding
   - Appears on app startup when no project is loaded
   - Replaces the previous "Welcome" screen with richer functionality
 - **Recent Projects**: Shows 3 most recently opened projects
@@ -144,13 +144,13 @@ This file tracks major features and improvements as they're completed.
   - Recent projects list shared between tray and Action Window
   - Create/Open project actions accessible from both
   - **FIXED:** Tray events now properly received when window is hidden
-- **Clean Design**: Follows Tether style guide
+- **Clean Design**: Follows Workbooks style guide
   - Grayscale palette with blue accents
   - Minimal, professional aesthetic
   - Smooth transitions and hover states
   - Proper loading and empty states
 - **Backend**: New `get_recent_projects` Tauri command
-  - Returns recent projects from ~/.tether/recent_projects.json
+  - Returns recent projects from ~/.workbooks/recent_projects.json
   - Integrated with existing recent_projects.rs module
   - Backend: `src-tauri/src/lib.rs` - Added get_recent_projects command (line 273)
   - Frontend: `src/components/ActionWindow.jsx` - New launcher component
@@ -198,7 +198,7 @@ This file tracks major features and improvements as they're completed.
   - "Create Project..." and "Open Project..." menu items
   - "View Runs" and "View Scheduler" navigation items
   - "Install MCP..." placeholder for future MCP management
-  - Automatic recent projects tracking in `~/.tether/recent_projects.json`
+  - Automatic recent projects tracking in `~/.workbooks/recent_projects.json`
   - Backend: `src-tauri/src/recent_projects.rs` - Recent projects storage and retrieval
   - Backend: `src-tauri/src/lib.rs` - Dynamic tray menu construction, event emission
   - Frontend: `src/App.jsx` - Tray event listeners, window management, navigation
@@ -223,9 +223,9 @@ This file tracks major features and improvements as they're completed.
 **System Tray for Background Scheduling (Dec 20, 2024)**
 - **System Tray Implementation**: App now runs in menu bar/system tray for reliable scheduled execution
   - Added `tray-icon` feature to Tauri
-  - System tray menu with "Open Tether", "Scheduler: Running", and "Quit Tether" options
+  - System tray menu with "Open Workbooks", "Scheduler: Running", and "Quit Workbooks" options
   - Closing window hides the app instead of quitting - scheduler continues running in background
-  - App only quits when "Quit Tether" is selected from tray menu
+  - App only quits when "Quit Workbooks" is selected from tray menu
   - Solves the core issue: schedules now work even when the main window is closed
   - Familiar UX pattern similar to Docker Desktop, Ollama, and other menu bar apps
   - Files: `src-tauri/Cargo.toml`, `src-tauri/src/lib.rs`
@@ -248,36 +248,36 @@ This file tracks major features and improvements as they're completed.
   - Other shell commands (e.g., `!ls`, `!pwd`) remain unchanged
   - Files: `src-tauri/engine_server.py`
 
-**CLI Implementation: `tether run` and `tether schedule` (Dec 19, 2024)**
+**CLI Implementation: `workbooks run` and `workbooks schedule` (Dec 19, 2024)**
 - **Multi-Binary Cargo Setup**: Configured project to build separate CLI and GUI binaries
-  - Added `[[bin]]` definitions for `tether` (CLI) and `tether-gui` (GUI)
+  - Added `[[bin]]` definitions for `workbooks` (CLI) and `workbooks-gui` (GUI)
   - Made core modules public: `python`, `project`, `engine_http`, `scheduler`
-  - Shared library code accessible to both binaries via `tether_lib`
+  - Shared library code accessible to both binaries via `workbooks_lib`
   - Files: `src-tauri/Cargo.toml`, `src-tauri/src/lib.rs`, `src-tauri/src/cli.rs`
 
-- **`tether run` Command**: Execute notebooks from the command line
+- **`workbooks run` Command**: Execute notebooks from the command line
   - Parses and executes `.ipynb` files with automatic project detection
-  - Walks up directory tree to find `.tether` directory for project root
-  - Falls back to "basic mode" if no Tether project found
+  - Walks up directory tree to find `.workbooks` directory for project root
+  - Falls back to "basic mode" if no Workbooks project found
   - Automatically ensures Python venv and syncs dependencies
   - Starts engine server and executes all cells via HTTP API
   - Displays execution results, outputs, and errors in terminal
   - Shows summary with cell counts and success/failure status
   - Cleanly shuts down engine after execution
-  - Usage: `tether run path/to/notebook.ipynb`
-  - Optional: `tether run notebook.ipynb --project /path/to/project`
+  - Usage: `workbooks run path/to/notebook.ipynb`
+  - Optional: `workbooks run notebook.ipynb --project /path/to/project`
   - Files: `src-tauri/src/cli.rs`, `src-tauri/src/engine_http.rs`
 
-- **`tether schedule` Commands**: Manage scheduled workbook execution
-  - `tether schedule add`: Schedule a workbook with cron expression or presets
+- **`workbooks schedule` Commands**: Manage scheduled workbook execution
+  - `workbooks schedule add`: Schedule a workbook with cron expression or presets
     - Supports `--cron "0 9 * * *"` for custom schedules
     - Presets: `--daily`, `--hourly`, `--weekly`
     - Stores schedules in SQLite via SchedulerManager
     - Displays confirmation with schedule details and next run time
-  - `tether schedule list`: View all scheduled workbooks
+  - `workbooks schedule list`: View all scheduled workbooks
     - Shows ID, workbook path, project, cron expression, enabled status
     - Displays next run time for each schedule
-  - `tether schedule remove <id>`: Delete a schedule by ID
+  - `workbooks schedule remove <id>`: Delete a schedule by ID
   - Files: `src-tauri/src/cli.rs`, `src-tauri/src/scheduler.rs`
 
 - **Engine HTTP Extensions**: Added execute-all endpoint support
@@ -312,8 +312,8 @@ This file tracks major features and improvements as they're completed.
   - Files: `src/components/WorkbookViewer.jsx`
 
 - **Markdown Image Display**: Added environment variable support in markdown images
-  - Supports `$TETHER_PROJECT_FOLDER` and `${TETHER_PROJECT_FOLDER}` in image paths
-  - Example: `![plot]($TETHER_PROJECT_FOLDER/images/plot.png)`
+  - Supports `$WORKBOOKS_PROJECT_FOLDER` and `${WORKBOOKS_PROJECT_FOLDER}` in image paths
+  - Example: `![plot]($WORKBOOKS_PROJECT_FOLDER/images/plot.png)`
   - Automatically replaces variable with actual project root path
   - Works with relative paths, absolute paths, and HTTP/HTTPS URLs
   - Files: `src/components/WorkbookViewer.jsx`
@@ -329,16 +329,16 @@ This file tracks major features and improvements as they're completed.
 
 **Native macOS Menu Bar (Dec 19, 2024)**
 - **File Menu Fix**: Resolved missing File menu on macOS
-  - Added explicit app menu ("tether") as first submenu to satisfy macOS requirements
-  - File menu now appears correctly between "tether" and "Edit" menus
+  - Added explicit app menu ("workbooks") as first submenu to satisfy macOS requirements
+  - File menu now appears correctly between "workbooks" and "Edit" menus
   - Fixed Tauri v2 macOS-specific menu rendering issue
 - **New Menu Items**: Enhanced File menu with common actions
   - "New Workbook" (Cmd+N) - Quick workbook creation
   - "Open Project..." (Cmd+O) - Open existing projects
   - "Open Project in New Window..." (Cmd+Shift+O) - Multi-window support
-  - "About tether" - About dialog (in app menu)
+  - "About workbooks" - About dialog (in app menu)
 - **Complete Menu Structure**: Professional native menu bar
-  - **tether** menu: About, Quit
+  - **workbooks** menu: About, Quit
   - **File** menu: New Workbook, Open Project, Open in New Window
   - **Edit** menu: Undo, Redo, Cut, Copy, Paste, Select All
   - **View** menu: Show Runtime Logs (Cmd+Shift+L), Open Logs Folder
@@ -352,7 +352,7 @@ This file tracks major features and improvements as they're completed.
   - Workbooks can be opened from any location, not just Workbooks section
   - Simplifies file navigation and organization
 - **Folder Drag-and-Drop Support**: Complete folder upload capability
-  - Drag entire folders into Tether to copy them to project
+  - Drag entire folders into Workbooks to copy them to project
   - Recursive folder copying preserves all subdirectories and files
   - Automatic detection of files vs directories using `stat()`
   - Backend: New `copy_folder_recursively()` and `save_dropped_folder()` functions
@@ -522,7 +522,7 @@ This file tracks major features and improvements as they're completed.
 - Updated secrets documentation (todo.md, done.md) to reflect completion
 
 **UI Style Guide & Secrets Manager Redesign (Dec 18, 2024)**
-- Created comprehensive `STYLE_GUIDE.md` defining Tether's design system
+- Created comprehensive `STYLE_GUIDE.md` defining Workbooks's design system
 - Redesigned Touch ID authentication gate to match app aesthetic
   - Removed heavy gradients and shadows
   - Changed from purple gradient to clean gray background
@@ -572,7 +572,7 @@ This file tracks major features and improvements as they're completed.
 **Secrets Management (Dec 18, 2024)**
 - Complete secrets management system with encryption, keychain integration, and UI
 - AES-256-GCM encryption with per-project keys stored in system keychain
-- SQLite database for encrypted secrets storage (`.tether/secrets.db`)
+- SQLite database for encrypted secrets storage (`.workbooks/secrets.db`)
 - Full CRUD interface via SecretsManager component
 - Automatic injection of secrets as environment variables into workbook kernels
 - Sidebar integration with live count and quick access
@@ -600,7 +600,7 @@ This file tracks major features and improvements as they're completed.
 - Context menu for file operations (rename, delete, duplicate)
 - Input dialog for rename/duplicate flows
 - Drag-and-drop file upload (.ipynb → /notebooks, others → root)
-- TETHER_PROJECT_FOLDER environment variable injection into kernels
+- WORKBOOKS_PROJECT_FOLDER environment variable injection into kernels
 
 **Navigation & UI**
 - Tab-based navigation system for multiple open files
@@ -618,7 +618,7 @@ This file tracks major features and improvements as they're completed.
 
 **Project & Python Management**
 - Project creation with uv integration
-- Virtual environment management (centralized at ~/.tether/venvs/)
+- Virtual environment management (centralized at ~/.workbooks/venvs/)
 - Python package installation via uv
 - Dependency syncing from pyproject.toml
 - HTTP engine server (FastAPI) for Jupyter kernel management

@@ -29,7 +29,7 @@
 ### Scheduler Module (Rust)
 
 - [x] Created `scheduler.rs` module
-- [x] Global SQLite database at `~/.tether/schedules.db`
+- [x] Global SQLite database at `~/.workbooks/schedules.db`
 - [x] Database schema for `schedules` and `runs` tables
 - [x] Schedule CRUD operations (add, list, get, update, delete)
 - [x] Run tracking (record, complete, list)
@@ -46,23 +46,23 @@
 - [x] Added `tokio-cron-scheduler` for cron handling
 - [x] Added `env_logger` for CLI logging
 - [x] Updated `Cargo.toml` with binary definitions:
-  - `tether` - CLI binary
-  - `tether-gui` - GUI binary
+  - `workbooks` - CLI binary
+  - `workbooks-gui` - GUI binary
 
 **Commands Implemented:**
 
-- `tether run <notebook>` - **FULLY IMPLEMENTED** (Dec 19, 2024)
+- `workbooks run <notebook>` - **FULLY IMPLEMENTED** (Dec 19, 2024)
   - Executes all cells in a notebook via engine server
-  - Auto-detects project by walking up to find `.tether` directory
+  - Auto-detects project by walking up to find `.workbooks` directory
   - Ensures Python venv and syncs dependencies
   - Displays execution results and outputs in terminal
   - Shows summary with cell counts and success/failure status
-- `tether schedule add <notebook> --cron <expr>` - Add schedule with custom cron
-- `tether schedule add <notebook> --daily` - Add daily schedule (9am)
-- `tether schedule add <notebook> --hourly` - Add hourly schedule
-- `tether schedule add <notebook> --weekly` - Add weekly schedule (Mon 9am)
-- `tether schedule list` - List all schedules
-- `tether schedule remove <id>` - Remove a schedule
+- `workbooks schedule add <notebook> --cron <expr>` - Add schedule with custom cron
+- `workbooks schedule add <notebook> --daily` - Add daily schedule (9am)
+- `workbooks schedule add <notebook> --hourly` - Add hourly schedule
+- `workbooks schedule add <notebook> --weekly` - Add weekly schedule (Mon 9am)
+- `workbooks schedule list` - List all schedules
+- `workbooks schedule remove <id>` - Remove a schedule
 
 **Files:**
 - `src-tauri/src/cli.rs`
@@ -104,14 +104,14 @@
 
 - [x] Added `tray-icon` feature to Tauri in `Cargo.toml`
 - [x] Implemented system tray with menu items:
-  - "Open Tether" - Shows and focuses main window
+  - "Open Workbooks" - Shows and focuses main window
   - "Scheduler: Running" - Status indicator (disabled/non-clickable)
   - Separator
-  - "Quit Tether" - Exits app completely
+  - "Quit Workbooks" - Exits app completely
 - [x] Configured window close behavior to hide instead of quit
   - Closing window hides it and keeps app running in background
   - Scheduler continues running when window is closed
-  - App only quits when "Quit Tether" is selected from tray menu
+  - App only quits when "Quit Workbooks" is selected from tray menu
 - [x] System tray appears in menu bar (macOS) / system tray (Windows/Linux)
 - [x] Window can be reopened from tray menu
 
@@ -124,8 +124,8 @@
 2. System tray icon appears in menu bar/system tray
 3. User closes window (X button) → Window hides, app continues running
 4. Scheduler continues executing scheduled workbooks in background
-5. User clicks "Open Tether" in tray menu → Window shows again
-6. User clicks "Quit Tether" in tray menu → App exits completely
+5. User clicks "Open Workbooks" in tray menu → Window shows again
+6. User clicks "Quit Workbooks" in tray menu → App exits completely
 
 **Benefits:**
 - Reliable scheduled execution even when window is closed
@@ -343,7 +343,7 @@ Still needed (future enhancements):
 5. **Error details** - Full traceback when failures occur
 
 **Metadata Storage:**
-- Stored in `~/.tether/schedules.db` (runs table, metadata column)
+- Stored in `~/.workbooks/schedules.db` (runs table, metadata column)
 - Not committed to git (local execution history only)
 - Auto-cleanup after 30 runs (same as other run data)
 - JSON format allows future expansion
@@ -356,6 +356,6 @@ Still needed (future enhancements):
 - Requires querying Jupyter kernel after execution
 
 **Report Files (Future):**
-- Save executed notebook with outputs to `.tether/runs/{run_id}.ipynb`
+- Save executed notebook with outputs to `.workbooks/runs/{run_id}.ipynb`
 - Add "View Report" button to open saved notebook
 - Implement read-only notebook viewer in UI

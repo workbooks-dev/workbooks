@@ -39,8 +39,8 @@
 ## Infrastructure
 
 ### Template Repositories
-- [ ] Create `tether-dev/templates-official` repo
-- [ ] Create `tether-dev/templates-community` repo
+- [ ] Create `workbooks-dev/templates-official` repo
+- [ ] Create `workbooks-dev/templates-community` repo
 - [ ] Set up repo structure and README
 - [ ] Create first official template (AWS S3 Sync)
 - [ ] Document template contribution guidelines

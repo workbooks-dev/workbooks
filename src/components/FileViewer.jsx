@@ -48,8 +48,8 @@ export function FileViewer({ filePath, projectRoot, isDeleted, onClose, onUnsave
       }
     };
 
-    window.addEventListener("tether:save-all", handleSaveAll);
-    return () => window.removeEventListener("tether:save-all", handleSaveAll);
+    window.addEventListener("workbooks:save-all", handleSaveAll);
+    return () => window.removeEventListener("workbooks:save-all", handleSaveAll);
   }, [hasUnsavedChanges]);
 
   useEffect(() => {
@@ -178,7 +178,7 @@ export function FileViewer({ filePath, projectRoot, isDeleted, onClose, onUnsave
         if (onFileRestored) {
           onFileRestored();
         }
-        window.dispatchEvent(new CustomEvent("tether:files-changed"));
+        window.dispatchEvent(new CustomEvent("workbooks:files-changed"));
       }
 
       console.log("File saved successfully");

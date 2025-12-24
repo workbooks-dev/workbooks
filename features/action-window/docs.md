@@ -2,11 +2,11 @@
 
 ## Overview
 
-The Action Window is Tether's central launcher and hub interface. It serves as the primary entry point for all Tether operations, appearing when the app first opens, when users press Command+N, or when accessing features from the tray menu.
+The Action Window is Workbooks's central launcher and hub interface. It serves as the primary entry point for all Workbooks operations, appearing when the app first opens, when users press Command+N, or when accessing features from the tray menu.
 
 ## Design Goals
 
-1. **Universal Entry Point** - Single interface for all major Tether operations
+1. **Universal Entry Point** - Single interface for all major Workbooks operations
 2. **Quick Access** - Fast navigation to recent projects and common tasks
 3. **Cross-Project Views** - Access to global schedule and run history across all projects
 4. **Discoverable** - Clear presentation of available actions for new users
@@ -14,14 +14,14 @@ The Action Window is Tether's central launcher and hub interface. It serves as t
 
 ## Use Cases
 
-### Opening Tether
-- User double-clicks Tether app → Action Window appears
+### Opening Workbooks
+- User double-clicks Workbooks app → Action Window appears
 - User clicks tray icon with no windows open → Action Window appears
 - User presses Command+N in any window → New Action Window appears
 
 ### From Action Window, Users Can:
 1. **Open Recent Projects** - Click on any of the 3 most recent projects
-2. **Create New Project** - Start a new Tether project
+2. **Create New Project** - Start a new Workbooks project
 3. **Open Existing Project** - Browse and open any project folder
 4. **View All Runs** - See run history across all projects
 5. **View All Schedules** - See scheduled workbooks across all projects
@@ -32,7 +32,7 @@ The Action Window is Tether's central launcher and hub interface. It serves as t
 ```
 ┌─────────────────────────────────────────────────────────┐
 │                                                         │
-│                    [Tether Logo]                        │
+│                    [Workbooks Logo]                        │
 │                                                         │
 │  ┌───────────────────────────────────────────────────┐  │
 │  │                                                   │  │
@@ -115,7 +115,7 @@ When user clicks an action:
    - Keep Action Window open
 
 ### State Persistence
-- Recent projects loaded from `~/.tether/recent_projects.json`
+- Recent projects loaded from `~/.workbooks/recent_projects.json`
 - Window size/position preferences stored in app state
 - Last viewed section remembered (if applicable)
 
@@ -152,7 +152,7 @@ async fn get_all_schedules() -> Result<Vec<Schedule>, String>
 ### Style
 - Clean, centered layout with generous whitespace
 - Card-based sections with subtle borders
-- Consistent with overall Tether aesthetic (see STYLE_GUIDE.md)
+- Consistent with overall Workbooks aesthetic (see STYLE_GUIDE.md)
 - Logo/branding at top center
 - Maximum width container (e.g., 800px) for readability
 

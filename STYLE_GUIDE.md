@@ -1,10 +1,10 @@
-# Tether UI Style Guide
+# Workbooks UI Style Guide
 
-This document defines the visual design language and component patterns for the Tether application.
+This document defines the visual design language and component patterns for the Workbooks application.
 
 ## Design Philosophy
 
-Tether's UI follows these core principles:
+Workbooks's UI follows these core principles:
 - **Clean & Minimal** - Reduce visual noise, focus on content
 - **Professional** - Understated, functional, trustworthy
 - **Consistent** - Predictable patterns across all interfaces
@@ -13,7 +13,7 @@ Tether's UI follows these core principles:
 ## Color Palette
 
 ### Neutrals (Primary)
-Tether uses a grayscale palette as the foundation:
+Workbooks uses a grayscale palette as the foundation:
 
 - **Background**: `bg-white`, `bg-gray-50`
 - **Borders**: `border-gray-200`, `border-gray-300`
@@ -336,7 +336,7 @@ Avoid using shadows on flat UI elements like list items or inline content.
 
 ## Responsive Design
 
-Tether is primarily a desktop application. Use fixed layouts where appropriate rather than fluid responsive patterns.
+Workbooks is primarily a desktop application. Use fixed layouts where appropriate rather than fluid responsive patterns.
 
 ## Accessibility
 
@@ -400,5 +400,5 @@ Before shipping a new component:
 - [ ] Matches existing component patterns where applicable
 - [ ] No heavy shadows or gradients
 - [ ] Clean, minimal aesthetic
-- [ ] Works well in light mode (Tether doesn't have dark mode)
+- [ ] Works well in light mode (Workbooks doesn't have dark mode)
 - [ ] Respects the app's professional, understated tone

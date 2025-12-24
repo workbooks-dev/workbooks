@@ -1,6 +1,6 @@
-# Tether Application Dependencies
+# Workbooks Application Dependencies
 
-This document tracks all dependencies across the Tether application stack.
+This document tracks all dependencies across the Workbooks application stack.
 
 ## Python Dependencies
 
@@ -29,7 +29,7 @@ requests = ">=2.32.5"
 Created via template in `src-tauri/src/project.rs:262`:
 ```toml
 [dependency-groups]
-tether = [
+workbooks = [
     "pip>=24.0.0",
     "jupyter>=1.0.0",
     "jupyter-client>=8.0.0",
@@ -42,7 +42,7 @@ tether = [
 - NOT using `uv add` - using legacy pip interface
 
 ### Planned Additions
-- `tether-core` - Python package for state API (`from tether import state`)
+- `workbooks-core` - Python package for state API (`from workbooks import state`)
 - `nbformat` - Parse and manipulate .ipynb files
 - `cloudpickle` - Serialize Python objects for checkpointing
 - `sqlalchemy` - For state.db interaction
@@ -294,6 +294,6 @@ cargo audit  # Requires: cargo install cargo-audit
 
 ## License Compatibility
 
-All dependencies are compatible with MIT license (Tether's planned license):
+All dependencies are compatible with MIT license (Workbooks's planned license):
 - Permissive licenses: MIT, Apache-2.0, BSD
 - Check any new dependencies before adding

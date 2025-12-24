@@ -13,7 +13,7 @@
 ### Backend
 
 - [ ] Report file management
-  - [ ] Save executed notebook with outputs to `.tether/runs/{run_id}.ipynb`
+  - [ ] Save executed notebook with outputs to `.workbooks/runs/{run_id}.ipynb`
   - [ ] `get_run_report(run_id)` Tauri command to load report
   - [ ] Clean up orphaned report files on cleanup
 

@@ -22,13 +22,13 @@ fn get_recent_projects_path() -> Result<PathBuf> {
     let home = dirs::home_dir()
         .context("Failed to get home directory")?;
 
-    let tether_dir = home.join(".tether");
-    if !tether_dir.exists() {
-        fs::create_dir_all(&tether_dir)
-            .context("Failed to create .tether directory")?;
+    let workbooks_dir = home.join(".workbooks");
+    if !workbooks_dir.exists() {
+        fs::create_dir_all(&workbooks_dir)
+            .context("Failed to create .workbooks directory")?;
     }
 
-    Ok(tether_dir.join("recent_projects.json"))
+    Ok(workbooks_dir.join("recent_projects.json"))
 }
 
 /// Load recent projects from disk

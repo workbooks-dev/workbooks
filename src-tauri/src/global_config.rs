@@ -18,8 +18,8 @@ pub struct AppConfig {
     pub theme: Option<String>,
 }
 
-/// Global Tether configuration
-/// Stored at ~/.tether/config.toml
+/// Global Workbooks configuration
+/// Stored at ~/.workbooks/config.toml
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct GlobalConfig {
     /// AI features configuration
@@ -41,18 +41,18 @@ pub struct GlobalConfig {
 /// Get the path to the global config file
 fn get_global_config_path() -> Result<PathBuf> {
     let home = dirs::home_dir().context("Failed to get home directory")?;
-    let tether_dir = home.join(".tether");
+    let workbooks_dir = home.join(".workbooks");
 
-    // Ensure .tether directory exists
-    if !tether_dir.exists() {
-        fs::create_dir_all(&tether_dir)
-            .context("Failed to create ~/.tether directory")?;
+    // Ensure .workbooks directory exists
+    if !workbooks_dir.exists() {
+        fs::create_dir_all(&workbooks_dir)
+            .context("Failed to create ~/.workbooks directory")?;
     }
 
-    Ok(tether_dir.join("config.toml"))
+    Ok(workbooks_dir.join("config.toml"))
 }
 
-/// Load global configuration from ~/.tether/config.toml
+/// Load global configuration from ~/.workbooks/config.toml
 pub fn load_global_config() -> Result<GlobalConfig> {
     let path = get_global_config_path()?;
 
@@ -69,7 +69,7 @@ pub fn load_global_config() -> Result<GlobalConfig> {
     Ok(config)
 }
 
-/// Save global configuration to ~/.tether/config.toml
+/// Save global configuration to ~/.workbooks/config.toml
 pub fn save_global_config(config: &GlobalConfig) -> Result<()> {
     let path = get_global_config_path()?;
 

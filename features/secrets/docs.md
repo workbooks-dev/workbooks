@@ -2,7 +2,7 @@
 
 ## Overview
 
-Tether provides secure storage for API keys, passwords, and other sensitive credentials. Secrets are encrypted and never exposed in code or outputs.
+Workbooks provides secure storage for API keys, passwords, and other sensitive credentials. Secrets are encrypted and never exposed in code or outputs.
 
 **See `/encryption.md` for complete security implementation details.**
 
@@ -74,7 +74,7 @@ api_key = os.environ["OPENAI_API_KEY"]
 ### Storage
 
 **Encrypted Storage:**
-- `.tether/secrets.db` - SQLite database with encrypted values
+- `.workbooks/secrets.db` - SQLite database with encrypted values
 - System keychain integration for encryption keys
 - Per-project secrets scope
 
@@ -99,7 +99,7 @@ CREATE TABLE secrets (
 
 **Injection Flow:**
 1. User executes cell
-2. Tether loads secrets from encrypted storage
+2. Workbooks loads secrets from encrypted storage
 3. Decrypts values using system keychain
 4. Injects as environment variables into kernel
 5. Cell executes with access to secrets

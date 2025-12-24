@@ -3,9 +3,9 @@
 ## Overview
 
 The CLI serves three primary purposes:
-1. **MCP Integration** - Enable Claude Desktop and other MCP clients to interact with Tether projects
+1. **MCP Integration** - Enable Claude Desktop and other MCP clients to interact with Workbooks projects
 2. **Automation** - Schedule and run workbooks from scripts, cron, CI/CD
-3. **Quick Actions** - Open projects (`tether .`), check status, view logs
+3. **Quick Actions** - Open projects (`workbooks .`), check status, view logs
 
 **Installation Philosophy:**
 - **Desktop app is 100% primary interface** - Non-technical users never need to touch CLI
@@ -17,16 +17,16 @@ The CLI serves three primary purposes:
 ## Phase 0: Global Configuration System
 
 ### Global Config Infrastructure
-- [ ] Create `~/.tether/` directory on first run
+- [ ] Create `~/.workbooks/` directory on first run
 - [ ] Implement global config handling in `src/config.rs`
   - [ ] `GlobalConfig` struct matching TOML structure
-  - [ ] `load_global_config()` - Read from `~/.tether/config.toml`
-  - [ ] `save_global_config()` - Write to `~/.tether/config.toml`
+  - [ ] `load_global_config()` - Read from `~/.workbooks/config.toml`
+  - [ ] `save_global_config()` - Write to `~/.workbooks/config.toml`
   - [ ] Create default config if doesn't exist
   - [ ] Handle malformed config gracefully
 - [ ] Implement project resolution logic
   - [ ] Check `--project` flag first
-  - [ ] Check if current directory is Tether project
+  - [ ] Check if current directory is Workbooks project
   - [ ] Check global `default_project`
   - [ ] Return clear error if none found
 - [ ] Add recent projects tracking
@@ -34,9 +34,9 @@ The CLI serves three primary purposes:
   - [ ] Limit to 10 most recent
   - [ ] Shared between CLI and app
 
-### `tether config` Subcommand
+### `workbooks config` Subcommand
 - [ ] Implement `config set-default <path>`
-  - [ ] Validate path exists and is Tether project
+  - [ ] Validate path exists and is Workbooks project
   - [ ] Update `global.default_project` in config
   - [ ] Show success message with path
   - [ ] Handle relative paths (convert to absolute)
@@ -52,17 +52,17 @@ The CLI serves three primary purposes:
   - [ ] Show default project, recent projects, CLI settings
   - [ ] Support `--json` flag
 - [ ] Implement `config edit`
-  - [ ] Open `~/.tether/config.toml` in $EDITOR
+  - [ ] Open `~/.workbooks/config.toml` in $EDITOR
   - [ ] Validate config after editing
   - [ ] Show errors if malformed
 
-### `tether run` subcommand ✅ CORE COMPLETED
+### `workbooks run` subcommand ✅ CORE COMPLETED
 - [x] Implement `run <path-to-ipynb>`
-  - [x] Automatically load a project by walking up to find `.tether` directory
+  - [x] Automatically load a project by walking up to find `.workbooks` directory
   - [x] Falls back to basic mode if no project found
   - [x] Runs entire notebook just like "Run all" in the app UI
   - [x] Automatically installs ipykernel if needed
-  - [x] Handles pyproject.toml with or without tether dependency group
+  - [x] Handles pyproject.toml with or without workbooks dependency group
 - [ ] Secrets integration
   - [ ] Load secrets from project's SecretsManager if available
   - [ ] Inject secrets as environment variables into engine
@@ -78,9 +78,9 @@ The CLI serves three primary purposes:
 
 ### Cargo Configuration
 - [x] Refactored `src-tauri/Cargo.toml` to support multiple binaries
-  - [x] Define `[lib]` section for shared code (tether_lib)
-  - [x] Define `[[bin]]` for tether-gui (GUI) at `src/main.rs`
-  - [x] Define `[[bin]]` for tether (CLI) at `src/cli.rs`
+  - [x] Define `[lib]` section for shared code (workbooks_lib)
+  - [x] Define `[[bin]]` for workbooks-gui (GUI) at `src/main.rs`
+  - [x] Define `[[bin]]` for workbooks (CLI) at `src/cli.rs`
   - [x] CLI dependencies already present (clap, tokio, anyhow)
 - [x] Made core modules public in `src/lib.rs`
   - [x] `pub mod python` - Environment management
@@ -95,15 +95,15 @@ The CLI serves three primary purposes:
 
 ## Phase 2: Core CLI Commands
 
-### `tether init`
+### `workbooks init`
 - [ ] Implement `init` subcommand
   - [ ] Accept project name and options (--path, --template)
-  - [ ] Create directory structure (.tether/, notebooks/)
+  - [ ] Create directory structure (.workbooks/, notebooks/)
   - [ ] Generate config.toml with defaults
   - [ ] Create pyproject.toml and uv.lock
   - [ ] Initialize UV virtual environment
-  - [ ] Install tether-core Python package
-  - [ ] Create .tether shortcut file
+  - [ ] Install workbooks-core Python package
+  - [ ] Create .workbooks shortcut file
   - [ ] Print success message with next steps
 - [ ] Add templates support
   - [ ] "blank" template (minimal setup)
@@ -114,10 +114,10 @@ The CLI serves three primary purposes:
   - [ ] UV not available
   - [ ] Python version incompatible
 
-### `tether run` ✅ CORE COMPLETED
+### `workbooks run` ✅ CORE COMPLETED
 - [x] Implement basic `run` subcommand
   - [x] Parse notebook path argument
-  - [x] Auto-detect project by walking up to find `.tether`
+  - [x] Auto-detect project by walking up to find `.workbooks`
   - [x] Start engine server on available port
   - [x] Execute notebook via `/engine/execute-all` HTTP endpoint
   - [x] Display execution results in terminal
@@ -137,13 +137,13 @@ The CLI serves three primary purposes:
     - [ ] Skip checkpointing for faster execution
     - [ ] Warn that run is not resumable
 
-### `tether mcp` (PRIMARY USE CASE)
+### `workbooks mcp` (PRIMARY USE CASE)
 **This is a primary driver for CLI - enables Claude Desktop integration**
 
 - [ ] Implement `mcp` subcommand
   - [ ] Require `--project <path>` argument
   - [ ] Validate project path exists
-  - [ ] Validate .tether/ directory exists
+  - [ ] Validate .workbooks/ directory exists
   - [ ] Load project config
   - [ ] Start/connect to engine server
   - [ ] Start FastMCP server on stdio
@@ -160,7 +160,7 @@ The CLI serves three primary purposes:
   - [ ] Document available MCP tools
   - [ ] Provide troubleshooting guide
 
-### `tether status`
+### `workbooks status`
 - [ ] Implement `status` subcommand
   - [ ] Detect current project
   - [ ] Load project config
@@ -177,9 +177,9 @@ The CLI serves three primary purposes:
 - [ ] Add `--json` flag for machine-readable output
 - [ ] Format output with colors and icons (✓, ✗, ⚠)
 
-### `tether logs`
+### `workbooks logs`
 - [ ] Implement `logs` subcommand
-  - [ ] Read from .tether/runs/ directory
+  - [ ] Read from .workbooks/runs/ directory
   - [ ] Parse and display logs
   - [ ] Support filtering by notebook
   - [ ] Support filtering by run ID
@@ -188,20 +188,20 @@ The CLI serves three primary purposes:
 - [ ] Add `--follow` flag for real-time tailing
 - [ ] Add `--level <level>` flag (info, warning, error)
 
-### `tether version`
+### `workbooks version`
 - [ ] Implement `version` subcommand
-  - [ ] Display tether CLI version
-  - [ ] Display tether-app version
+  - [ ] Display workbooks CLI version
+  - [ ] Display workbooks-app version
   - [ ] Display engine-server version
   - [ ] Display Python version
   - [ ] Display UV version
 - [ ] Format as simple text or detailed table
 
-### `tether doctor`
+### `workbooks doctor`
 **Critical for debugging silent installation issues**
 
 - [ ] Implement `doctor` subcommand
-  - [ ] Check tether CLI is accessible and in PATH
+  - [ ] Check workbooks CLI is accessible and in PATH
   - [ ] Check Tauri app is installed and location
   - [ ] Check UV is available and version
   - [ ] Check Python version compatibility
@@ -226,8 +226,8 @@ The CLI serves three primary purposes:
 - [x] Automatic installation on first app launch
   - [x] Detect OS (macOS, Windows, Linux)
   - [x] **Automatically** copy binary to appropriate location (no prompts):
-    - [x] macOS/Linux: `~/.local/bin/tether`
-    - [x] Windows: `%LOCALAPPDATA%\Programs\Tether\bin\`
+    - [x] macOS/Linux: `~/.local/bin/workbooks`
+    - [x] Windows: `%LOCALAPPDATA%\Programs\Workbooks\bin\`
   - [x] Set executable permissions (Unix)
   - [x] Add to PATH automatically:
     - [x] macOS/Linux: Append to `.zshrc` / `.bashrc` if not already present
@@ -245,7 +245,7 @@ The CLI serves three primary purposes:
   - [x] Smart path detection (checks multiple bundle locations)
   - [x] Automatic PATH updating on Unix systems
 - [x] `check_cli_installed` Tauri command
-  - [x] Checks if `tether` is in PATH using `which`
+  - [x] Checks if `workbooks` is in PATH using `which`
 - [x] `get_path_instructions` Tauri command
   - [x] Returns shell-specific instructions for manual PATH setup
 
@@ -267,7 +267,7 @@ The CLI serves three primary purposes:
 - [ ] Add standalone CLI binary to GitHub releases
   - [ ] For users who want CLI without desktop app
   - [ ] For CI/CD environments and servers
-  - [ ] Provide installation script: `curl -sSf https://tether.dev/install.sh | sh`
+  - [ ] Provide installation script: `curl -sSf https://workbooks.dev/install.sh | sh`
 - [ ] Test installation on all platforms
   - [ ] macOS (Intel + Apple Silicon)
   - [ ] Windows (x64)
@@ -278,17 +278,17 @@ The CLI serves three primary purposes:
 
 ## Phase 4: Advanced CLI Commands (Future)
 
-### `tether resume`
+### `workbooks resume`
 - [ ] Implement resume functionality
   - [ ] Find last interrupted run
-  - [ ] Load checkpoint from .tether/runs/{run-id}/
+  - [ ] Load checkpoint from .workbooks/runs/{run-id}/
   - [ ] Restore namespace
   - [ ] Continue from next cell
   - [ ] Validate code hasn't changed (hash chain)
 - [ ] Support `--notebook <path>` to resume specific notebook
 - [ ] Support `--run <run-id>` to resume specific run
 
-### `tether state` (when state system is built)
+### `workbooks state` (when state system is built)
 - [ ] Implement `state list` subcommand
   - [ ] Query state.db
   - [ ] Display variable names, types, sizes
@@ -309,7 +309,7 @@ The CLI serves three primary purposes:
   - [ ] Swap state.db files
   - [ ] Update blob symlinks
 
-### `tether schedule` ✅ BASIC COMPLETED
+### `workbooks schedule` ✅ BASIC COMPLETED
 - [x] Implement `schedule add` subcommand
   - [x] Accept notebook path and cron expression
   - [x] Support `--cron "expression"` for custom schedules
@@ -332,16 +332,16 @@ The CLI serves three primary purposes:
   - [ ] Implement `schedule history <id>`
     - [ ] Show run history for scheduled notebook
 
-### `tether open` / `tether .` (Quick Launch)
+### `workbooks open` / `workbooks .` (Quick Launch)
 **Primary way to open projects from terminal**
 
 - [ ] Implement `open` subcommand with variants:
-  - [ ] `tether .` - Open current directory as project (most common usage)
-  - [ ] `tether <path>` - Open specific project path
-  - [ ] `tether` (no args) - Open app to welcome screen (or show help)
-  - [ ] `tether open <path>` - Explicit form (same as `tether <path>`)
-  - [ ] Validate path is a Tether project (has `.tether/` directory)
-  - [ ] Show helpful error if not a project: "Not a Tether project. Run 'tether init' to create one."
+  - [ ] `workbooks .` - Open current directory as project (most common usage)
+  - [ ] `workbooks <path>` - Open specific project path
+  - [ ] `workbooks` (no args) - Open app to welcome screen (or show help)
+  - [ ] `workbooks open <path>` - Explicit form (same as `workbooks <path>`)
+  - [ ] Validate path is a Workbooks project (has `.workbooks/` directory)
+  - [ ] Show helpful error if not a project: "Not a Workbooks project. Run 'workbooks init' to create one."
 - [ ] Launch behavior
   - [ ] Launch Tauri app with project loaded
   - [ ] Use OS-specific app launching:
@@ -349,7 +349,7 @@ The CLI serves three primary purposes:
     - [ ] Windows: Use ShellExecute or registry associations
     - [ ] Linux: Use `xdg-open` or desktop entry
   - [ ] Pass project path as command-line argument to app
-  - [ ] Support deep-linking to specific notebook: `tether . --notebook analysis.ipynb`
+  - [ ] Support deep-linking to specific notebook: `workbooks . --notebook analysis.ipynb`
 - [ ] Smart instance management
   - [ ] Check if app is already running
   - [ ] If running: Send IPC message to open project in new tab
@@ -375,7 +375,7 @@ The CLI serves three primary purposes:
 ### Error Messages
 - [ ] Standardize error message format
 - [ ] Include helpful suggestions for common errors
-  - [ ] "Project not found" → "Run 'tether init' to create one"
+  - [ ] "Project not found" → "Run 'workbooks init' to create one"
   - [ ] "UV not found" → "Install UV: https://..."
   - [ ] "Notebook not found" → "Available notebooks: ..."
 - [ ] Show error codes for debugging
@@ -386,13 +386,13 @@ The CLI serves three primary purposes:
 - [ ] Support bash completion
 - [ ] Support zsh completion
 - [ ] Support fish completion
-- [ ] Add `tether completions <shell>` command
+- [ ] Add `workbooks completions <shell>` command
 - [ ] Document installation in README
 
 ### Help & Documentation
 - [ ] Improve `--help` text for all commands
 - [ ] Add examples to help text
-- [ ] Add `tether help <command>` alias
+- [ ] Add `workbooks help <command>` alias
 - [ ] Create man pages (Unix)
 - [ ] Link to online docs from CLI
 
@@ -405,9 +405,9 @@ The CLI serves three primary purposes:
 - [ ] Test error handling
 
 ### Integration Tests
-- [ ] Test full `tether init` flow
-- [ ] Test `tether run` execution
-- [ ] Test `tether mcp` server startup
+- [ ] Test full `workbooks init` flow
+- [ ] Test `workbooks run` execution
+- [ ] Test `workbooks mcp` server startup
 - [ ] Test CLI installation process
 - [ ] Test multi-platform compatibility
 

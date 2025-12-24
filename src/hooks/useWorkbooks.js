@@ -1,6 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 
-export function useTether() {
+export function useWorkbooks() {
   const listNotebooks = async () => {
     return invoke("list_notebooks");
   };

@@ -25,18 +25,18 @@ This means your database has a corrupted secret from before the fix. Continue to
 
 ```bash
 # Delete the corrupted database
-rm "/Users/jmitch/Desktop/Test 4/.tether/secrets.db"
+rm "/Users/jmitch/Desktop/Test 4/.workbooks/secrets.db"
 
 # Also clean up any old keychain entries (optional but recommended)
 # Open "Keychain Access" app
-# Search for "tether"
+# Search for "workbooks"
 # Delete any entries you find
 ```
 
 ## Step 3: Rebuild and Restart
 
 ```bash
-cd /Users/jmitch/Dev/tether
+cd /Users/jmitch/Dev/workbooks
 npm run tauri dev
 ```
 
@@ -86,7 +86,7 @@ else:
 # List all environment variables
 print(f"\nAll env vars ({len(os.environ)} total):")
 for key in sorted(os.environ.keys()):
-    if any(x in key.upper() for x in ['DJANGO', 'TETHER', 'SECRET', 'API']):
+    if any(x in key.upper() for x in ['DJANGO', 'WORKBOOKS', 'SECRET', 'API']):
         value = os.environ[key]
         # Mask long values for security
         if len(value) > 20:
@@ -110,7 +110,7 @@ Match 'yes': True
 
 All env vars (XX total):
   DJANGO_ACTIVE = yes
-  TETHER_PROJECT_FOLDER = /Users/jmitch/Desktop/Test 4
+  WORKBOOKS_PROJECT_FOLDER = /Users/jmitch/Desktop/Test 4
 ```
 
 ## Step 7: Check Terminal for Debug Output
@@ -119,7 +119,7 @@ When you restart the kernel, you should see in the terminal:
 
 ```
 DEBUG: Loading secrets from project root: /Users/jmitch/Desktop/Test 4
-DEBUG: Using keyring entry: service='tether' user='secrets-XXXXXXXX'
+DEBUG: Using keyring entry: service='workbooks' user='secrets-XXXXXXXX'
 DEBUG: SecretsManager initialized successfully
 DEBUG: Loaded 1 secrets from database
 DEBUG: Injecting secret: DJANGO_ACTIVE (length: 3)
@@ -139,13 +139,13 @@ If secrets still don't appear after following all steps:
 
 1. **Check the database exists:**
    ```bash
-   ls -la "/Users/jmitch/Desktop/Test 4/.tether/"
+   ls -la "/Users/jmitch/Desktop/Test 4/.workbooks/"
    ```
    You should see `secrets.db`
 
 2. **Check secrets are in the database:**
    ```bash
-   sqlite3 "/Users/jmitch/Desktop/Test 4/.tether/secrets.db" "SELECT key FROM secrets;"
+   sqlite3 "/Users/jmitch/Desktop/Test 4/.workbooks/secrets.db" "SELECT key FROM secrets;"
    ```
    Should show: `DJANGO_ACTIVE`
 
@@ -158,7 +158,7 @@ If secrets still don't appear after following all steps:
 ## Common Issues
 
 ### Issue: "Decryption failed"
-**Solution:** Delete `.tether/secrets.db` and re-add secrets
+**Solution:** Delete `.workbooks/secrets.db` and re-add secrets
 
 ### Issue: Secret appears in sidebar but not in kernel
 **Solution:** Restart the kernel (not just the app)

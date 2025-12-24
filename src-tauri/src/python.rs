@@ -160,7 +160,7 @@ pub async fn ensure_uv() -> Result<PathBuf> {
 }
 
 /// Get the centralized venv path for a project
-/// Format: ~/.tether/venvs/<project-name>-<hash>
+/// Format: ~/.workbooks/venvs/<project-name>-<hash>
 pub fn get_venv_path(project_root: &Path, project_name: &str) -> Result<PathBuf> {
     // First, check if project has a local .venv directory (standard Python convention)
     let local_venv = project_root.join(".venv");
@@ -178,7 +178,7 @@ pub fn get_venv_path(project_root: &Path, project_name: &str) -> Result<PathBuf>
         }
     }
 
-    // Fall back to centralized venv at ~/.tether/venvs/
+    // Fall back to centralized venv at ~/.workbooks/venvs/
     // Get home directory
     let home_dir = dirs::home_dir()
         .context("Failed to get home directory")?;
@@ -198,9 +198,9 @@ pub fn get_venv_path(project_root: &Path, project_name: &str) -> Result<PathBuf>
         .collect::<String>()
         .to_lowercase();
 
-    // Build path: ~/.tether/venvs/<project-name>-<hash>
+    // Build path: ~/.workbooks/venvs/<project-name>-<hash>
     let venv_dir = home_dir
-        .join(".tether")
+        .join(".workbooks")
         .join("venvs")
         .join(format!("{}-{}", safe_name, short_hash));
 
@@ -212,12 +212,12 @@ pub async fn ensure_venv(project_root: &Path, project_name: &str) -> Result<Path
     // Use new intelligent venv resolution
     let venv_path = determine_venv_path(project_root, project_name).await?;
 
-    // For UV-managed projects, run uv sync --group tether
+    // For UV-managed projects, run uv sync --group workbooks
     if is_uv_managed_project(project_root) {
-        println!("Running uv sync --group tether...");
+        println!("Running uv sync --group workbooks...");
         let uv_path = ensure_uv().await?;
         let output = Command::new(uv_path)
-            .args(["sync", "--group", "tether"])
+            .args(["sync", "--group", "workbooks"])
             .current_dir(project_root)
             .output()
             .context("Failed to run uv sync")?;
@@ -228,7 +228,7 @@ pub async fn ensure_venv(project_root: &Path, project_name: &str) -> Result<Path
         }
     }
 
-    // If venv doesn't exist yet (tether-managed), create it
+    // If venv doesn't exist yet (workbooks-managed), create it
     if !venv_path.exists() {
         println!("Creating virtual environment at {:?}", venv_path);
         create_venv_at_path(&venv_path).await?;
@@ -341,7 +341,7 @@ pub async fn install_packages(project_root: &Path, packages: &[&str]) -> Result<
 
 /// Sync dependencies from pyproject.toml using uv, optionally with a specific group
 pub async fn sync_dependencies(project_root: &Path, venv_path: &Path) -> Result<()> {
-    sync_dependencies_with_group(project_root, venv_path, Some("tether")).await
+    sync_dependencies_with_group(project_root, venv_path, Some("workbooks")).await
 }
 
 /// Sync dependencies from pyproject.toml using uv with optional group
@@ -391,7 +391,7 @@ pub async fn sync_dependencies_with_group(
     Ok(())
 }
 
-/// Initialize a Tether project with Python environment and core dependencies
+/// Initialize a Workbooks project with Python environment and core dependencies
 pub async fn init_project(project_root: &Path, project_name: &str) -> Result<()> {
     println!("Initializing project: {} at {:?}", project_name, project_root);
 
@@ -399,7 +399,7 @@ pub async fn init_project(project_root: &Path, project_name: &str) -> Result<()>
     let venv_path = ensure_venv(project_root, project_name).await?;
     println!("Venv path: {:?}", venv_path);
 
-    // Always sync dependencies with tether group
+    // Always sync dependencies with workbooks group
     if project_root.join("pyproject.toml").exists() {
         println!("Found pyproject.toml, syncing dependencies...");
         sync_dependencies(project_root, &venv_path).await?;
@@ -505,13 +505,13 @@ pub fn prompt_venv_strategy(project_root: &Path) -> Result<(crate::config::VenvS
 
     println!("\n📦 Python Environment Setup");
     println!("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
-    println!("Tether detected an existing Python environment in this project.");
-    println!("\nHow would you like Tether to manage the virtual environment?\n");
-    println!("  1. Let Tether manage it (recommended)");
-    println!("     → Tether creates a centralized venv and handles dependencies");
+    println!("Workbooks detected an existing Python environment in this project.");
+    println!("\nHow would you like Workbooks to manage the virtual environment?\n");
+    println!("  1. Let Workbooks manage it (recommended)");
+    println!("     → Workbooks creates a centralized venv and handles dependencies");
     println!("\n  2. Use my own virtual environment");
     println!("     → You manage packages with pip/poetry/pipenv");
-    println!("     → Tether only installs minimal requirements (ipykernel)");
+    println!("     → Workbooks only installs minimal requirements (ipykernel)");
     println!("     → Can be error-prone if dependencies conflict\n");
 
     print!("Choose [1/2] (default: 1): ");
@@ -529,14 +529,14 @@ pub fn prompt_venv_strategy(project_root: &Path) -> Result<(crate::config::VenvS
                 Ok((crate::config::VenvStrategy::UserManaged, Some(venv_path)))
             } else {
                 println!("\n⚠ No valid virtual environment found in project.");
-                println!("Falling back to Tether-managed virtual environment.");
-                Ok((crate::config::VenvStrategy::TetherManaged, None))
+                println!("Falling back to Workbooks-managed virtual environment.");
+                Ok((crate::config::VenvStrategy::WorkbooksManaged, None))
             }
         }
         _ => {
-            // Tether-managed (default)
-            println!("\n✓ Using Tether-managed virtual environment");
-            Ok((crate::config::VenvStrategy::TetherManaged, None))
+            // Workbooks-managed (default)
+            println!("\n✓ Using Workbooks-managed virtual environment");
+            Ok((crate::config::VenvStrategy::WorkbooksManaged, None))
         }
     }
 }
@@ -572,12 +572,12 @@ pub async fn determine_venv_path(project_root: &Path, project_name: &str) -> Res
                 return Ok(venv_path);
             }
 
-            // Can't find user venv, fall back to tether-managed
-            println!("⚠ Saved user venv not found, falling back to Tether-managed");
+            // Can't find user venv, fall back to workbooks-managed
+            println!("⚠ Saved user venv not found, falling back to Workbooks-managed");
         }
 
-        crate::config::VenvStrategy::TetherManaged => {
-            // Use centralized Tether venv
+        crate::config::VenvStrategy::WorkbooksManaged => {
+            // Use centralized Workbooks venv
             return get_venv_path(project_root, project_name);
         }
 
@@ -585,7 +585,7 @@ pub async fn determine_venv_path(project_root: &Path, project_name: &str) -> Res
             // Auto-detect: prompt user if needed
             if has_user_python_environment(project_root) {
                 // Prompt user for preference (CLI only, GUI will handle separately)
-                if std::env::var("TETHER_CLI").is_ok() {
+                if std::env::var("WORKBOOKS_CLI").is_ok() {
                     let (strategy, venv_path) = prompt_venv_strategy(project_root)?;
 
                     // Save preference
@@ -606,7 +606,7 @@ pub async fn determine_venv_path(project_root: &Path, project_name: &str) -> Res
         }
     }
 
-    // Default: Tether-managed centralized venv
+    // Default: Workbooks-managed centralized venv
     get_venv_path(project_root, project_name)
 }
 

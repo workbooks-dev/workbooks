@@ -1,4 +1,4 @@
-# Tether App Issues
+# Workbooks App Issues
 
 ## Build issues
 

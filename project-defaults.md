@@ -1,4 +1,4 @@
-# Tether Project Defaults
+# Workbooks Project Defaults
 
 
 Python dependencies:

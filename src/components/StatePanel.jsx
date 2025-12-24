@@ -1,10 +1,10 @@
 import { useState, useEffect } from "react";
-import { useTether } from "../hooks/useTether";
+import { useWorkbooks } from "../hooks/useWorkbooks";
 
 export function StatePanel() {
   const [stateVars, setStateVars] = useState([]);
   const [selectedVar, setSelectedVar] = useState(null);
-  const { getState, inspectStateVariable } = useTether();
+  const { getState, inspectStateVariable } = useWorkbooks();
 
   useEffect(() => {
     loadState();

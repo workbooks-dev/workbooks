@@ -327,7 +327,7 @@ export function SecretsManager({ projectRoot, onClose }) {
       setShowAddDialog(false);
       await loadSecrets();
       // Notify sidebar to update secrets count
-      window.dispatchEvent(new CustomEvent("tether:secrets-changed"));
+      window.dispatchEvent(new CustomEvent("workbooks:secrets-changed"));
     } catch (err) {
       console.error("Failed to add secret:", err);
       alert(`Failed to add secret: ${err}`);
@@ -344,7 +344,7 @@ export function SecretsManager({ projectRoot, onClose }) {
       setEditingSecret(null);
       await loadSecrets();
       // Notify sidebar to update secrets count
-      window.dispatchEvent(new CustomEvent("tether:secrets-changed"));
+      window.dispatchEvent(new CustomEvent("workbooks:secrets-changed"));
     } catch (err) {
       // User cancelled authentication or other error - just log it, don't alert
       console.log("Update cancelled or failed:", err);
@@ -367,7 +367,7 @@ export function SecretsManager({ projectRoot, onClose }) {
       setDeletingSecret(null);
       await loadSecrets();
       // Notify sidebar to update secrets count
-      window.dispatchEvent(new CustomEvent("tether:secrets-changed"));
+      window.dispatchEvent(new CustomEvent("workbooks:secrets-changed"));
     } catch (err) {
       // User cancelled authentication or other error - just log it, don't alert
       console.log("Delete cancelled or failed:", err);
@@ -389,7 +389,7 @@ export function SecretsManager({ projectRoot, onClose }) {
       setShowImportDialog(false);
       await loadSecrets();
       // Notify sidebar to update secrets count
-      window.dispatchEvent(new CustomEvent("tether:secrets-changed"));
+      window.dispatchEvent(new CustomEvent("workbooks:secrets-changed"));
     } catch (err) {
       console.error("Failed to import secrets:", err);
       alert(`Failed to import secrets: ${err}`);

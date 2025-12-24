@@ -1,4 +1,4 @@
-# Tether
+# Workbooks
 
 *Sharpen your automations*
 
@@ -27,8 +27,8 @@ Run Jupyter notebooks on schedule with built-in secrets management and AI-powere
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/tether.git
-cd tether
+git clone https://github.com/yourusername/workbooks.git
+cd workbooks
 
 # Install dependencies
 npm install

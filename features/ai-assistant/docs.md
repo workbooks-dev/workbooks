@@ -7,7 +7,7 @@ The AI Assistant provides inline chat capabilities powered by the Claude Agent S
 ## Architecture
 
 ### Backend (Python)
-- **Claude Agent SDK** installed in `~/.tether/engine/.venv`
+- **Claude Agent SDK** installed in `~/.workbooks/engine/.venv`
 - **Agent endpoint** in `engine_server.py` at `/agent/chat`
 - **Streaming responses** via Server-Sent Events (SSE)
 - **API key** retrieved securely from system keychain
@@ -19,7 +19,7 @@ The AI Assistant provides inline chat capabilities powered by the Claude Agent S
 - **Chat sessions** persist across app restarts
 
 ### Data Storage (SQLite)
-- **Chat sessions database** at `~/.tether/chat_sessions.db`
+- **Chat sessions database** at `~/.workbooks/chat_sessions.db`
 - **Tables:**
   - `sessions` - Session metadata (id, title, created_at, updated_at)
   - `messages` - Chat messages (session_id, role, content, timestamp)
@@ -40,7 +40,7 @@ The AI Assistant provides inline chat capabilities powered by the Claude Agent S
 
 ### Why SQLite for chat storage?
 - **Lightweight**: No external database required
-- **Portable**: User data stays local in `~/.tether/`
+- **Portable**: User data stays local in `~/.workbooks/`
 - **Fast**: Efficient querying for recent sessions
 - **Familiar**: Already using SQLite for other features (secrets, state)
 

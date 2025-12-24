@@ -5,33 +5,33 @@
 - [x] Designed shared library structure for code reuse
 - [x] Planned CLI command structure and subcommands
 - [x] Created feature documentation structure
-- [x] Designed global configuration system (`~/.tether/config.toml`)
+- [x] Designed global configuration system (`~/.workbooks/config.toml`)
 - [x] Designed default project feature (shared with app)
 - [x] Designed project resolution logic (flag → cwd → default)
-- [x] Planned `tether config` subcommand for managing global settings
+- [x] Planned `workbooks config` subcommand for managing global settings
 
 ## Phase 0: Core Implementation
 
 ### Multi-Binary Setup
 - [x] Configured `Cargo.toml` with separate binaries
-  - [x] `[[bin]]` for tether (CLI) at `src/cli.rs`
-  - [x] `[[bin]]` for tether-gui (GUI) at `src/main.rs`
-  - [x] `[lib]` for shared code at `src/lib.rs` (named `tether_lib`)
+  - [x] `[[bin]]` for workbooks (CLI) at `src/cli.rs`
+  - [x] `[[bin]]` for workbooks-gui (GUI) at `src/main.rs`
+  - [x] `[lib]` for shared code at `src/lib.rs` (named `workbooks_lib`)
 - [x] Made core modules public for CLI access
   - [x] `pub mod python` - Python/UV environment management
   - [x] `pub mod project` - Project loading and creation
   - [x] `pub mod engine_http` - Engine server HTTP communication
   - [x] `pub mod scheduler` - Scheduler management
 
-### `tether run` Implementation
+### `workbooks run` Implementation
 - [x] Implemented basic `run <workbook>` command structure with clap
 - [x] Added automatic project detection
-  - [x] Walks up directory tree from workbook location to find `.tether` directory
-  - [x] Falls back to workbook's parent if no `.tether` found
+  - [x] Walks up directory tree from workbook location to find `.workbooks` directory
+  - [x] Falls back to workbook's parent if no `.workbooks` found
   - [x] Accepts optional `--project <path>` flag to override
 - [x] Implemented project loading logic
-  - [x] Loads existing Tether projects via `project::load_project()`
-  - [x] Creates minimal project info if not a Tether project (basic mode)
+  - [x] Loads existing Workbooks projects via `project::load_project()`
+  - [x] Creates minimal project info if not a Workbooks project (basic mode)
   - [x] Displays warning when running in basic mode
 - [x] Added Python environment setup
   - [x] Ensures venv exists for project
@@ -61,7 +61,7 @@
   - [x] `CellExecutionResult` - Individual cell result
   - [x] `ExecuteAllResponse` - Complete execution response
 
-### `tether schedule` Implementation
+### `workbooks schedule` Implementation
 - [x] Implemented `schedule add` subcommand
   - [x] Accepts workbook path and cron expression/presets
   - [x] Supports `--cron "expression"` for custom schedules
@@ -77,14 +77,14 @@
   - [x] Deletes schedule by ID
   - [x] Shows confirmation message
 
-## Phase 1: Enhanced `tether run` (December 2024)
+## Phase 1: Enhanced `workbooks run` (December 2024)
 
 ### Dependency Management Improvements
-- [x] Fixed `sync_dependencies` to work with or without tether group
+- [x] Fixed `sync_dependencies` to work with or without workbooks group
   - [x] Created `sync_dependencies_with_group()` function
   - [x] Made `--group` parameter optional
-  - [x] CLI detects if running in Tether project vs basic mode
-  - [x] Only applies `--group tether` for actual Tether projects
+  - [x] CLI detects if running in Workbooks project vs basic mode
+  - [x] Only applies `--group workbooks` for actual Workbooks projects
 - [x] Added automatic ipykernel installation
   - [x] Created `ensure_ipykernel()` function in python.rs
   - [x] Checks if ipykernel is installed before notebook execution
@@ -93,8 +93,8 @@
 
 ### Testing & Verification
 - [x] Created test notebook and verified full execution flow
-- [x] Confirmed `tether run` works in basic mode (no Tether project)
-- [x] Confirmed `tether run` works with Tether projects
+- [x] Confirmed `workbooks run` works in basic mode (no Workbooks project)
+- [x] Confirmed `workbooks run` works with Workbooks projects
 - [x] Verified cell output display (stdout, stderr, errors)
 - [x] Verified execution summary and exit codes
 
@@ -103,7 +103,7 @@
 ### Installation Infrastructure
 - [x] Created `cli_install.rs` module with Tauri commands
   - [x] `install_cli()` - Copies CLI binary to system PATH
-  - [x] `check_cli_installed()` - Checks if tether is in PATH
+  - [x] `check_cli_installed()` - Checks if workbooks is in PATH
   - [x] `get_path_instructions()` - Returns shell-specific setup instructions
 - [x] Implemented smart binary location detection
   - [x] Checks multiple possible resource paths
@@ -112,10 +112,10 @@
   - [x] Detects user's shell (zsh, bash, etc.)
   - [x] Appends to appropriate rc file (.zshrc, .bashrc, .profile)
   - [x] Checks for existing PATH entry to avoid duplicates
-  - [x] Adds "# Added by Tether" comment for clarity
+  - [x] Adds "# Added by Workbooks" comment for clarity
 - [x] Cross-platform installation paths
-  - [x] macOS/Linux: `~/.local/bin/tether`
-  - [x] Windows: `%LOCALAPPDATA%\Programs\Tether\bin\tether.exe`
+  - [x] macOS/Linux: `~/.local/bin/workbooks`
+  - [x] Windows: `%LOCALAPPDATA%\Programs\Workbooks\bin\workbooks.exe`
 - [x] Set executable permissions on Unix systems
 
 ### Frontend Integration
@@ -131,7 +131,7 @@
   - [x] Added `prebuild:cli` script to compile CLI in release mode
   - [x] Modified `app:build` to run prebuild:cli before bundling
 - [x] Updated tauri.conf.json to bundle CLI binary
-  - [x] Added target/release/tether to resources
+  - [x] Added target/release/workbooks to resources
 - [x] Registered CLI install commands in invoke_handler
 
 ### User Experience
@@ -144,7 +144,7 @@
 ### Automatic CLI Updates (December 2024)
 - [x] Version detection system
   - [x] `get_bundled_cli_version()` - Returns version from Cargo.toml
-  - [x] `get_installed_cli_version()` - Checks installed CLI version via `tether --version`
+  - [x] `get_installed_cli_version()` - Checks installed CLI version via `workbooks --version`
 - [x] Automatic update on app launch
   - [x] Compares installed version with bundled version
   - [x] Auto-installs if CLI not found
@@ -162,6 +162,6 @@
   - [x] Root cause: Standalone CLI binary didn't have access to bundled resources
   - [x] Solution: Embedded `engine_pyproject.toml` content directly in binary using `include_str!`
   - [x] Removed 24 lines of file search logic, replaced with 2-line write from embedded content
-  - [x] Works for both development (`tether-dev`) and production (`tether`) CLI
+  - [x] Works for both development (`workbooks-dev`) and production (`workbooks`) CLI
   - [x] Eliminates dependency on external files for engine setup
   - [x] More robust and portable CLI distribution

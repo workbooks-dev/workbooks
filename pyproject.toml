@@ -1,5 +1,5 @@
 [project]
-name = "tether"
+name = "workbooks"
 version = "0.1.0"
 description = "Durable notebook orchestration for local-first data pipelines"
 readme = "README.md"

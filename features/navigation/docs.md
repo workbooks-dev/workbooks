@@ -2,7 +2,7 @@
 
 ## Overview
 
-Tether uses a **tab-based navigation system** for all views. Instead of modals or separate windows, everything opens as a new tab in the main workspace.
+Workbooks uses a **tab-based navigation system** for all views. Instead of modals or separate windows, everything opens as a new tab in the main workspace.
 
 ## Design Principle
 

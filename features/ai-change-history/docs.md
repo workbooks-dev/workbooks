@@ -13,7 +13,7 @@ Currently, when the AI agent modifies files using Edit, Write, or Bash tools, ch
 ### Storage Structure
 
 ```
-.tether/
+.workbooks/
 ├── chat_sessions.db          # Existing
 ├── agent_changes.db          # NEW: Change metadata
 └── snapshots/                # NEW: File snapshots
@@ -245,7 +245,7 @@ unexpected results.
 Settings exposed in project settings UI and config file:
 
 ```toml
-# .tether/config.toml or global settings
+# .workbooks/config.toml or global settings
 [agent.changes]
 enabled = true
 max_age_days = 30

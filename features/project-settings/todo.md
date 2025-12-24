@@ -2,12 +2,14 @@
 
 ## Global Configuration (Shared with CLI)
 
+
+
 ### Backend - Global Config Management
 - [ ] Create global config system in `src/config.rs`
   - [ ] `GlobalConfig` struct matching TOML structure
-  - [ ] `load_global_config()` - Read from `~/.tether/config.toml`
-  - [ ] `save_global_config()` - Write to `~/.tether/config.toml`
-  - [ ] Create `~/.tether/` directory if doesn't exist
+  - [ ] `load_global_config()` - Read from `~/.workbooks/config.toml`
+  - [ ] `save_global_config()` - Write to `~/.workbooks/config.toml`
+  - [ ] Create `~/.workbooks/` directory if doesn't exist
   - [ ] Handle malformed config gracefully
 - [ ] Implement Tauri commands for global config
   - [ ] `get_global_config()` - Return entire config
@@ -94,31 +96,31 @@
   - [ ] Validate JSON structure before modifying
 - [ ] Implement Claude config modification commands
   - [ ] `add_to_claude_desktop(project_path, project_name)` - Add MCP entry
-  - [ ] `list_claude_tether_projects()` - List all `tether-*` entries
+  - [ ] `list_claude_workbooks_projects()` - List all `workbooks-*` entries
   - [ ] `remove_from_claude_desktop(project_name)` - Remove entry
   - [ ] Backup config before modifying
   - [ ] Validate changes after writing
 - [ ] Implement CLI installation commands
-  - [ ] `get_cli_installation_status()` - Check if `tether` in PATH
+  - [ ] `get_cli_installation_status()` - Check if `workbooks` in PATH
   - [ ] `install_cli_to_path()` - Copy binary to system location
-    - [ ] macOS/Linux: `/usr/local/bin/tether`
-    - [ ] Windows: `%LOCALAPPDATA%\Programs\Tether\bin\`
+    - [ ] macOS/Linux: `/usr/local/bin/workbooks`
+    - [ ] Windows: `%LOCALAPPDATA%\Programs\Workbooks\bin\`
   - [ ] Set executable permissions (Unix)
   - [ ] Verify installation succeeded
 
 ### Frontend - Claude Desktop UI
 - [ ] Add "Claude Desktop" section to settings
   - [ ] "Add to Claude Desktop" button
-    - [ ] Check if `tether` CLI is installed first
+    - [ ] Check if `workbooks` CLI is installed first
     - [ ] Warn if CLI not installed, offer to install
     - [ ] Call `add_to_claude_desktop` command
     - [ ] Show success message with restart instructions
     - [ ] Display MCP server entry name
   - [ ] "Manage Claude Projects" button/dialog
     - [ ] Opens modal/dialog with project list
-    - [ ] Shows all Tether MCP entries
+    - [ ] Shows all Workbooks MCP entries
     - [ ] Checkboxes to enable/disable
-    - [ ] "Remove all other Tether projects" button
+    - [ ] "Remove all other Workbooks projects" button
     - [ ] Confirm before removing projects
     - [ ] Update config on save
   - [ ] Show current Claude integration status
@@ -134,10 +136,10 @@
 ## Backend (Rust)
 
 - [ ] Project metadata management
-  - [ ] Store project info in `.tether/project.json`
+  - [ ] Store project info in `.workbooks/project.json`
   - [ ] `get_project_info()` command
   - [ ] `update_project_name()` command
-  - [ ] Update `.tether` shortcut file on name change
+  - [ ] Update `.workbooks` shortcut file on name change
 
 - [ ] Package management commands
   - [ ] `list_packages()` - Get installed packages from venv
@@ -153,9 +155,9 @@
 - [ ] Export functionality
   - [ ] `export_project(dest_path)` - Create ZIP
   - [ ] Include: workbooks, files, pyproject.toml, secrets
-  - [ ] Exclude: .tether/, venv, cache
+  - [ ] Exclude: .workbooks/, venv, cache
   - [ ] Progress callback for large projects
-  - [ ] Handle encrypted secrets (`.env.tether`)
+  - [ ] Handle encrypted secrets (`.env.workbooks`)
 
 ## Integration
 
@@ -170,7 +172,7 @@
 
 - [ ] Update project name across app
   - [ ] Window title
-  - [ ] `.tether` shortcut file
+  - [ ] `.workbooks` shortcut file
   - [ ] Project metadata
 
 ## Default Packages
@@ -184,13 +186,13 @@
 
 ### Tauri Installer Configuration
 - [ ] Add post-install script for CLI installation
-  - [ ] Prompt user: "Install tether CLI to system PATH?"
+  - [ ] Prompt user: "Install workbooks CLI to system PATH?"
   - [ ] Checkbox: "☑ Install CLI" (checked by default, opt-out)
   - [ ] Run `install_cli_to_path()` if accepted
   - [ ] Show installation success/failure
   - [ ] Test CLI accessibility before finishing
 - [ ] Bundle CLI binary with app installer
-  - [ ] Include `tether` binary in app bundle
+  - [ ] Include `workbooks` binary in app bundle
   - [ ] Platform-specific bundling (macOS .app, Windows installer, Linux AppImage)
 - [ ] Test installation on all platforms
   - [ ] macOS installer with CLI option
@@ -200,7 +202,7 @@
 ## Import/Import
 
 - [ ] Import exported project
-  - [ ] Detect `.tether` shortcut in ZIP
+  - [ ] Detect `.workbooks` shortcut in ZIP
   - [ ] Extract to chosen location
   - [ ] Initialize as new project
   - [ ] Recreate venv

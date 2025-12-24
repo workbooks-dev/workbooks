@@ -12,18 +12,18 @@
 - [x] Virtual environment management
 - [x] Package installation via uv
 - [x] Dependency syncing
-- [x] `.tether` shortcut file generation
+- [x] `.workbooks` shortcut file generation
 
 ## Python/uv Integration
 
 - [x] `install_python_package()` command
 - [x] `install_python_packages()` command
 - [x] `sync_dependencies()` - Sync from pyproject.toml
-- [x] Centralized venv location (`~/.tether/venvs/`)
+- [x] Centralized venv location (`~/.workbooks/venvs/`)
 
 ## Design Updates
 
-- [x] Designed global configuration system (`~/.tether/config.toml`)
+- [x] Designed global configuration system (`~/.workbooks/config.toml`)
 - [x] Designed default project feature (shared with CLI)
 - [x] Designed CLI integration section for settings
 - [x] Designed Claude Desktop integration ("Add to Claude" button)

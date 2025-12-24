@@ -58,7 +58,7 @@ export function Welcome({ onProjectOpened, onOpenSettings }) {
     <div className="flex items-center justify-center min-h-screen bg-gradient-to-br from-gray-50 to-gray-100">
       <div className="w-full max-w-xl px-6">
         <div className="bg-white rounded-xl shadow-soft-lg p-10 border border-gray-200">
-          <h1 className="text-4xl font-bold text-gray-900 mb-2">Tether</h1>
+          <h1 className="text-4xl font-bold text-gray-900 mb-2">Workbooks</h1>
           <p className="text-base text-gray-600 mb-8">Sharpen your automations</p>
 
           <div className="space-y-3 mb-6">
@@ -101,7 +101,7 @@ export function Welcome({ onProjectOpened, onOpenSettings }) {
             <h3 className="text-xs font-semibold uppercase tracking-wider text-gray-500 mb-4">Getting Started</h3>
             <ul className="space-y-2 text-sm text-gray-600">
               <li><span className="font-semibold text-gray-900">Open Folder:</span> Open any folder with a pyproject.toml (uv project)</li>
-              <li><span className="font-semibold text-gray-900">Create New:</span> Initialize a new Tether project from scratch</li>
+              <li><span className="font-semibold text-gray-900">Create New:</span> Initialize a new Workbooks project from scratch</li>
             </ul>
           </div>
 

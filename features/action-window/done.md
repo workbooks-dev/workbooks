@@ -13,11 +13,11 @@ All completed items will be listed here chronologically as they are implemented.
 - Added `get_recent_projects` Tauri command in src-tauri/src/lib.rs:273
 - Registered command in invoke_handler (lib.rs:1519)
 - Integrated with existing recent_projects.rs module
-- Command returns Vec<RecentProject> from ~/.tether/recent_projects.json
+- Command returns Vec<RecentProject> from ~/.workbooks/recent_projects.json
 
 ### Frontend Implementation
 - Created ActionWindow.jsx component (src/components/ActionWindow.jsx)
-- Implemented clean, centered layout with Tether branding
+- Implemented clean, centered layout with Workbooks branding
 - Added Recent Projects section (displays top 3 recent projects)
 - Added Projects section (Create Project, Open Project buttons)
 - Added Global Views section (View All Runs, View All Schedules placeholders)
@@ -45,12 +45,12 @@ All completed items will be listed here chronologically as they are implemented.
 
 ### What Works
 ✅ Action Window appears on app startup (when no project is loaded)
-✅ Recent projects are fetched and displayed from ~/.tether/recent_projects.json
+✅ Recent projects are fetched and displayed from ~/.workbooks/recent_projects.json
 ✅ Create Project button navigates to project creation flow
 ✅ Open Project button opens native folder picker
 ✅ Recent project clicks load the selected project
 ✅ Back button from Create Project returns to Action Window
-✅ Clean, professional UI following Tether design guidelines
+✅ Clean, professional UI following Workbooks design guidelines
 ✅ View All Runs button opens global runs view (all projects)
 ✅ View All Schedules button opens global schedules view (all projects)
 ✅ Both global views reuse ScheduleTab component with showAllProjects=true
@@ -81,7 +81,7 @@ All completed items will be listed here chronologically as they are implemented.
 ✅ Command+W in project view closes last tab and returns to Action Window
 ✅ Command+W in Action Window hides the window (app stays running in tray)
 ✅ Closing Action Window hides the window (app stays running in tray)
-✅ App only quits when "Quit Tether" is selected from tray menu
+✅ App only quits when "Quit Workbooks" is selected from tray menu
 ✅ Window close with unsaved changes shows save dialog, then returns to Action Window
 ✅ Proper state cleanup when returning to Action Window (project, tabs, activeTabId all cleared)
 

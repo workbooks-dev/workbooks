@@ -1,4 +1,4 @@
-"""Configuration and global state for the Tether engine server."""
+"""Configuration and global state for the Workbooks engine server."""
 
 import logging
 from typing import Dict

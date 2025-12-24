@@ -2,7 +2,7 @@
 
 ## Overview
 
-The system tray icon keeps Tether running in the background even when all windows are closed. This is essential for the scheduler to continue running automated workbook executions.
+The system tray icon keeps Workbooks running in the background even when all windows are closed. This is essential for the scheduler to continue running automated workbook executions.
 
 ## Design Goals
 
@@ -14,7 +14,7 @@ The system tray icon keeps Tether running in the background even when all window
 ## Menu Structure
 
 ```
-Tether (icon)
+Workbooks (icon)
 ├── Recent Projects (dynamic, max 3)
 │   ├── Project Name 1
 │   ├── Project Name 2
@@ -29,14 +29,14 @@ Tether (icon)
 ├── Install MCP...
 ├── ─────────────────
 ├── Scheduler: Running (status, disabled)
-└── Quit Tether (⌘Q)
+└── Quit Workbooks (⌘Q)
 ```
 
 ## Behavior
 
 ### Window Management
 - **Close Window (⌘W)** - Hides window, app continues running in tray
-- **Quit Tether (⌘Q)** - Fully quits the application (from tray menu)
+- **Quit Workbooks (⌘Q)** - Fully quits the application (from tray menu)
 - Closing all windows doesn't quit the app - scheduler keeps running
 
 ### Recent Projects
@@ -59,7 +59,7 @@ Tether (icon)
   - If no project open → open empty project and navigate to scheduler view
 
 ### MCP Management
-- **Install MCP** - Opens new window for managing Tether MCP servers
+- **Install MCP** - Opens new window for managing Workbooks MCP servers
   - Browse available MCPs
   - Install from directory
   - Manage installed MCPs
@@ -86,7 +86,7 @@ Tether (icon)
 ### State Management
 
 Recent projects stored in:
-- `~/.tether/recent_projects.json` - Global recent projects list
+- `~/.workbooks/recent_projects.json` - Global recent projects list
 - Contains: project name, path, last opened timestamp
 - Max 3 entries, sorted by most recent
 
@@ -98,7 +98,7 @@ Recent projects stored in:
 ## Technical Details
 
 ### Tray Icon Persistence
-The tray icon is created in the `setup` hook and persists for the app lifetime. It's only destroyed when the user selects "Quit Tether".
+The tray icon is created in the `setup` hook and persists for the app lifetime. It's only destroyed when the user selects "Quit Workbooks".
 
 ### Window Close vs App Quit
 ```rust

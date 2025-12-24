@@ -1,4 +1,4 @@
-# Tether
+# Workbooks
 
 *Sharpen your automations*
 
@@ -23,11 +23,11 @@ Anytime a feature todo is done, always move it from todo.md to done.md
 
 #### Workbook System
 - **`features/workbooks/`** - Workbook viewer, execution engine, keyboard shortcuts, streaming output
-- **`features/files/`** - File management, environment variables (TETHER_PROJECT_FOLDER), file drop handling
+- **`features/files/`** - File management, environment variables (WORKBOOKS_PROJECT_FOLDER), file drop handling
 
 #### Data & Security
 - **`features/secrets/`** - Secrets management, encryption, keychain integration
-- **`features/state/`** - State management system (SQLite, blob storage, tether-core API)
+- **`features/state/`** - State management system (SQLite, blob storage, workbooks-core API)
 
 #### Automation
 - **`features/schedule/`** - Cron scheduling, run history, automated execution
@@ -42,7 +42,7 @@ Anytime a feature todo is done, always move it from todo.md to done.md
 - **`features/changelog.md`** - Chronological list of completed work
 - **`features/README.md`** - Feature documentation structure and workflow
 
-**When working on Tether:**
+**When working on Workbooks:**
 1. Read `features/<area>/docs.md` to understand the design
 2. Check `features/<area>/todo.md` for what needs to be done
 3. Check `features/<area>/done.md` to see what's already implemented
@@ -119,12 +119,12 @@ The app uses an HTTP-based engine architecture:
 
 ## Project Overview
 
-Tether is a desktop application that makes Jupyter notebooks (called "workbooks" in the UI) durable, resumable, and connectable. Users can run workbooks locally with automatic checkpointing, connect workbooks through shared state, and schedule/orchestrate pipelines visually.
+Workbooks is a desktop application that makes Jupyter notebooks (called "workbooks" in the UI) durable, resumable, and connectable. Users can run workbooks locally with automatic checkpointing, connect workbooks through shared state, and schedule/orchestrate pipelines visually.
 
-**Brand:** Tether
-**CLI:** `tether`
-**Extension:** `.tether`
-**Domain:** tether.dev
+**Brand:** Workbooks
+**CLI:** `workbooks`
+**Extension:** `.workbooks`
+**Domain:** workbooks.dev
 
 ## Core Concepts
 
@@ -132,7 +132,7 @@ Tether is a desktop application that makes Jupyter notebooks (called "workbooks"
 Workbooks communicate through a shared state system rather than explicit wiring. Workbooks read/write state variables, and dependencies are inferred automatically.
 
 ```python
-from tether import state
+from workbooks import state
 
 # Read from state (blocks until available or uses cached)
 df = state.get("customers")
@@ -149,7 +149,7 @@ state.set("customers_clean", df_clean)
 ### Project Structure
 ```
 ~/Projects/my-pipeline/
-├── .tether/
+├── .workbooks/
 │   ├── state.db              # SQLite state metadata
 │   ├── state/                # Blob storage for large objects
 │   │   ├── customers.pkl
@@ -163,7 +163,7 @@ state.set("customers_clean", df_clean)
 │   ├── load_data.ipynb
 │   ├── transform.ipynb
 │   └── train_model.ipynb
-└── My Pipeline.tether        # Shortcut file (double-click opens app)
+└── My Pipeline.workbooks        # Shortcut file (double-click opens app)
 ```
 
 ## Architecture Diagram
@@ -188,7 +188,7 @@ state.set("customers_clean", df_clean)
                              ▼
 ┌─────────────────────────────────────────────────────────────────┐
 │                  Local Artifact Store                           │
-│  ~/.tether/ or project/.tether/                                 │
+│  ~/.workbooks/ or project/.workbooks/                                 │
 │  - state.db (SQLite)                                            │
 │  - state/ (blob pickles)                                        │
 │  - runs/ (execution logs, checkpoints)                          │
@@ -198,17 +198,17 @@ state.set("customers_clean", df_clean)
 ## CLI Commands
 
 ```bash
-tether init <name>                  # Create new project
-tether run <workbook.ipynb>         # Run a workbook
-tether run --all                    # Run full pipeline
-tether status                       # Show pipeline status
-tether state list                   # List state variables
-tether state inspect <key>          # Inspect a state variable
-tether fork <branch-name>           # Fork state (like Neon for SQLite)
-tether switch <branch-name>         # Switch state branch
-tether schedule <workbook> --cron   # Schedule a workbook
-tether logs [workbook]              # View execution logs
-tether resume [workbook]            # Resume interrupted run
+workbooks init <name>                  # Create new project
+workbooks run <workbook.ipynb>         # Run a workbook
+workbooks run --all                    # Run full pipeline
+workbooks status                       # Show pipeline status
+workbooks state list                   # List state variables
+workbooks state inspect <key>          # Inspect a state variable
+workbooks fork <branch-name>           # Fork state (like Neon for SQLite)
+workbooks switch <branch-name>         # Switch state branch
+workbooks schedule <workbook> --cron   # Schedule a workbook
+workbooks logs [workbook]              # View execution logs
+workbooks resume [workbook]            # Resume interrupted run
 ```
 
 ## Key File Locations
@@ -231,7 +231,7 @@ tether resume [workbook]            # Resume interrupted run
 ## State API (Python)
 
 ```python
-from tether import state
+from workbooks import state
 
 # Basic operations
 state.get(key, default=None, wait=False, timeout=None)
@@ -251,7 +251,7 @@ state.workbook_name
 
 1. Before each cell executes, save current namespace
 2. Filter to picklable objects only
-3. Store in `.tether/runs/{run_id}/checkpoints/cell-{n}.pkl`
+3. Store in `.workbooks/runs/{run_id}/checkpoints/cell-{n}.pkl`
 4. On resume, load latest checkpoint and continue from next cell
 5. Chain cell hashes so code changes invalidate downstream checkpoints
 
@@ -306,7 +306,7 @@ When a workbook fails on import:
 ## Shortcut File Format
 
 ```json
-// My Pipeline.tether
+// My Pipeline.workbooks
 {
   "version": 1,
   "name": "My Pipeline",
@@ -314,7 +314,7 @@ When a workbook fails on import:
 }
 ```
 
-Register `.tether` extension on install. Double-click opens the Tauri app with this project.
+Register `.workbooks` extension on install. Double-click opens the Tauri app with this project.
 
 ## Development Setup
 
@@ -329,7 +329,7 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 curl -LsSf https://astral.sh/uv/install.sh | sh
 
 # Clone and setup
-cd tether
+cd workbooks
 
 # Install frontend dependencies
 npm install
@@ -347,7 +347,7 @@ npm run tauri build
 
 ## Design Principles
 
-1. **Workbooks stay normal notebooks** - Edit in Jupyter, VS Code, wherever. Tether just watches and orchestrates.
+1. **Workbooks stay normal notebooks** - Edit in Jupyter, VS Code, wherever. Workbooks just watches and orchestrates.
 
 2. **State is implicit wiring** - No explicit DAG definition. Write `state.get("x")` and `state.set("y")`, dependencies are inferred.
 

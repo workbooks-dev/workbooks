@@ -60,7 +60,7 @@ How should template index be cached and refreshed?
 ## 6. Template Repositories
 
 When and how should we create the template repos?
-- Create `tether-dev/templates-official` and `tether-dev/templates-community` now?
+- Create `workbooks-dev/templates-official` and `workbooks-dev/templates-community` now?
 - Wait until UI is ready?
 - What should the initial repo structure look like?
 - Any example templates to include initially?

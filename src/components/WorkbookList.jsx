@@ -1,9 +1,9 @@
 import { useState, useEffect } from "react";
-import { useTether } from "../hooks/useTether";
+import { useWorkbooks } from "../hooks/useWorkbooks";
 
 export function NotebookList() {
   const [notebooks, setNotebooks] = useState([]);
-  const { listNotebooks, runNotebook } = useTether();
+  const { listNotebooks, runNotebook } = useWorkbooks();
 
   useEffect(() => {
     loadNotebooks();

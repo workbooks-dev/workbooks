@@ -9,7 +9,7 @@ use std::os::unix::fs::PermissionsExt;
 // This version comes from Cargo.toml
 const CLI_VERSION: &str = env!("CARGO_PKG_VERSION");
 
-/// Install the tether CLI to the system PATH
+/// Install the workbooks CLI to the system PATH
 #[tauri::command]
 pub async fn install_cli(app: AppHandle) -> Result<String, String> {
     match install_cli_internal(&app).await {
@@ -18,11 +18,11 @@ pub async fn install_cli(app: AppHandle) -> Result<String, String> {
     }
 }
 
-/// Check if the tether CLI is already installed and in PATH
+/// Check if the workbooks CLI is already installed and in PATH
 #[tauri::command]
 pub async fn check_cli_installed() -> Result<bool, String> {
-    // Check if 'tether' command is available
-    if let Ok(_) = which::which("tether") {
+    // Check if 'workbooks' command is available
+    if let Ok(_) = which::which("workbooks") {
         return Ok(true);
     }
     Ok(false)
@@ -37,16 +37,16 @@ pub async fn get_bundled_cli_version() -> Result<String, String> {
 /// Get the version of the installed CLI (if any)
 #[tauri::command]
 pub async fn get_installed_cli_version() -> Result<Option<String>, String> {
-    // Try to run `tether --version` to get the installed version
-    if let Ok(tether_path) = which::which("tether") {
-        let output = std::process::Command::new(tether_path)
+    // Try to run `workbooks --version` to get the installed version
+    if let Ok(workbooks_path) = which::which("workbooks") {
+        let output = std::process::Command::new(workbooks_path)
             .arg("--version")
             .output();
 
         if let Ok(output) = output {
             if output.status.success() {
                 let version_str = String::from_utf8_lossy(&output.stdout);
-                // Parse "tether 0.1.0" to get just "0.1.0"
+                // Parse "workbooks 0.1.0" to get just "0.1.0"
                 if let Some(version) = version_str.split_whitespace().nth(1) {
                     return Ok(Some(version.trim().to_string()));
                 }
@@ -64,17 +64,18 @@ async fn install_cli_internal(app: &AppHandle) -> Result<PathBuf> {
         .resource_dir()
         .context("Failed to get resource directory")?;
 
-    // The bundled CLI binary is named tether-cli (to avoid conflicts with the GUI binary)
+    // The bundled CLI binary is named workbooks-cli (to avoid conflicts with the GUI binary)
     let bundled_cli_name = if cfg!(windows) {
-        "tether-cli.exe"
+        "workbooks-cli.exe"
     } else {
-        "tether-cli"
+        "workbooks-cli"
     };
 
     // Try multiple possible locations for the CLI binary
     let possible_paths = vec![
         resource_path.join(bundled_cli_name),
-        resource_path.join("target").join("release").join(bundled_cli_name),
+        resource_path.join("target").join("debug").join(bundled_cli_name), // Debug build
+        resource_path.join("target").join("release").join(bundled_cli_name), // Release build
         resource_path.join("..").join(bundled_cli_name), // Sometimes resources are one level up
     ];
 
@@ -140,14 +141,14 @@ fn add_to_path_unix(install_path: &Path) -> Result<()> {
         vec![home.join(".profile")]
     };
 
-    let path_line = format!("\n# Added by Tether\nexport PATH=\"{}:$PATH\"\n", install_dir.display());
+    let path_line = format!("\n# Added by Workbooks\nexport PATH=\"{}:$PATH\"\n", install_dir.display());
 
     for rc_file in rc_files {
         // Only update if file exists
         if rc_file.exists() {
             // Check if already added
             if let Ok(content) = fs::read_to_string(&rc_file) {
-                if content.contains("Added by Tether") || content.contains(&install_dir.to_string_lossy().to_string()) {
+                if content.contains("Added by Workbooks") || content.contains(&install_dir.to_string_lossy().to_string()) {
                     continue; // Already added
                 }
 
@@ -168,7 +169,7 @@ fn get_install_path() -> Result<PathBuf> {
     {
         // Try ~/.local/bin first (doesn't require sudo)
         if let Some(home) = dirs::home_dir() {
-            let local_bin = home.join(".local").join("bin").join("tether");
+            let local_bin = home.join(".local").join("bin").join("workbooks");
             return Ok(local_bin);
         }
         anyhow::bail!("Failed to determine home directory");
@@ -178,7 +179,7 @@ fn get_install_path() -> Result<PathBuf> {
     {
         // Try ~/.local/bin first
         if let Some(home) = dirs::home_dir() {
-            let local_bin = home.join(".local").join("bin").join("tether");
+            let local_bin = home.join(".local").join("bin").join("workbooks");
             return Ok(local_bin);
         }
         anyhow::bail!("Failed to determine home directory");
@@ -186,13 +187,13 @@ fn get_install_path() -> Result<PathBuf> {
 
     #[cfg(target_os = "windows")]
     {
-        // Windows: Install to %LOCALAPPDATA%\Programs\Tether\bin\
+        // Windows: Install to %LOCALAPPDATA%\Programs\Workbooks\bin\
         if let Some(local_app_data) = dirs::data_local_dir() {
             let install_dir = local_app_data
                 .join("Programs")
-                .join("Tether")
+                .join("Workbooks")
                 .join("bin")
-                .join("tether.exe");
+                .join("workbooks.exe");
             return Ok(install_dir);
         }
         anyhow::bail!("Failed to determine local app data directory");
@@ -223,7 +224,7 @@ pub async fn get_path_instructions() -> Result<String, String> {
                 };
 
                 Ok(format!(
-                    "To use 'tether' from your terminal, add this to your {}:\n\n  export PATH=\"{}:$PATH\"\n\nThen run:  source {}",
+                    "To use 'workbooks' from your terminal, add this to your {}:\n\n  export PATH=\"{}:$PATH\"\n\nThen run:  source {}",
                     rc_file,
                     install_dir.display(),
                     rc_file
@@ -233,7 +234,7 @@ pub async fn get_path_instructions() -> Result<String, String> {
             #[cfg(target_os = "windows")]
             {
                 Ok(format!(
-                    "To use 'tether' from Command Prompt, add this directory to your PATH:\n\n  {}",
+                    "To use 'workbooks' from Command Prompt, add this directory to your PATH:\n\n  {}",
                     install_dir.display()
                 ))
             }

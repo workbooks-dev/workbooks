@@ -1,6 +1,6 @@
 # Action Window - Implementation Tasks
 
-The Action Window is the central launcher for Tether - the entry point for all operations.
+The Action Window is the central launcher for Workbooks - the entry point for all operations.
 
 See `docs.md` for full design specification.
 

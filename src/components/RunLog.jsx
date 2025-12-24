@@ -1,9 +1,9 @@
 import { useState, useEffect } from "react";
-import { useTether } from "../hooks/useTether";
+import { useWorkbooks } from "../hooks/useWorkbooks";
 
 export function RunLog() {
   const [logs, setLogs] = useState([]);
-  const { getRunLogs } = useTether();
+  const { getRunLogs } = useWorkbooks();
 
   useEffect(() => {
     loadLogs();

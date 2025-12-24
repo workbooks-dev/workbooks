@@ -2,13 +2,13 @@
 
 ## Overview
 
-Project settings provide configuration and management for the entire Tether project. Accessed via the gear icon at the bottom of the sidebar.
+Project settings provide configuration and management for the entire Workbooks project. Accessed via the gear icon at the bottom of the sidebar.
 
 **See `/project-defaults.md` for default packages and project initialization.**
 
 ## Global Configuration
 
-Tether maintains a **global config file** at `~/.tether/config.toml` that stores settings shared between the desktop app and CLI:
+Workbooks maintains a **global config file** at `~/.workbooks/config.toml` that stores settings shared between the desktop app and CLI:
 - Default project
 - Recent projects list
 - App preferences (theme, etc.)
@@ -46,7 +46,7 @@ Both the app and CLI read/write this config, enabling seamless integration.
 
 **Project Name:**
 - Editable text field
-- Updates `.tether` shortcut file
+- Updates `.workbooks` shortcut file
 - Updates window title
 - Validation (no special chars)
 
@@ -62,7 +62,7 @@ Both the app and CLI read/write this config, enabling seamless integration.
 **Default Project:**
 - "Set as Default Project" button
 - Marks this project as the default for CLI and app
-- Updates global config (`~/.tether/config.toml`)
+- Updates global config (`~/.workbooks/config.toml`)
 - Shows "✓ Default Project" badge if currently default
 - On app launch, default project auto-opens
 - CLI uses default if no `--project` flag or cwd detection
@@ -70,7 +70,7 @@ Both the app and CLI read/write this config, enabling seamless integration.
 #### 2. Python Environment
 
 **Virtual Environment:**
-- Shows venv path (centralized: `~/.tether/venvs/{project-name}-{hash}`)
+- Shows venv path (centralized: `~/.workbooks/venvs/{project-name}-{hash}`)
 - Python version
 - Venv size
 
@@ -105,16 +105,16 @@ Both the app and CLI read/write this config, enabling seamless integration.
   - All workbooks
   - All files
   - `pyproject.toml` (dependencies)
-  - Encrypted secrets (`.env.tether`)
+  - Encrypted secrets (`.env.workbooks`)
   - Project structure
 - Excludes:
-  - `.tether/` directory (state, runs, etc.)
+  - `.workbooks/` directory (state, runs, etc.)
   - Virtual environment
   - Python cache files
 
 **Recipient Setup:**
-- Open exported ZIP in Tether
-- Tether recreates venv and installs packages
+- Open exported ZIP in Workbooks
+- Workbooks recreates venv and installs packages
 - Prompts to add their own secrets
 - Ready to run
 
@@ -173,7 +173,7 @@ Both the app and CLI read/write this config, enabling seamless integration.
 - See `/project-defaults.md` for full list
 - Core packages: jupyter, ipykernel, nbformat
 - Common data packages: pandas, numpy, matplotlib, etc.
-- Tether integration: cloudpickle (for state)
+- Workbooks integration: cloudpickle (for state)
 
 **Customization (Future):**
 - Edit default package list
@@ -184,7 +184,7 @@ Both the app and CLI read/write this config, enabling seamless integration.
 
 **CLI Installation:**
 - "Install CLI" button (if not already installed)
-  - Copies `tether` binary to system PATH
+  - Copies `workbooks` binary to system PATH
   - Shows installation progress and success
   - Verifies accessibility
 - Shows CLI installation status (installed/not installed)
@@ -196,9 +196,9 @@ Both the app and CLI read/write this config, enabling seamless integration.
   - Adds MCP server entry for this project
   - Shows success message with restart instructions
 - "Manage Claude Projects" button
-  - Lists all Tether projects in Claude config
+  - Lists all Workbooks projects in Claude config
   - Enable/disable projects
-  - Remove other Tether projects
+  - Remove other Workbooks projects
   - Shows current project status
 
 ## Integration Points
@@ -217,7 +217,7 @@ Both the app and CLI read/write this config, enabling seamless integration.
 ### With Global Config
 
 **Global Config Commands:**
-- `get_global_config()` - Read `~/.tether/config.toml`
+- `get_global_config()` - Read `~/.workbooks/config.toml`
 - `set_default_project(path)` - Set default project
 - `get_default_project()` - Get current default
 - `unset_default_project()` - Remove default
@@ -229,7 +229,7 @@ Both the app and CLI read/write this config, enabling seamless integration.
 **Claude Config Commands:**
 - `get_claude_config_path()` - Locate Claude config file
 - `add_to_claude_desktop(project_path, project_name)` - Add MCP entry
-- `list_claude_tether_projects()` - List all Tether MCP servers
+- `list_claude_workbooks_projects()` - List all Workbooks MCP servers
 - `remove_from_claude_desktop(project_name)` - Remove MCP entry
 - `get_cli_installation_status()` - Check if CLI installed
 - `install_cli_to_path()` - Install CLI binary
@@ -260,14 +260,14 @@ Both the app and CLI read/write this config, enabling seamless integration.
 
 ### Project Metadata Storage
 
-**`.tether/project.json`:**
+**`.workbooks/project.json`:**
 ```json
 {
   "name": "My Project",
   "created_at": 1234567890,
   "project_root": "/Users/name/Projects/my-project",
   "python_version": "3.12",
-  "venv_path": "/Users/name/.tether/venvs/my-project-abc123"
+  "venv_path": "/Users/name/.workbooks/venvs/my-project-abc123"
 }
 ```
 
@@ -283,17 +283,17 @@ my-project.zip
 │   └── data.csv
 ├── pyproject.toml
 ├── uv.lock
-├── .env.tether (encrypted secrets)
-└── My Project.tether (shortcut file)
+├── .env.workbooks (encrypted secrets)
+└── My Project.workbooks (shortcut file)
 ```
 
 **Import Flow:**
-1. User extracts ZIP (or Tether does it)
-2. Tether detects `.tether` shortcut file
+1. User extracts ZIP (or Workbooks does it)
+2. Workbooks detects `.workbooks` shortcut file
 3. Opens as new project
-4. Creates venv at `~/.tether/venvs/{name}-{hash}`
+4. Creates venv at `~/.workbooks/venvs/{name}-{hash}`
 5. Runs `uv sync` to install packages
-6. Prompts for secrets (if `.env.tether` exists)
+6. Prompts for secrets (if `.env.workbooks` exists)
 7. Ready to use
 
 ## Future Enhancements

@@ -1,6 +1,11 @@
-# Tether High-Level Roadmap
+# Workbooks High-Level Roadmap
 
 This file tracks the high-level feature priorities and cross-cutting tasks. For detailed implementation todos, see individual feature directories.
+
+## Opening a Workbooks project
+
+- [ ] if a pyproject.toml exists, do not duplicate "dependency-groups", add to it
+
 
 ## Current Status Summary (Updated Dec 20, 2025)
 
@@ -99,7 +104,7 @@ Based on recent audit of workbooks, schedule, and secrets features:
 **Why:** Critical for debugging failed runs. Currently only see metadata, not full outputs.
 
 **Key Tasks:**
-- [ ] Save executed notebook with outputs to `.tether/runs/{run_id}.ipynb`
+- [ ] Save executed notebook with outputs to `.workbooks/runs/{run_id}.ipynb`
 - [ ] "View Report" button in Recent Runs tab
 - [ ] Open report in read-only tab
 - [ ] Display saved notebook with all outputs preserved
@@ -241,7 +246,7 @@ Based on recent audit of workbooks, schedule, and secrets features:
 **Details:** See `features/state/todo.md`
 
 **Key Tasks:**
-- [ ] tether-core Python package with StateManager class
+- [ ] workbooks-core Python package with StateManager class
 - [ ] SQLite + blob storage backend
 - [ ] state.get() / state.set() API implementation
 - [ ] Dependency tracking and graph visualization
@@ -252,7 +257,7 @@ Based on recent audit of workbooks, schedule, and secrets features:
 **Why:** Core differentiating feature for workbook orchestration. This is the biggest feature and will take significant effort.
 
 **Implementation Order:**
-1. Python package (tether-core) with basic API
+1. Python package (workbooks-core) with basic API
 2. Backend storage (SQLite + blobs)
 3. Dependency tracking system
 4. Frontend StatePanel for visualization
@@ -274,7 +279,7 @@ Based on recent audit of workbooks, schedule, and secrets features:
 ### Platform & Distribution
 - [ ] Windows support (currently macOS-focused)
 - [ ] Linux support
-- [ ] .tether file association (double-click to open project)
+- [ ] .workbooks file association (double-click to open project)
 - [ ] System service/daemon for always-on scheduling
 - [ ] Mobile companion app (view-only, check run status)
 

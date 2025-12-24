@@ -4,7 +4,7 @@
 
 - [x] Implemented file system watching using `notify` crate
 - [x] Debounced file system events (500ms) to prevent spam
-- [x] Filtered ignored paths (.git, .tether, node_modules, .venv, etc.)
+- [x] Filtered ignored paths (.git, .workbooks, node_modules, .venv, etc.)
 - [x] Auto-refresh file list when files change externally
 - [x] Event-driven architecture emits 'file-system-changed' to frontend
 - [x] Frontend listens and reloads file list automatically
@@ -149,10 +149,10 @@
 
 ## Environment Variable
 
-- [x] `TETHER_PROJECT_FOLDER` injection
+- [x] `WORKBOOKS_PROJECT_FOLDER` injection
   - [x] Set in all Jupyter kernels
   - [x] Absolute path to project root
-  - [x] Available via `os.environ["TETHER_PROJECT_FOLDER"]`
+  - [x] Available via `os.environ["WORKBOOKS_PROJECT_FOLDER"]`
   - [x] Enables portable file paths in workbooks
 
 ## File Drop Handling

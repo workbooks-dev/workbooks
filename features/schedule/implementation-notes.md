@@ -6,7 +6,7 @@
 
 **CLI:**
 - No CLI binary exists yet
-- Current Cargo.toml only defines a library (`tether_lib`)
+- Current Cargo.toml only defines a library (`workbooks_lib`)
 - No CLI argument parsing library (clap/structopt) in dependencies
 
 **Engine Capabilities:**
@@ -50,11 +50,11 @@ src-tauri/
 **Cargo.toml:**
 ```toml
 [[bin]]
-name = "tether"          # CLI binary
+name = "workbooks"          # CLI binary
 path = "src/cli.rs"
 
 [[bin]]
-name = "tether-gui"      # GUI binary
+name = "workbooks-gui"      # GUI binary
 path = "src/main.rs"
 ```
 
@@ -64,7 +64,7 @@ path = "src/main.rs"
 
 #### 3. Global Scheduler Database
 
-**Location:** `~/.tether/schedules.db`
+**Location:** `~/.workbooks/schedules.db`
 
 **Schema:**
 ```sql
@@ -114,30 +114,30 @@ CREATE TABLE runs (
 
 #### 5. CLI Commands
 
-**`tether run <notebook>`:**
+**`workbooks run <notebook>`:**
 - Load notebook from path
 - Start engine for notebook
 - Execute all cells sequentially
 - Print outputs to stdout
 - Exit with success/error code
 
-**`tether schedule <notebook> --cron <expr>`:**
+**`workbooks schedule <notebook> --cron <expr>`:**
 - Add schedule to global database
 - Validate cron expression
 - Print next run time
 - Note: Scheduler runs when GUI app is open
 
-**`tether schedule <notebook> --daily`:**
+**`workbooks schedule <notebook> --daily`:**
 - Preset for "0 9 * * *" (9am daily)
 
-**`tether schedule <notebook> --hourly`:**
+**`workbooks schedule <notebook> --hourly`:**
 - Preset for "0 * * * *" (top of every hour)
 
-**`tether schedule list`:**
+**`workbooks schedule list`:**
 - List all schedules
 - Show next run times
 
-**`tether schedule remove <schedule-id>`:**
+**`workbooks schedule remove <schedule-id>`:**
 - Remove schedule from database
 
 #### 6. Integration with GUI
@@ -145,7 +145,7 @@ CREATE TABLE runs (
 **AppState updates:**
 ```rust
 pub struct AppState {
-    pub current_project: Mutex<Option<TetherProject>>,
+    pub current_project: Mutex<Option<WorkbooksProject>>,
     pub engine_server: Arc<Mutex<Option<EngineServer>>>,
     pub secrets_manager: Arc<Mutex<Option<SecretsManager>>>,
     pub scheduler: Arc<Mutex<SchedulerManager>>,  // NEW

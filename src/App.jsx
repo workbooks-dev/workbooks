@@ -32,7 +32,7 @@ function App() {
   const [aiSidebarOpen, setAiSidebarOpen] = useState(false);
   const [aiEnabled, setAiEnabled] = useState(false);
   const [aiSidebarWidth, setAiSidebarWidth] = useState(() => {
-    const saved = localStorage.getItem('tether_ai_sidebar_width');
+    const saved = localStorage.getItem('workbooks_ai_sidebar_width');
     return saved ? parseInt(saved, 10) : 384;
   });
   const [isResizingAiSidebar, setIsResizingAiSidebar] = useState(false);
@@ -71,7 +71,7 @@ function App() {
 
   // Persist AI sidebar width to localStorage
   useEffect(() => {
-    localStorage.setItem('tether_ai_sidebar_width', aiSidebarWidth.toString());
+    localStorage.setItem('workbooks_ai_sidebar_width', aiSidebarWidth.toString());
   }, [aiSidebarWidth]);
 
   // Handle AI sidebar resizing
@@ -134,7 +134,7 @@ function App() {
       unlistenShowLogs = await listen("menu:show-logs", async () => {
         try {
           const logs = await invoke("get_recent_logs", { lines: 1000 });
-          console.log("=== TETHER RUNTIME LOGS ===");
+          console.log("=== WORKBOOKS RUNTIME LOGS ===");
           console.log(logs);
           console.log("=== END LOGS ===");
           alert("Logs have been written to the browser console. Open Developer Tools (Cmd+Option+I) to view them.");
@@ -161,21 +161,21 @@ function App() {
           const windows = await getScreenshotableWindows();
           console.log("Available windows:", windows);
 
-          // Find the Tether window
-          const tetherWindow = windows.find(w =>
-            w.title?.toLowerCase().includes("tether") ||
-            w.appName?.toLowerCase().includes("tether")
+          // Find the Workbooks window
+          const workbooksWindow = windows.find(w =>
+            w.title?.toLowerCase().includes("workbooks") ||
+            w.appName?.toLowerCase().includes("workbooks")
           );
 
-          if (!tetherWindow) {
-            alert("Could not find Tether window. Available windows: " + windows.map(w => w.title).join(", "));
+          if (!workbooksWindow) {
+            alert("Could not find Workbooks window. Available windows: " + windows.map(w => w.title).join(", "));
             return;
           }
 
-          console.log("Taking screenshot of window:", tetherWindow);
+          console.log("Taking screenshot of window:", workbooksWindow);
 
           // Take screenshot
-          const screenshot = await getWindowScreenshot(tetherWindow);
+          const screenshot = await getWindowScreenshot(workbooksWindow);
 
           // Copy to clipboard
           await writeImage(screenshot);
@@ -336,7 +336,7 @@ function App() {
 
           // Get PATH instructions
           const instructions = await invoke("get_path_instructions");
-          console.log("To use 'tether' from terminal:", instructions);
+          console.log("To use 'workbooks' from terminal:", instructions);
         } else {
           // Already installed - check if version matches
           const installedVersion = await invoke("get_installed_cli_version");
@@ -399,7 +399,7 @@ function App() {
 
           // Refresh the file explorer
           console.log("Dispatching files-changed event");
-          window.dispatchEvent(new CustomEvent("tether:files-changed"));
+          window.dispatchEvent(new CustomEvent("workbooks:files-changed"));
         });
 
         // Listen for file hover
@@ -437,7 +437,7 @@ function App() {
   // Save tabs to localStorage whenever they change
   useEffect(() => {
     if (currentProject && tabs.length >= 0) {
-      const projectKey = `tether_tabs_${currentProject.root}`;
+      const projectKey = `workbooks_tabs_${currentProject.root}`;
       localStorage.setItem(projectKey, JSON.stringify({
         tabs: tabs,
         activeTabId: activeTabId
@@ -583,7 +583,7 @@ function App() {
   }
 
   function restoreTabs(project) {
-    const projectKey = `tether_tabs_${project.root}`;
+    const projectKey = `workbooks_tabs_${project.root}`;
     const savedState = localStorage.getItem(projectKey);
 
     if (savedState) {
@@ -714,7 +714,7 @@ function App() {
   // Handle save dialog actions
   const handleSaveAndClose = async () => {
     // Emit save event to all tabs with unsaved changes
-    window.dispatchEvent(new CustomEvent("tether:save-all"));
+    window.dispatchEvent(new CustomEvent("workbooks:save-all"));
 
     // Give tabs a moment to save (TODO: implement proper save confirmation)
     await new Promise(resolve => setTimeout(resolve, 500));
@@ -830,7 +830,7 @@ function App() {
     return (
       <div className="min-h-screen bg-gradient-to-br from-gray-50 to-gray-100">
         <div className="fixed top-0 left-0 right-0 bg-white border-b border-gray-200 px-6 py-4 flex items-center justify-between shadow-sm z-10">
-          <h1 className="text-xl font-semibold text-gray-900">Tether</h1>
+          <h1 className="text-xl font-semibold text-gray-900">Workbooks</h1>
           <button
             onClick={() => setView("action")}
             className="px-4 py-2 text-sm font-medium text-gray-700 bg-white border border-gray-300 rounded-md hover:bg-gray-50"

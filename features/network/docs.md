@@ -2,7 +2,7 @@
 
 ## Overview
 
-Tether is primarily a **local-first app** - all data and execution happens on your machine. However, it **requires internet connection for initial setup** and package management.
+Workbooks is primarily a **local-first app** - all data and execution happens on your machine. However, it **requires internet connection for initial setup** and package management.
 
 ## Design Philosophy
 
@@ -112,7 +112,7 @@ When attempting to create project offline:
 ```
 Cannot create project - Internet connection required
 
-Tether needs to download Python and core packages
+Workbooks needs to download Python and core packages
 to initialize your project. Please connect to the
 internet and try again.
 
@@ -223,7 +223,7 @@ Retrying in 2 seconds...
 
 **First Run:**
 - Show tooltip or message explaining internet requirement
-- "Tether needs to download Python and packages for first-time setup"
+- "Workbooks needs to download Python and packages for first-time setup"
 - Set expectations
 
 **Documentation:**

@@ -15,7 +15,7 @@
 - [x] Secure key generation and storage
 
 ### Storage
-- [x] SQLite database for encrypted secrets (`.tether/secrets.db`)
+- [x] SQLite database for encrypted secrets (`.workbooks/secrets.db`)
 - [x] Schema with id, key, encrypted_value, created_at, modified_at
 - [x] Encryption/decryption functions
 - [x] CRUD operations (create, read, update, delete)
@@ -57,7 +57,7 @@
 ### App Integration
 - [x] Secrets tab support in App.jsx
 - [x] Tab routing for secrets manager
-- [x] Event system for secrets changes (`tether:secrets-changed`)
+- [x] Event system for secrets changes (`workbooks:secrets-changed`)
 
 ### WorkbookViewer Integration
 - [x] Secrets indicator badge (lock icon with count)

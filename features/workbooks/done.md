@@ -34,7 +34,7 @@
     - [x] Remote images from URLs (http/https)
     - [x] Local images via relative paths (e.g., `./images/plot.png`)
     - [x] Local images via absolute paths
-    - [x] Environment variable substitution ($TETHER_PROJECT_FOLDER and ${TETHER_PROJECT_FOLDER})
+    - [x] Environment variable substitution ($WORKBOOKS_PROJECT_FOLDER and ${WORKBOOKS_PROJECT_FOLDER})
     - [x] Automatic conversion to Tauri asset protocol
     - [x] Error handling with fallback image
     - [x] Responsive image sizing with rounded corners
@@ -159,7 +159,7 @@
 ### Integration
 
 - [x] Environment variable injection
-  - [x] TETHER_PROJECT_FOLDER available in kernel
+  - [x] WORKBOOKS_PROJECT_FOLDER available in kernel
 - [x] Project venv integration
   - [x] Runs in isolated virtual environment
   - [x] Access to project packages

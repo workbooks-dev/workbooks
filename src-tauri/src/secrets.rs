@@ -66,15 +66,15 @@ pub struct SecretsManager {
 
 impl SecretsManager {
     /// Create a new SecretsManager for a project
-    /// Secrets are stored centrally in ~/.tether/secrets/{project-hash}/secrets.db
+    /// Secrets are stored centrally in ~/.workbooks/secrets/{project-hash}/secrets.db
     /// This keeps secrets machine-specific and out of the project folder
     pub fn new(project_root: &Path) -> Result<Self> {
-        // Create centralized tether directory in user's home
+        // Create centralized workbooks directory in user's home
         let home_dir = dirs::home_dir()
             .context("Failed to get home directory")?;
-        let tether_home = home_dir.join(".tether");
-        std::fs::create_dir_all(&tether_home)
-            .context("Failed to create ~/.tether directory")?;
+        let workbooks_home = home_dir.join(".workbooks");
+        std::fs::create_dir_all(&workbooks_home)
+            .context("Failed to create ~/.workbooks directory")?;
 
         // Create unique directory for this project's secrets
         // Use the full path hash for stability
@@ -85,7 +85,7 @@ impl SecretsManager {
         project_root.to_string_lossy().hash(&mut hasher);
         let path_hash = hasher.finish();
 
-        let project_secrets_dir = tether_home.join("secrets").join(format!("{:x}", path_hash));
+        let project_secrets_dir = workbooks_home.join("secrets").join(format!("{:x}", path_hash));
         std::fs::create_dir_all(&project_secrets_dir)
             .context("Failed to create project secrets directory")?;
 
@@ -214,7 +214,7 @@ impl SecretsManager {
     /// Explicitly check that the encryption key is accessible with Touch ID authentication
     /// This triggers Touch ID authentication on macOS
     pub fn ensure_encryption_key_accessible(&self) -> Result<()> {
-        self.authenticate_and_create_session("Tether needs to access your secrets")
+        self.authenticate_and_create_session("Workbooks needs to access your secrets")
     }
 
     /// Get the encryption key from file

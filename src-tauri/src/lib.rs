@@ -30,7 +30,7 @@ pub struct ProjectInfo {
 
 /// Application state to track the current project, engine server, and secrets manager
 pub struct AppState {
-    pub current_project: Mutex<Option<project::TetherProject>>,
+    pub current_project: Mutex<Option<project::WorkbooksProject>>,
     pub engine_server: Arc<Mutex<Option<engine_http::EngineServer>>>,
     pub secrets_manager: Arc<Mutex<Option<secrets::SecretsManager>>>,
     pub scheduler_manager: Arc<Mutex<Option<scheduler::SchedulerManager>>>,
@@ -1199,7 +1199,7 @@ async fn get_recent_logs(app: tauri::AppHandle, lines: Option<usize>) -> Result<
 
     // tauri-plugin-log creates log files with timestamp suffixes
     // Look for the most recent log file
-    let log_file = logs_dir.join("tether.log");
+    let log_file = logs_dir.join("workbooks.log");
 
     if !log_file.exists() {
         return Ok("No logs available yet. Logs will appear here once the app starts generating them.".to_string());
@@ -1252,7 +1252,7 @@ async fn open_project_window(
         &window_label,
         tauri::WebviewUrl::External(url),
     )
-    .title("tether")
+    .title("Workbooks")
     .inner_size(800.0, 600.0)
     .build()
     .map_err(|e| format!("Failed to create window: {}", e))?;
@@ -1278,7 +1278,7 @@ pub fn run() {
             tauri_plugin_log::Builder::new()
                 .target(tauri_plugin_log::Target::new(
                     tauri_plugin_log::TargetKind::LogDir {
-                        file_name: Some("tether".to_string()),
+                        file_name: Some("workbooks".to_string()),
                     },
                 ))
                 .level(log::LevelFilter::Info)
@@ -1343,7 +1343,7 @@ pub fn run() {
                 .build(app)?;
             tray_items.push(Box::new(scheduler_status_item));
 
-            let quit_item = MenuItemBuilder::with_id("tray_quit", "Quit Tether")
+            let quit_item = MenuItemBuilder::with_id("tray_quit", "Quit Workbooks")
                 .build(app)?;
             tray_items.push(Box::new(quit_item));
 
@@ -1410,7 +1410,7 @@ pub fn run() {
                             "main",
                             tauri::WebviewUrl::App(url.into())
                         )
-                        .title("tether")
+                        .title("Workbooks")
                         .inner_size(1200.0, 800.0)
                         .build() {
                             Ok(window) => {
@@ -1454,7 +1454,7 @@ pub fn run() {
                                             "main",
                                             tauri::WebviewUrl::App(format!("index.html?project={}", urlencoding::encode(&project_path.to_string_lossy())).into())
                                         )
-                                        .title("tether")
+                                        .title("Workbooks")
                                         .inner_size(1200.0, 800.0)
                                         .build() {
                                             Ok(window) => {
@@ -1600,7 +1600,7 @@ pub fn run() {
                 .build(app)?;
 
             // Create "About" menu item for app menu
-            let about_item = MenuItemBuilder::with_id("about", "About tether")
+            let about_item = MenuItemBuilder::with_id("about", "About Workbooks")
                 .build(app)?;
 
             // Create "Settings" menu item for app menu
@@ -1608,9 +1608,9 @@ pub fn run() {
                 .accelerator("Cmd+,")
                 .build(app)?;
 
-            // Build App menu (appears as "tether" in menu bar)
+            // Build App menu (appears as "Workbooks" in menu bar)
             // On macOS, this MUST be the first submenu
-            let app_menu = SubmenuBuilder::new(app, "tether")
+            let app_menu = SubmenuBuilder::new(app, "Workbooks")
                 .item(&about_item)
                 .separator()
                 .item(&settings_item)

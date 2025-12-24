@@ -1,7 +1,7 @@
 [project]
-name = "tether-engine"
+name = "workbooks-engine"
 version = "0.1.0"
-description = "Tether engine server - Jupyter kernel management and AI agent"
+description = "Workbooks engine server - Jupyter kernel management and AI agent"
 requires-python = ">=3.12"
 dependencies = [
     "fastapi>=0.124.0",
@@ -12,7 +12,7 @@ dependencies = [
 ]
 
 [project.scripts]
-tether-engine = "tether_engine.__main__:main"
+workbooks-engine = "workbooks_engine.__main__:main"
 
 [build-system]
 requires = ["hatchling"]

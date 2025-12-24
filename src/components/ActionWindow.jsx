@@ -70,7 +70,7 @@ export function ActionWindow({ onAction }) {
       <div className="w-full max-w-2xl">
         {/* Logo/Header */}
         <div className="text-center mb-12">
-          <h1 className="text-3xl font-semibold text-gray-900 mb-2">Tether</h1>
+          <h1 className="text-3xl font-semibold text-gray-900 mb-2">Workbooks</h1>
           <p className="text-sm text-gray-600">
             Sharpen your automations
           </p>

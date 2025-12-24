@@ -1,5 +1,5 @@
 {
-  "name": "tether",
+  "name": "workbooks",
   "private": true,
   "version": "0.0.1",
   "type": "module",
@@ -7,8 +7,9 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
+    "preapp": "cd src-tauri && cargo build --bin workbooks-cli",
     "app": "tauri dev",
-    "prebuild:cli": "cd src-tauri && cargo build --release --bin tether-cli",
+    "prebuild:cli": "cd src-tauri && cargo build --release --bin workbooks-cli",
     "app:build": "npm run prebuild:cli && tauri build",
     "tauri": "tauri",
     "version": "node scripts/update-version.js"

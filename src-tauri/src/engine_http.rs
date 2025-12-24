@@ -122,7 +122,7 @@ unsafe impl Send for EngineServer {}
 impl EngineServer {
     /// Kill any orphaned engine_server.py processes ONLY on our candidate ports
     fn cleanup_orphaned_processes() -> Result<()> {
-        // println!("Checking for orphaned engine_server.py processes on Tether ports...");
+        // println!("Checking for orphaned engine_server.py processes on Workbooks ports...");
 
         #[cfg(target_os = "windows")]
         {
@@ -328,23 +328,23 @@ impl EngineServer {
         Ok(())
     }
 
-    /// Ensure the engine venv exists at ~/.tether/engine/.venv and is synced
+    /// Ensure the engine venv exists at ~/.workbooks/engine/.venv and is synced
     async fn ensure_engine_venv() -> Result<PathBuf> {
         // println!("Ensuring engine venv exists and is up to date...");
 
-        // Get ~/.tether/engine directory
+        // Get ~/.workbooks/engine directory
         let home_dir = dirs::home_dir().context("Failed to get home directory")?;
-        let engine_dir = home_dir.join(".tether").join("engine");
+        let engine_dir = home_dir.join(".workbooks").join("engine");
         let venv_path = engine_dir.join(".venv");
 
         // Create engine directory if it doesn't exist
         std::fs::create_dir_all(&engine_dir)
-            .context("Failed to create ~/.tether/engine directory")?;
+            .context("Failed to create ~/.workbooks/engine directory")?;
 
         // Write embedded engine_pyproject.toml to engine directory
         let dest_pyproject = engine_dir.join("pyproject.toml");
         std::fs::write(&dest_pyproject, ENGINE_PYPROJECT_TOML)
-            .context("Failed to write engine pyproject.toml to ~/.tether/engine")?;
+            .context("Failed to write engine pyproject.toml to ~/.workbooks/engine")?;
 
         // Get uv path
         let uv_path = crate::python::check_uv_available()
@@ -402,20 +402,20 @@ impl EngineServer {
         // Clean up any orphaned processes first
         Self::cleanup_orphaned_processes()?;
 
-        // Create ~/.tether/logs directory if it doesn't exist
+        // Create ~/.workbooks/logs directory if it doesn't exist
         let home_dir = dirs::home_dir().context("Failed to get home directory")?;
-        let tether_logs_dir = home_dir.join(".tether").join("logs");
-        std::fs::create_dir_all(&tether_logs_dir)
-            .context("Failed to create ~/.tether/logs directory")?;
+        let workbooks_logs_dir = home_dir.join(".workbooks").join("logs");
+        std::fs::create_dir_all(&workbooks_logs_dir)
+            .context("Failed to create ~/.workbooks/logs directory")?;
 
         // Cleanup old log files before creating a new one
-        if let Err(e) = Self::cleanup_old_logs(&tether_logs_dir) {
+        if let Err(e) = Self::cleanup_old_logs(&workbooks_logs_dir) {
             eprintln!("Warning: Failed to cleanup old logs: {}", e);
         }
 
         // Create log file for engine server
         let timestamp = chrono::Utc::now().format("%Y%m%d_%H%M%S");
-        let log_file_path = tether_logs_dir.join(format!("engine_server_{}.log", timestamp));
+        let log_file_path = workbooks_logs_dir.join(format!("engine_server_{}.log", timestamp));
         let log_file = std::fs::File::create(&log_file_path)
             .context(format!("Failed to create log file: {:?}", log_file_path))?;
 
@@ -423,8 +423,8 @@ impl EngineServer {
         // println!("Log retention: 7 days, max 10 files");
 
         // Find the engine_server.py script
-        // NOTE: engine_server.py is part of the Tether app, NOT user projects!
-        // It should only exist in the Tether app installation or development directory.
+        // NOTE: engine_server.py is part of the Workbooks app, NOT user projects!
+        // It should only exist in the Workbooks app installation or development directory.
         let exe_path = std::env::current_exe()?;
         let exe_dir = exe_path.parent().context("Failed to get executable directory")?;
 
@@ -436,8 +436,8 @@ impl EngineServer {
             if exe_path.to_str().map_or(false, |s| s.contains(".local/bin")) {
                 // CLI mode - the app should be installed
                 possible_paths.extend(vec![
-                    PathBuf::from("/Applications/tether.app/Contents/Resources/engine_server.py"),
-                    dirs::home_dir().map(|h| h.join("Applications/tether.app/Contents/Resources/engine_server.py")).unwrap_or_default(),
+                    PathBuf::from("/Applications/Workbooks.app/Contents/Resources/engine_server.py"),
+                    dirs::home_dir().map(|h| h.join("Applications/Workbooks.app/Contents/Resources/engine_server.py")).unwrap_or_default(),
                 ]);
             }
         }
@@ -450,8 +450,8 @@ impl EngineServer {
             exe_dir.join("engine_server.py"),
         ]);
 
-        // THIRD: Development - Walk up from exe location to find Tether dev project
-        // This is ONLY for development when running from target/debug/tether
+        // THIRD: Development - Walk up from exe location to find Workbooks dev project
+        // This is ONLY for development when running from target/debug/workbooks
         let mut current_dir = exe_dir;
         loop {
             let candidate = current_dir.join("src-tauri/engine_server.py");
@@ -471,15 +471,15 @@ impl EngineServer {
             .iter()
             .filter(|p| p.as_os_str().len() > 0) // Filter out empty paths
             .find(|p| p.exists())
-            .ok_or_else(|| anyhow::anyhow!("Could not find engine_server.py. Is the Tether app installed at /Applications/tether.app?"))?;
+            .ok_or_else(|| anyhow::anyhow!("Could not find engine_server.py. Is the Workbooks app installed at /Applications/Workbooks.app?"))?;
 
         // Ensure engine venv exists and is synced, get Python path
-        let tether_python = Self::ensure_engine_venv().await?;
+        let workbooks_python = Self::ensure_engine_venv().await?;
 
-        // println!("Using engine Python: {:?}", tether_python);
+        // println!("Using engine Python: {:?}", workbooks_python);
 
-        if !tether_python.exists() {
-            anyhow::bail!("Engine Python executable not found at {:?}", tether_python);
+        if !workbooks_python.exists() {
+            anyhow::bail!("Engine Python executable not found at {:?}", workbooks_python);
         }
 
         // Try each port until we find an available one
@@ -499,7 +499,7 @@ impl EngineServer {
                 .context("Failed to clone log file for stderr")?;
 
             // Start the FastAPI server with logs redirected to file
-            let process = Command::new(&tether_python)
+            let process = Command::new(&workbooks_python)
                 .arg(engine_script)
                 .arg(port.to_string())
                 .stdout(Stdio::from(stdout_file))
@@ -570,7 +570,7 @@ impl EngineServer {
         // Prepare environment variables to inject into the kernel
         let mut env_vars = std::collections::HashMap::new();
         env_vars.insert(
-            "TETHER_PROJECT_FOLDER".to_string(),
+            "WORKBOOKS_PROJECT_FOLDER".to_string(),
             project_root.to_string_lossy().to_string()
         );
 
@@ -622,7 +622,7 @@ impl EngineServer {
             anyhow::bail!("Failed to start engine: {}", error_text);
         }
 
-        // println!("Engine started for workbook: {} with TETHER_PROJECT_FOLDER={}",
+        // println!("Engine started for workbook: {} with WORKBOOKS_PROJECT_FOLDER={}",
         //          workbook_path, project_root.display());
         Ok(())
     }
@@ -807,7 +807,7 @@ impl EngineServer {
         // Prepare environment variables to inject into the kernel
         let mut env_vars = std::collections::HashMap::new();
         env_vars.insert(
-            "TETHER_PROJECT_FOLDER".to_string(),
+            "WORKBOOKS_PROJECT_FOLDER".to_string(),
             project_root.to_string_lossy().to_string()
         );
 
@@ -854,7 +854,7 @@ impl EngineServer {
             anyhow::bail!("Failed to restart engine: {}", error_text);
         }
 
-        println!("Engine restarted for workbook: {} with TETHER_PROJECT_FOLDER={}",
+        println!("Engine restarted for workbook: {} with WORKBOOKS_PROJECT_FOLDER={}",
                  workbook_path, project_root.display());
         Ok(())
     }

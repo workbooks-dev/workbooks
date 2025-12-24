@@ -63,7 +63,7 @@ export function CreateProject({ onProjectCreated }) {
       <div className="w-full max-w-xl">
         <div className="bg-white rounded-xl shadow-lg p-10 border border-gray-200">
           <h2 className="text-3xl font-bold text-gray-900 mb-2">Create New Project</h2>
-          <p className="text-sm text-gray-600 mb-8">Set up a new Tether workspace for your data pipelines</p>
+          <p className="text-sm text-gray-600 mb-8">Set up a new Workbooks workspace for your data pipelines</p>
 
           <form onSubmit={handleCreate} className="space-y-6">
             <div className="space-y-2">

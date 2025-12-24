@@ -2,7 +2,7 @@
 
 ## Overview
 
-Tether provides integrated file management for all project files (data, scripts, configs, etc.). Workbooks (`.ipynb` files) are shown separately in the Workbooks section.
+Workbooks provides integrated file management for all project files (data, scripts, configs, etc.). Workbooks (`.ipynb` files) are shown separately in the Workbooks section.
 
 ## Design Philosophy
 
@@ -13,7 +13,7 @@ Tether provides integrated file management for all project files (data, scripts,
 - Workbooks can reference files easily
 
 **Environment Variable Integration:**
-- `TETHER_PROJECT_FOLDER` available in all workbooks
+- `WORKBOOKS_PROJECT_FOLDER` available in all workbooks
 - Absolute path to project root
 - Reliable file access across machines
 
@@ -70,7 +70,7 @@ Tether provides integrated file management for all project files (data, scripts,
 - Drop notebook → Appears in Workbooks section
 - Organize manually into subdirectories
 
-## Environment Variable: TETHER_PROJECT_FOLDER
+## Environment Variable: WORKBOOKS_PROJECT_FOLDER
 
 **Purpose:**
 - Provide absolute path to project root
@@ -79,7 +79,7 @@ Tether provides integrated file management for all project files (data, scripts,
 
 **Availability:**
 - Injected into all Jupyter kernels
-- Available as `os.environ["TETHER_PROJECT_FOLDER"]`
+- Available as `os.environ["WORKBOOKS_PROJECT_FOLDER"]`
 - Set before any cell execution
 
 **Usage Example:**
@@ -88,7 +88,7 @@ import os
 import pandas as pd
 
 # Get project root
-project_root = os.environ["TETHER_PROJECT_FOLDER"]
+project_root = os.environ["WORKBOOKS_PROJECT_FOLDER"]
 
 # Load data file
 data_path = os.path.join(project_root, "data.csv")
@@ -151,14 +151,14 @@ struct FileInfo {
 
 **File Access:**
 - Workbooks can read any file in project
-- Use `TETHER_PROJECT_FOLDER` for paths
+- Use `WORKBOOKS_PROJECT_FOLDER` for paths
 - No special permissions needed
 
 **Example Workflow:**
-1. Drop CSV file into Tether
+1. Drop CSV file into Workbooks
 2. Appears in Files section
 3. Open workbook
-4. Load CSV using `TETHER_PROJECT_FOLDER`
+4. Load CSV using `WORKBOOKS_PROJECT_FOLDER`
 5. Process data
 
 ### With Sidebar

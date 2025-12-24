@@ -5414,51 +5414,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "tether"
-version = "0.0.1"
-dependencies = [
- "aes-gcm",
- "anyhow",
- "base64 0.22.1",
- "block",
- "chrono",
- "clap",
- "cocoa",
- "dirs 5.0.1",
- "env_logger",
- "futures-util",
- "hex",
- "hmac",
- "log",
- "notify",
- "notify-debouncer-mini",
- "objc",
- "once_cell",
- "rand 0.8.5",
- "reqwest",
- "rusqlite",
- "serde",
- "serde_json",
- "sha2",
- "tauri",
- "tauri-build",
- "tauri-plugin-clipboard-manager",
- "tauri-plugin-dialog",
- "tauri-plugin-fs",
- "tauri-plugin-log",
- "tauri-plugin-opener",
- "tauri-plugin-screenshots",
- "tauri-plugin-window-state",
- "tokio",
- "tokio-cron-scheduler",
- "toml 0.8.2",
- "urlencoding",
- "uuid",
- "which",
- "zmq",
-]
-
-[[package]]
 name = "thiserror"
 version = "1.0.69"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6962,6 +6917,51 @@ dependencies = [
  "wayland-client",
  "wayland-protocols",
  "wayland-protocols-wlr",
+]
+
+[[package]]
+name = "workbooks"
+version = "0.0.1"
+dependencies = [
+ "aes-gcm",
+ "anyhow",
+ "base64 0.22.1",
+ "block",
+ "chrono",
+ "clap",
+ "cocoa",
+ "dirs 5.0.1",
+ "env_logger",
+ "futures-util",
+ "hex",
+ "hmac",
+ "log",
+ "notify",
+ "notify-debouncer-mini",
+ "objc",
+ "once_cell",
+ "rand 0.8.5",
+ "reqwest",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-clipboard-manager",
+ "tauri-plugin-dialog",
+ "tauri-plugin-fs",
+ "tauri-plugin-log",
+ "tauri-plugin-opener",
+ "tauri-plugin-screenshots",
+ "tauri-plugin-window-state",
+ "tokio",
+ "tokio-cron-scheduler",
+ "toml 0.8.2",
+ "urlencoding",
+ "uuid",
+ "which",
+ "zmq",
 ]
 
 [[package]]

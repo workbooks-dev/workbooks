@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Jupyter kernel manager for Tether notebooks.
+Jupyter kernel manager for Workbooks notebooks.
 Manages kernel lifecycle and code execution with state preservation.
 """
 import sys

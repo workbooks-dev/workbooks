@@ -1,15 +1,15 @@
 # Upgrading
 
-Automatic update checking and seamless in-app upgrades for Tether.
+Automatic update checking and seamless in-app upgrades for Workbooks.
 
 ## Overview
 
-Tether checks for new versions every 24 hours, notifies users when updates are available, and provides one-click auto-updates using Tauri's built-in updater.
+Workbooks checks for new versions every 24 hours, notifies users when updates are available, and provides one-click auto-updates using Tauri's built-in updater.
 
 ## Update Sources
 
 **GitHub Releases**
-- Primary source: https://github.com/YOUR_ORG/tether/releases
+- Primary source: https://github.com/YOUR_ORG/workbooks/releases
 - Uses GitHub Releases API to check for new versions
 - Downloads release artifacts (`.app`, `.dmg`, `.AppImage`, `.msi`, etc.)
 - Validates signatures for security
@@ -22,7 +22,7 @@ Tether checks for new versions every 24 hours, notifies users when updates are a
 3. **Manual check** - User clicks "Check for Updates" in menu/settings
 
 ### Caching
-- Cache last check timestamp in `~/.tether/update_cache.json`
+- Cache last check timestamp in `~/.workbooks/update_cache.json`
 - Don't re-check if checked within last 24 hours
 - Manual check always bypasses cache
 
@@ -66,7 +66,7 @@ Use **`tauri-plugin-updater`** for secure, automatic updates:
     "updater": {
       "active": true,
       "endpoints": [
-        "https://github.com/YOUR_ORG/tether/releases/latest/download/latest.json"
+        "https://github.com/YOUR_ORG/workbooks/releases/latest/download/latest.json"
       ],
       "dialog": false,
       "pubkey": "YOUR_PUBLIC_KEY_HERE"
@@ -84,19 +84,19 @@ Use **`tauri-plugin-updater`** for secure, automatic updates:
   "platforms": {
     "darwin-x86_64": {
       "signature": "...",
-      "url": "https://github.com/YOUR_ORG/tether/releases/download/v0.2.0/tether_0.2.0_x64.app.tar.gz"
+      "url": "https://github.com/YOUR_ORG/workbooks/releases/download/v0.2.0/workbooks_0.2.0_x64.app.tar.gz"
     },
     "darwin-aarch64": {
       "signature": "...",
-      "url": "https://github.com/YOUR_ORG/tether/releases/download/v0.2.0/tether_0.2.0_aarch64.app.tar.gz"
+      "url": "https://github.com/YOUR_ORG/workbooks/releases/download/v0.2.0/workbooks_0.2.0_aarch64.app.tar.gz"
     },
     "linux-x86_64": {
       "signature": "...",
-      "url": "https://github.com/YOUR_ORG/tether/releases/download/v0.2.0/tether_0.2.0_amd64.AppImage"
+      "url": "https://github.com/YOUR_ORG/workbooks/releases/download/v0.2.0/workbooks_0.2.0_amd64.AppImage"
     },
     "windows-x86_64": {
       "signature": "...",
-      "url": "https://github.com/YOUR_ORG/tether/releases/download/v0.2.0/tether_0.2.0_x64_en-US.msi"
+      "url": "https://github.com/YOUR_ORG/workbooks/releases/download/v0.2.0/workbooks_0.2.0_x64_en-US.msi"
     }
   }
 }
@@ -107,10 +107,10 @@ Use **`tauri-plugin-updater`** for secure, automatic updates:
 Generate key pair for signing releases:
 ```bash
 # One-time setup
-tauri signer generate -w ~/.tauri/tether.key
+tauri signer generate -w ~/.tauri/workbooks.key
 
 # Sign release artifacts during CI/CD
-tauri signer sign /path/to/tether.app --private-key ~/.tauri/tether.key
+tauri signer sign /path/to/workbooks.app --private-key ~/.tauri/workbooks.key
 ```
 
 Store public key in `tauri.conf.json` → updater plugin validates signatures before installing.
@@ -196,7 +196,7 @@ When update is detected:
 ### Update Dialog/Banner
 
 **UpdateBanner.jsx** - Top banner in app:
-- "Tether v0.2.0 is available. You're on v0.1.0."
+- "Workbooks v0.2.0 is available. You're on v0.1.0."
 - **[View Changes]** → Opens changelog modal
 - **[Update Now]** → Triggers download and install
 - **[Dismiss]** → Hides banner until next version

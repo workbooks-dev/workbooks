@@ -2,9 +2,9 @@
 
 ## GitHub Repository
 
-- **Q: What is the GitHub org/repo name for Tether?**
+- **Q: What is the GitHub org/repo name for Workbooks?**
   - Needed for: GitHub Releases API endpoint configuration
-  - Format: `github.com/{owner}/{repo}` (e.g., `github.com/paracord/tether`)
+  - Format: `github.com/{owner}/{repo}` (e.g., `github.com/paracord/workbooks`)
   - Used in: `src-tauri/src/updater.rs`, CI/CD workflows
 
 ## Release Signing
@@ -69,6 +69,6 @@
 - **Q: Where should update artifacts be downloaded temporarily?**
   - Options:
     1. System temp directory
-    2. `~/.tether/updates/`
+    2. `~/.workbooks/updates/`
     3. Platform-specific cache directory
   - Recommendation: Use Tauri's app cache directory (platform-specific, auto-cleaned)

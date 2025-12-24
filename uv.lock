@@ -436,7 +436,7 @@ wheels = [
 ]
 
 [[package]]
-name = "tether"
+name = "workbooks"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [

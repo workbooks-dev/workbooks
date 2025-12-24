@@ -97,7 +97,7 @@ impl MessageHeader {
         Self {
             msg_id: Uuid::new_v4().to_string(),
             msg_type: msg_type.to_string(),
-            username: "tether".to_string(),
+            username: "workbooks".to_string(),
             session: session.to_string(),
             date: Utc::now().to_rfc3339(),
             version: "5.3".to_string(),

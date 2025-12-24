@@ -39,7 +39,7 @@ Sidebar is divided into logical sections:
 
 ## Secret Detection Before Save
 
-Tether scans cell outputs for secret values before saving. If secrets are detected, a modal warns you with options to:
+Workbooks scans cell outputs for secret values before saving. If secrets are detected, a modal warns you with options to:
 - Clear outputs from affected cells and save
 - Go back and manually clear
 - Force save anyway (discouraged)
@@ -48,9 +48,9 @@ Tether scans cell outputs for secret values before saving. If secrets are detect
 
 ## Standard Notebook Format
 
-Tether saves notebooks as standard `.ipynb` files. Edit them in Jupyter, VS Code, or any other tool. Tether just adds metadata for execution timing and doesn't break compatibility.
+Workbooks saves notebooks as standard `.ipynb` files. Edit them in Jupyter, VS Code, or any other tool. Workbooks just adds metadata for execution timing and doesn't break compatibility.
 
-**Implementation:** `lib.rs:read_workbook` and `save_workbook` commands read/write standard Jupyter format; cell metadata includes optional `tether.duration_ms` and `tether.last_run`.
+**Implementation:** `lib.rs:read_workbook` and `save_workbook` commands read/write standard Jupyter format; cell metadata includes optional `workbooks.duration_ms` and `workbooks.last_run`.
 
 ## Markdown Cell Rendering
 

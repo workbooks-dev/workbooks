@@ -1,8 +1,8 @@
 # State - To Do
 
-## Python Package (tether-core)
+## Python Package (workbooks-core)
 
-- [ ] Create tether-core Python package
+- [ ] Create workbooks-core Python package
   - [ ] Package structure and setup.py
   - [ ] PyPI publication (future)
 
@@ -57,7 +57,7 @@
 - [ ] Checkpoint creation
   - [ ] Save namespace before each cell
   - [ ] Filter to picklable objects
-  - [ ] Store in `.tether/runs/{run_id}/checkpoints/`
+  - [ ] Store in `.workbooks/runs/{run_id}/checkpoints/`
   - [ ] Chain cell hashes for invalidation
 
 - [ ] Resume functionality
@@ -117,7 +117,7 @@
 
 ## Integration
 
-- [ ] Inject tether-core into kernels
+- [ ] Inject workbooks-core into kernels
   - [ ] Add to project dependencies
   - [ ] Auto-import in kernel startup
   - [ ] Configure state storage path

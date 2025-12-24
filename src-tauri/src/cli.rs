@@ -1,10 +1,11 @@
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
-use tether_lib::scheduler::{CronPreset, SchedulerManager};
-use tether_lib::{engine_http, python, project};
+use workbooks_lib::scheduler::{CronPreset, SchedulerManager};
+use workbooks_lib::{engine_http, python, project};
 
 #[derive(Parser)]
-#[command(name = "tether")]
+#[command(name = "workbooks")]
+#[command(alias = "wb")]
 #[command(version)]
 #[command(about = "Durable workbook orchestration for local-first data pipelines", long_about = None)]
 struct Cli {
@@ -72,7 +73,7 @@ enum ScheduleAction {
 #[tokio::main]
 async fn main() {
     // Set environment variable to indicate CLI mode
-    std::env::set_var("TETHER_CLI", "1");
+    std::env::set_var("WORKBOOKS_CLI", "1");
 
     // Initialize logger for CLI
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
@@ -95,8 +96,8 @@ async fn main() {
         }
         None => {
             // No subcommand provided, show help
-            eprintln!("tether: Sharpen your automations for local-first notebooks as automations");
-            eprintln!("\nUsage: tether <COMMAND>\n");
+            eprintln!("workbooks: Sharpen your automations for local-first notebooks as automations");
+            eprintln!("\nUsage: workbooks <COMMAND>\n");
             eprintln!("Commands:");
             eprintln!("  run        Run a workbook and execute all cells");
             eprintln!("  schedule   Manage scheduled workbooks");
@@ -126,7 +127,7 @@ async fn run_workbook(workbook: &PathBuf, project: Option<&PathBuf>) -> anyhow::
         let mut current = start_dir.as_path();
         let mut result_path = start_dir.clone();
 
-        // Look for project markers (Python project indicators or .tether directory)
+        // Look for project markers (Python project indicators or .workbooks directory)
         loop {
             // Check for Python project markers (these take priority)
             let python_markers = ["uv.lock", "pyproject.toml", "requirements.txt", "Pipfile.lock"];
@@ -137,9 +138,9 @@ async fn run_workbook(workbook: &PathBuf, project: Option<&PathBuf>) -> anyhow::
                 break;
             }
 
-            // Also check for .tether directory as fallback
-            let tether_dir = current.join(".tether");
-            if tether_dir.exists() {
+            // Also check for .workbooks directory as fallback
+            let workbooks_dir = current.join(".workbooks");
+            if workbooks_dir.exists() {
                 result_path = current.to_path_buf();
                 break;
             }
@@ -157,10 +158,10 @@ async fn run_workbook(workbook: &PathBuf, project: Option<&PathBuf>) -> anyhow::
     };
 
     // Try to load the project
-    let (tether_project, is_tether_project) = match project::load_project(&project_root) {
+    let (workbooks_project, is_workbooks_project) = match project::load_project(&project_root) {
         Ok(project) => (project, true),
         Err(_) => {
-            // If not a Tether project, create minimal project info
+            // If not a Workbooks project, create minimal project info
             let folder_name = project_root
                 .file_name()
                 .and_then(|n| n.to_str())
@@ -168,7 +169,7 @@ async fn run_workbook(workbook: &PathBuf, project: Option<&PathBuf>) -> anyhow::
                 .to_string();
 
             (
-                project::TetherProject {
+                project::WorkbooksProject {
                     name: folder_name.clone(),
                     package_name: folder_name.to_lowercase().replace(" ", "-"),
                     root: project_root.clone(),
@@ -179,12 +180,12 @@ async fn run_workbook(workbook: &PathBuf, project: Option<&PathBuf>) -> anyhow::
     };
 
     // Ensure Python environment exists (silent)
-    let venv_path = python::ensure_venv(&tether_project.root, &tether_project.package_name).await?;
+    let venv_path = python::ensure_venv(&workbooks_project.root, &workbooks_project.package_name).await?;
 
     // Sync dependencies if pyproject.toml exists (silent)
-    if tether_project.root.join("pyproject.toml").exists() {
-        let group = if is_tether_project { Some("tether") } else { None };
-        python::sync_dependencies_with_group(&tether_project.root, &venv_path, group).await?;
+    if workbooks_project.root.join("pyproject.toml").exists() {
+        let group = if is_workbooks_project { Some("workbooks") } else { None };
+        python::sync_dependencies_with_group(&workbooks_project.root, &venv_path, group).await?;
     }
 
     // Ensure ipykernel is installed (silent)
@@ -236,7 +237,7 @@ async fn run_workbook(workbook: &PathBuf, project: Option<&PathBuf>) -> anyhow::
     engine_http::EngineServer::start_engine_http(
         engine_server.port,
         &workbook_str,
-        &tether_project.root,
+        &workbooks_project.root,
         &venv_path,
     ).await?;
 
@@ -337,7 +338,7 @@ async fn handle_schedule_action(action: ScheduleAction) -> anyhow::Result<()> {
             println!("  ID: {}", schedule.id);
             println!("  Workbook: {}", schedule.workbook_path);
             println!("  Cron: {}", schedule.cron_expression);
-            println!("\nNote: Schedules run when the Tether GUI app is open.");
+            println!("\nNote: Schedules run when the Workbooks GUI app is open.");
         }
 
         ScheduleAction::List => {

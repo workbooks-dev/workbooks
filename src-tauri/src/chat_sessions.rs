@@ -21,13 +21,13 @@ pub struct ChatSession {
 
 fn get_db_path() -> Result<PathBuf> {
     let home = dirs::home_dir().context("Failed to get home directory")?;
-    let tether_dir = home.join(".tether");
+    let workbooks_dir = home.join(".workbooks");
 
-    if !tether_dir.exists() {
-        std::fs::create_dir_all(&tether_dir)?;
+    if !workbooks_dir.exists() {
+        std::fs::create_dir_all(&workbooks_dir)?;
     }
 
-    Ok(tether_dir.join("chat_sessions.db"))
+    Ok(workbooks_dir.join("chat_sessions.db"))
 }
 
 fn init_db() -> Result<Connection> {

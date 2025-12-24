@@ -1,6 +1,6 @@
 # Primary Benefits
 
-Core value propositions of using Tether today.
+Core value propositions of using Workbooks today.
 
 ## Real-Time Streaming Output
 
@@ -12,7 +12,7 @@ Cell execution shows output progressively as it's generated, not just at the end
 
 ## Integrated Secrets Management
 
-Secrets are encrypted with AES-256-GCM, stored outside your project in `~/.tether/secrets`, and automatically injected as environment variables during workbook execution. Tether detects when secrets appear in cell outputs and warns before saving.
+Secrets are encrypted with AES-256-GCM, stored outside your project in `~/.workbooks/secrets`, and automatically injected as environment variables during workbook execution. Workbooks detects when secrets appear in cell outputs and warns before saving.
 
 **Why it matters:** Keep API keys and credentials out of notebooks. No more accidentally committing secrets to git.
 
@@ -20,7 +20,7 @@ Secrets are encrypted with AES-256-GCM, stored outside your project in `~/.tethe
 
 ## Automatic Environment Management
 
-UV handles Python environments automatically. Each project gets its own virtual environment in `~/.tether/venvs/{project-name}`, with dependencies managed through `pyproject.toml`. No manual venv setup required.
+UV handles Python environments automatically. Each project gets its own virtual environment in `~/.workbooks/venvs/{project-name}`, with dependencies managed through `pyproject.toml`. No manual venv setup required.
 
 **Why it matters:** Zero Python environment headaches. Open a project and start coding immediately.
 
@@ -28,7 +28,7 @@ UV handles Python environments automatically. Each project gets its own virtual 
 
 ## Native Desktop Experience
 
-Tether is a native desktop application built with Tauri (Rust + webview), not a browser-based tool. Fast startup, native OS integration, low memory footprint.
+Workbooks is a native desktop application built with Tauri (Rust + webview), not a browser-based tool. Fast startup, native OS integration, low memory footprint.
 
 **Why it matters:** Feels like a proper desktop app, not a web page. Runs offline without a server process.
 

@@ -9,7 +9,7 @@ use tauri::{AppHandle, Emitter};
 /// Directories and files to ignore in file watching
 const IGNORED_PATHS: &[&str] = &[
     ".git",
-    ".tether",
+    ".workbooks",
     "node_modules",
     ".venv",
     "__pycache__",

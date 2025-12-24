@@ -2,14 +2,14 @@
 
 ## Overview
 
-Tether provides comprehensive secrets management designed for non-technical users:
+Workbooks provides comprehensive secrets management designed for non-technical users:
 
 1. **Auto-Detection**: Automatically detect hardcoded secrets in notebook cells (API keys, passwords, tokens)
 2. **Guided Security**: Prompt users to securely store secrets with one click
 3. **Code Rewriting**: Automatically rewrite cells to use `os.environ` instead of hardcoded values
 4. **Encryption**: Encrypt secrets using system keychain (Touch ID on macOS)
 5. **Output Redaction**: Automatically redact secret values from notebook outputs before saving
-6. **Git-Safe**: Encrypted `.env.tether` and redacted outputs are safe to commit
+6. **Git-Safe**: Encrypted `.env.workbooks` and redacted outputs are safe to commit
 7. **Shareable**: Team members use their own secrets for the same project
 
 **Key Principles:**
@@ -23,21 +23,21 @@ Tether provides comprehensive secrets management designed for non-technical user
 **Project Directory (shareable):**
 ```
 my-project/
-├── .env.tether          # Encrypted env vars (safe to share/commit)
+├── .env.workbooks          # Encrypted env vars (safe to share/commit)
 ├── .env                 # Plain text (if user has legacy, optional)
 ```
 
 **User-Specific Storage (per-machine):**
 ```
-~/.tether/projects/<project-name>-<hash>/
-├── env.hash             # Hash of .env.tether to detect external edits
+~/.workbooks/projects/<project-name>-<hash>/
+├── env.hash             # Hash of .env.workbooks to detect external edits
 └── env.key              # Encryption key (backup, also in system keychain)
 ```
 
 **Why This Design:**
 - **Shareable by default**: Project folder stays clean (no user-specific files), safe to commit to git
 - **Per-user secrets**: Each person has their own API keys/credentials for the same project
-- **No .gitignore needed**: `.env.tether` is encrypted, safe to commit. User secrets in `~/.tether/` never touch git
+- **No .gitignore needed**: `.env.workbooks` is encrypted, safe to commit. User secrets in `~/.workbooks/` never touch git
 - **Non-technical friendly**: Users don't need to understand ".env", encryption, or gitignore
 - **Stable hash**: `<hash>` is derived from absolute project path (e.g., `/Users/jmitch/Dev/my-project` → `a3f7b9c2`)
   - Same project, same machine → same hash
@@ -48,7 +48,7 @@ my-project/
 
 **Encryption Key Storage:**
 - Per-project key stored in system keychain
-- Keychain entry name: `tether.{absolute_project_path_hash}.env_key`
+- Keychain entry name: `workbooks.{absolute_project_path_hash}.env_key`
 - First time setup prompts for system auth (Touch ID on macOS, password elsewhere)
 - Key is generated automatically on first env var save
 
@@ -57,7 +57,7 @@ my-project/
 - Each value encrypted separately with project key
 - File format: JSON with encrypted values
 
-**Example `.env.tether` format:**
+**Example `.env.workbooks` format:**
 ```json
 {
   "version": 1,
@@ -78,37 +78,37 @@ my-project/
   - Prompts for system authentication
   - Generates encryption key and stores in keychain
   - Encrypts each value
-  - Writes `.env.tether` to project directory
-  - Stores hash in `~/.tether/projects/<project-name>-<hash>/env.hash`
+  - Writes `.env.workbooks` to project directory
+  - Stores hash in `~/.workbooks/projects/<project-name>-<hash>/env.hash`
 
 ### 2. Migration from `.env`
-- Tether detects plain `.env` on project open
+- Workbooks detects plain `.env` on project open
 - Prompt dialog:
   ```
   Found .env file with plain text environment variables.
 
-  Would you like to encrypt them with Tether?
+  Would you like to encrypt them with Workbooks?
 
-  [Encrypt to .env.tether] [Keep as .env] [Cancel]
+  [Encrypt to .env.workbooks] [Keep as .env] [Cancel]
 
   Note: After encrypting, you can safely delete .env
   ```
-- If "Encrypt to .env.tether":
+- If "Encrypt to .env.workbooks":
   - Parse `.env` file
   - Prompt for system authentication
-  - Encrypt and write `.env.tether`
+  - Encrypt and write `.env.workbooks`
   - Ask if user wants to delete original `.env`
 
 ### 3. External Edit Detection
-- On project open or kernel start, compute hash of `.env.tether`
-- Compare with stored hash in `~/.tether/projects/<project-name>-<hash>/env.hash`
+- On project open or kernel start, compute hash of `.env.workbooks`
+- Compare with stored hash in `~/.workbooks/projects/<project-name>-<hash>/env.hash`
 - If mismatch, prompt:
   ```
-  .env.tether was modified outside of Tether.
+  .env.workbooks was modified outside of Workbooks.
 
   What would you like to do?
 
-  [Re-encrypt with Tether] - Treat as new plain text values and re-encrypt
+  [Re-encrypt with Workbooks] - Treat as new plain text values and re-encrypt
   [Move to .env] - Convert to plain text .env file
   [Discard changes] - Revert to last known good state
   [Cancel]
@@ -119,7 +119,7 @@ my-project/
 - Prompts for system authentication
 - Decrypts all values and shows in UI
 - User edits
-- On save, re-encrypts and updates `.env.tether` and hash
+- On save, re-encrypts and updates `.env.workbooks` and hash
 
 ### 5. Secret Detection in Code Cells
 
@@ -145,7 +145,7 @@ When a user runs a cell, scan the source code for common patterns that indicate 
    import openai
    openai.api_key = "sk-abc123def456..."
    ```
-2. Tether detects hardcoded secret and shows dialog:
+2. Workbooks detects hardcoded secret and shows dialog:
    ```
    🔒 Hardcoded secret detected
 
@@ -161,7 +161,7 @@ When a user runs a cell, scan the source code for common patterns that indicate 
 3. If "Save & Update":
    - Prompts for Touch ID to unlock secrets
    - Opens quick dialog: "Save as: [OPENAI_API_KEY]" with suggested name
-   - Saves secret to `.env.tether`
+   - Saves secret to `.env.workbooks`
    - **Automatically rewrites cell** to:
      ```python
      import openai
@@ -191,7 +191,7 @@ When a user runs a cell, scan the source code for common patterns that indicate 
   ```
   💡 Tip: Hardcoding secrets in code is risky!
 
-  Tether can securely store this secret and automatically
+  Workbooks can securely store this secret and automatically
   inject it when your code runs. The secret will be:
   • Encrypted on your machine
   • Protected by Touch ID
@@ -224,7 +224,7 @@ When a user runs a cell, scan the source code for common patterns that indicate 
 
 ### 6. Kernel Injection + Output Redaction
 - When starting Jupyter engine/kernel:
-  1. Check if `.env.tether` exists
+  1. Check if `.env.workbooks` exists
   2. Prompt for system authentication (once per session)
   3. Decrypt all values
   4. Inject into kernel environment before Python starts
@@ -264,7 +264,7 @@ When a user runs a cell, scan the source code for common patterns that indicate 
 - `encrypt_value(value: &str, key: &[u8]) -> Result<String>`
 - `decrypt_value(encrypted: &str, key: &[u8]) -> Result<String>`
 - `compute_project_hash(project_path: &Path) -> String` - SHA256 hash of absolute project path (first 16 chars)
-- `get_user_secrets_dir(project_path: &Path) -> PathBuf` - Returns `~/.tether/projects/<project-name>-<hash>/`
+- `get_user_secrets_dir(project_path: &Path) -> PathBuf` - Returns `~/.workbooks/projects/<project-name>-<hash>/`
 - `compute_file_hash(file_path: &Path) -> Result<String>` - SHA256 hash of file contents for change detection
 - Struct `EncryptedEnvFile` with serialize/deserialize
 
@@ -298,10 +298,10 @@ When a user runs a cell, scan the source code for common patterns that indicate 
 
 **Update `src-tauri/src/lib.rs`** - Add Tauri commands:
 - `get_secrets()` - Decrypt and return all secrets (was `get_env_vars`)
-- `set_secrets(vars: HashMap<String, String>)` - Encrypt and save to `.env.tether`, update hash in `~/.tether/projects/<project-name>-<hash>/env.hash`
+- `set_secrets(vars: HashMap<String, String>)` - Encrypt and save to `.env.workbooks`, update hash in `~/.workbooks/projects/<project-name>-<hash>/env.hash`
 - `add_secret(name: String, value: String)` - Add a single secret (used by detection feature)
 - `import_from_env()` - Read plain .env and return for encryption (migration only)
-- `detect_secrets_changes()` - Check if `.env.tether` hash matches stored hash
+- `detect_secrets_changes()` - Check if `.env.workbooks` hash matches stored hash
 - `resolve_secrets_conflict(action: String)` - Handle external edit scenarios
 - `has_secrets_configured()` - Check if user has set up secrets for this project (checks keychain)
 - **`detect_secrets_in_code(source: String) -> Vec<DetectedSecret>`** - Scan cell source for hardcoded secrets
@@ -320,7 +320,7 @@ When a user runs a cell, scan the source code for common patterns that indicate 
 - No redaction at engine level (user sees real values during execution)
 
 **Update `src-tauri/src/engine_http.rs`:**
-- Before calling `start_engine()`, decrypt `.env.tether` if exists
+- Before calling `start_engine()`, decrypt `.env.workbooks` if exists
 - Pass decrypted vars to engine server
 - Cache decrypted values for session (clear on project close)
 
@@ -410,13 +410,13 @@ When a user runs a cell, scan the source code for common patterns that indicate 
 
 2. **User hits Shift+Enter to run cell**
 
-3. **Tether detects hardcoded secret, shows dialog:**
+3. **Workbooks detects hardcoded secret, shows dialog:**
    ```
    💡 Hardcoded secret detected
 
    Found: "sk-proj-abc..." in your code
 
-   Tether can securely store this and protect it:
+   Workbooks can securely store this and protect it:
    • Encrypted on your machine with Touch ID
    • Never saved in notebook file
    • Automatically redacted from outputs
@@ -428,8 +428,8 @@ When a user runs a cell, scan the source code for common patterns that indicate 
 
 4. **User clicks "Save & Update"**
    - Touch ID prompt appears
-   - Secret saved to `~/.tether/projects/<project>-<hash>/`
-   - `.env.tether` created in project folder (encrypted)
+   - Secret saved to `~/.workbooks/projects/<project>-<hash>/`
+   - `.env.workbooks` created in project folder (encrypted)
    - Cell is automatically rewritten to:
      ```python
      import openai
@@ -446,21 +446,21 @@ When a user runs a cell, scan the source code for common patterns that indicate 
    - **Notebook file saved with redacted output:** `[REDACTED: OPENAI_API_KEY]`
 
 6. **User commits to git:**
-   - `.env.tether` (encrypted) ✅ Safe to commit
+   - `.env.workbooks` (encrypted) ✅ Safe to commit
    - Notebook with `[REDACTED: OPENAI_API_KEY]` outputs ✅ Safe to commit
    - No secrets exposed!
 
 7. **Teammate clones repo:**
-   - Opens project in Tether
-   - Tether detects `.env.tether` but no decryption key
+   - Opens project in Workbooks
+   - Workbooks detects `.env.workbooks` but no decryption key
    - Prompts: "This project uses secrets. Set up your own?"
    - Teammate adds their own OpenAI key
-   - Saved to their `~/.tether/` directory
+   - Saved to their `~/.workbooks/` directory
    - Everything works, different keys per person
 
 ## Non-Technical User Experience
 
-Most Tether users won't understand `.env` files or encryption. The UI should hide this complexity:
+Most Workbooks users won't understand `.env` files or encryption. The UI should hide this complexity:
 
 **What users see:**
 - "Secrets" button in project toolbar (not "Environment Variables")
@@ -471,13 +471,13 @@ Most Tether users won't understand `.env` files or encryption. The UI should hid
 
 **What happens behind the scenes:**
 - First time adding a secret:
-  - "Tether needs to unlock your secrets" → Touch ID prompt
-  - Values encrypted and saved to `.env.tether`
-  - Hash stored in `~/.tether/projects/<project-name>-<hash>/env.hash`
+  - "Workbooks needs to unlock your secrets" → Touch ID prompt
+  - Values encrypted and saved to `.env.workbooks`
+  - Hash stored in `~/.workbooks/projects/<project-name>-<hash>/env.hash`
   - Key stored in system keychain
-- Opening a shared project with `.env.tether`:
+- Opening a shared project with `.env.workbooks`:
   - "This project uses secrets. Set up your own?" → Yes/No
-  - If Yes: Opens secrets editor, saves to their own `~/.tether` location
+  - If Yes: Opens secrets editor, saves to their own `~/.workbooks` location
   - If No: Project works without secrets (Python code may error if it needs them)
 
 **Key principle:** Never show file paths, encryption details, or technical jargon. Just "secrets" and a lock icon.
@@ -494,7 +494,7 @@ Most Tether users won't understand `.env` files or encryption. The UI should hid
 
 2. **Session Caching**: Decrypted values stay in memory only. Cleared on project close or app quit.
 
-3. **Git Safety**: `.env.tether` is safe to commit. Without the keychain entry, values cannot be decrypted.
+3. **Git Safety**: `.env.workbooks` is safe to commit. Without the keychain entry, values cannot be decrypted.
 
 3.5. **Output Redaction**:
    - All cell outputs are scanned for secret values when saving the notebook to disk
@@ -511,13 +511,13 @@ Most Tether users won't understand `.env` files or encryption. The UI should hid
    - **Trade-off**: Slight performance cost on save, but critical for security
 
 4. **Sharing Projects**:
-   - Project folder (with `.env.tether`) can be safely shared via git, Dropbox, etc.
-   - Recipient won't have the encryption key (it's in your `~/.tether` and keychain)
+   - Project folder (with `.env.workbooks`) can be safely shared via git, Dropbox, etc.
+   - Recipient won't have the encryption key (it's in your `~/.workbooks` and keychain)
    - When recipient opens project:
-     - Tether detects `.env.tether` but no key in their keychain
+     - Workbooks detects `.env.workbooks` but no key in their keychain
      - Prompts: "This project has encrypted variables. Set up your own secrets?"
      - User creates their own variables (may be different from yours)
-     - Their secrets stored in their own `~/.tether/projects/<project-name>-<hash>/`
+     - Their secrets stored in their own `~/.workbooks/projects/<project-name>-<hash>/`
    - **Key insight**: Same project, different secrets per user. Perfect for teams where everyone has their own API keys/credentials.
 
 5. **Key Rotation**:
@@ -538,7 +538,7 @@ User clicks "Save & Update"
   ↓
 Touch ID prompt → Unlock keychain
   ↓
-Call add_secret(name, value) → Encrypt & save to .env.tether
+Call add_secret(name, value) → Encrypt & save to .env.workbooks
   ↓
 Call rewrite_cell_source() → Replace hardcoded value with os.environ
   ↓
@@ -555,7 +555,7 @@ User triggers save (auto-save, Cmd+S, on-blur)
   ↓
 WorkbookViewer calls save_workbook(workbook_path, content)
   ↓
-Rust: Load current secrets from .env.tether
+Rust: Load current secrets from .env.workbooks
   ↓
 Rust: Deep-scan notebook JSON for all outputs
   ↓
@@ -569,7 +569,7 @@ User still sees real values in UI (no change to state)
 
 **Flow: Opening a shared project**
 ```
-User opens project with .env.tether
+User opens project with .env.workbooks
   ↓
 Check keychain for decryption key
   ↓
@@ -580,7 +580,7 @@ If Yes → Open SecretsManager
   ↓
 User adds their own secrets
   ↓
-Save to their ~/.tether/projects/<project>-<hash>/
+Save to their ~/.workbooks/projects/<project>-<hash>/
   ↓
 Project works with their secrets
 ```
@@ -614,9 +614,9 @@ Project works with their secrets
 
 4. **Edge Cases**:
    - Missing keychain entry (deleted manually)
-   - Corrupted .env.tether file
+   - Corrupted .env.workbooks file
    - Permission denied on keychain
-   - Multiple Tether instances accessing same project
+   - Multiple Workbooks instances accessing same project
 
 5. **Secret Detection Tests**:
    - **Pattern matching**:

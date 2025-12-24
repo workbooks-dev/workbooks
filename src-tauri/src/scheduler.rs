@@ -100,7 +100,7 @@ impl SchedulerManager {
     fn get_global_db_path() -> Result<PathBuf> {
         let home = dirs::home_dir()
             .context("Could not find home directory")?;
-        Ok(home.join(".tether").join("schedules.db"))
+        Ok(home.join(".workbooks").join("schedules.db"))
     }
 
     /// Initialize the database schema

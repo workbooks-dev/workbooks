@@ -42,11 +42,11 @@ async def test_kernel_start():
 
     # Test 2: Install kernel spec
     print("Test 2: Installing kernel spec...")
-    kernel_spec_name = f"tether_{os.path.basename(project_root)}"
+    kernel_spec_name = f"workbooks_{os.path.basename(project_root)}"
     print(f"Kernel spec name: {kernel_spec_name}")
 
     install_result = subprocess.run(
-        [venv_python, "-m", "ipykernel", "install", "--user", "--name", kernel_spec_name, "--display-name", f"Tether ({os.path.basename(project_root)})"],
+        [venv_python, "-m", "ipykernel", "install", "--user", "--name", kernel_spec_name, "--display-name", f"Workbooks ({os.path.basename(project_root)})"],
         capture_output=True,
         text=True
     )
@@ -87,7 +87,7 @@ async def test_kernel_start():
         # Test 5: Execute code
         print()
         print("Test 5: Executing test code...")
-        msg_id = kc.execute("print('Hello from Tether!')", store_history=True, silent=False)
+        msg_id = kc.execute("print('Hello from Workbooks!')", store_history=True, silent=False)
 
         # Collect output
         outputs = []

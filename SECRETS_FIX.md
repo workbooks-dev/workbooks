@@ -31,13 +31,13 @@ The error `ERROR: Failed to load secrets: Decryption failed: aead::Error` means:
 
 ```bash
 cd "/Users/jmitch/Desktop/Test 4"
-rm .tether/secrets.db
+rm .workbooks/secrets.db
 ```
 
 ### Step 2: Rebuild and restart the app
 
 ```bash
-cd /Users/jmitch/Dev/tether
+cd /Users/jmitch/Dev/workbooks
 npm run tauri dev
 ```
 
@@ -91,7 +91,7 @@ When editing a secret:
 
 In the terminal, you'll now see:
 ```
-DEBUG: Using keyring entry: service='tether' user='secrets-1a2b3c4d'
+DEBUG: Using keyring entry: service='workbooks' user='secrets-1a2b3c4d'
 DEBUG: Loading secrets from project root: /path/to/project
 DEBUG: SecretsManager initialized successfully
 DEBUG: Loaded 1 secrets from database
@@ -108,7 +108,7 @@ This helps verify that secrets are being loaded and injected correctly.
 1. **Check the terminal for DEBUG output** - Look for "Injecting secret: ..."
 2. **Make sure you restarted the kernel** - Click "Restart" in the workbook toolbar
 3. **Verify the secret was added** - Check that the sidebar shows "1 secret"
-4. **Check the database exists**: `ls -la "/Users/jmitch/Desktop/Test 4/.tether/"`
+4. **Check the database exists**: `ls -la "/Users/jmitch/Desktop/Test 4/.workbooks/"`
 
 ### If you get "Decryption failed" again:
 
@@ -116,10 +116,10 @@ This means the encryption key in your keychain doesn't match. To reset:
 
 ```bash
 # On macOS, open Keychain Access app
-# Search for "tether"
-# Delete any entries with service="tether"
+# Search for "workbooks"
+# Delete any entries with service="workbooks"
 # Then delete the database and re-add secrets
-rm "/Users/jmitch/Desktop/Test 4/.tether/secrets.db"
+rm "/Users/jmitch/Desktop/Test 4/.workbooks/secrets.db"
 ```
 
 ## Next: Output Redaction (Coming Soon)

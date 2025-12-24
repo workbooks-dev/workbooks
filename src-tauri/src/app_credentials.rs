@@ -46,14 +46,14 @@ pub struct AppCredentialsManager {
 
 impl AppCredentialsManager {
     /// Create a new AppCredentialsManager
-    /// Credentials are stored in ~/.tether/app/credentials.db
+    /// Credentials are stored in ~/.workbooks/app/credentials.db
     pub fn new() -> Result<Self> {
-        // Create ~/.tether/app directory
+        // Create ~/.workbooks/app directory
         let home_dir = dirs::home_dir()
             .context("Failed to get home directory")?;
-        let app_dir = home_dir.join(".tether").join("app");
+        let app_dir = home_dir.join(".workbooks").join("app");
         std::fs::create_dir_all(&app_dir)
-            .context("Failed to create ~/.tether/app directory")?;
+            .context("Failed to create ~/.workbooks/app directory")?;
 
         let db_path = app_dir.join("credentials.db");
         let key_file_path = app_dir.join("encryption.key");

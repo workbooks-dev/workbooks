@@ -1,6 +1,6 @@
-# Tether Features Documentation
+# Workbooks Features Documentation
 
-This directory contains feature-by-feature documentation, todos, and completion tracking for the Tether application.
+This directory contains feature-by-feature documentation, todos, and completion tracking for the Workbooks application.
 
 ## Structure
 
@@ -22,7 +22,7 @@ Each feature has its own directory with three files:
 
 ### Data & Security
 - **`secrets/`** - Secrets management, encryption, keychain integration
-- **`state/`** - State management system (SQLite, blob storage, tether-core API)
+- **`state/`** - State management system (SQLite, blob storage, workbooks-core API)
 
 ### Automation
 - **`schedule/`** - Cron scheduling, run history, automated execution

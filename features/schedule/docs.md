@@ -2,7 +2,7 @@
 
 ## Overview
 
-Tether allows workbooks to run on automated schedules (cron-style) and tracks execution history for auditing and debugging.
+Workbooks allows workbooks to run on automated schedules (cron-style) and tracks execution history for auditing and debugging.
 
 ## Design Philosophy
 
@@ -126,7 +126,7 @@ Tether allows workbooks to run on automated schedules (cron-style) and tracks ex
 **Metadata Storage:**
 - Execution insights stored as JSON in `metadata` column in runs table
 - Includes: cells_executed, cells_succeeded, cells_failed, final_outputs
-- Stored in `~/.tether/schedules.db` (not in project files)
+- Stored in `~/.workbooks/schedules.db` (not in project files)
 - Not included in project history (won't be committed to git)
 - Auto-cleanup after 30 runs (same as other run data)
 
@@ -135,7 +135,7 @@ Tether allows workbooks to run on automated schedules (cron-style) and tracks ex
 - Shows exactly what happened during run
 - Outputs, errors, full execution trace
 - Opens in read-only mode
-- Stored in `.tether/runs/{run_id}.ipynb`
+- Stored in `.workbooks/runs/{run_id}.ipynb`
 
 ### From Workbook Table
 
@@ -155,8 +155,8 @@ Tether allows workbooks to run on automated schedules (cron-style) and tracks ex
 - Pauses when app closes
 
 **Data Storage:**
-- `.tether/schedules.db` - SQLite database for schedules
-- `.tether/runs/` - Directory for run reports
+- `.workbooks/schedules.db` - SQLite database for schedules
+- `.workbooks/runs/` - Directory for run reports
 
 **Schema:**
 ```sql
@@ -192,7 +192,7 @@ CREATE TABLE runs (
 3. Starts engine for workbook
 4. Executes all cells sequentially
 5. Captures outputs and errors
-6. Saves notebook with outputs to `.tether/runs/{run_id}.ipynb`
+6. Saves notebook with outputs to `.workbooks/runs/{run_id}.ipynb`
 7. Records run metadata in database
 8. Updates `next_run` based on cron expression
 9. Cleans up old runs (keep last 30)
@@ -200,8 +200,8 @@ CREATE TABLE runs (
 **Run Report:**
 - Copy of notebook with execution outputs
 - Timestamped filename: `{workbook_name}_{timestamp}.ipynb`
-- Stored in `.tether/runs/`
-- Can be opened in Tether or any Jupyter viewer
+- Stored in `.workbooks/runs/`
+- Can be opened in Workbooks or any Jupyter viewer
 
 ### Cron Expressions
 
@@ -235,7 +235,7 @@ CREATE TABLE runs (
 ## System Tray Background Process
 
 **Overview:**
-Tether runs as a menu bar/system tray application (like Docker Desktop, Ollama) to enable reliable scheduling even when the main window is closed.
+Workbooks runs as a menu bar/system tray application (like Docker Desktop, Ollama) to enable reliable scheduling even when the main window is closed.
 
 **Architecture Decision:**
 - **System Tray App** (recommended approach)
@@ -253,19 +253,19 @@ Tether runs as a menu bar/system tray application (like Docker Desktop, Ollama) 
 ### System Tray Features
 
 **Menu Bar Icon:**
-- Shows Tether status at a glance
+- Shows Workbooks status at a glance
 - Always visible when scheduler is active
 - Click to reveal menu
 
 **Menu Options:**
-- **Open Tether** - Shows main window
+- **Open Workbooks** - Shows main window
 - **Scheduler Status** - Running / Paused / X schedules active
 - **Next Run** - Shows upcoming scheduled workbook and time
 - **Separator**
 - **Pause Scheduler** - Temporarily disable all schedules
 - **Resume Scheduler** - Re-enable schedules
 - **Separator**
-- **Quit Tether** - Stops background process entirely
+- **Quit Workbooks** - Stops background process entirely
 
 **Status Indicators:**
 - Idle: Gray icon
@@ -285,11 +285,11 @@ Tether runs as a menu bar/system tray application (like Docker Desktop, Ollama) 
 use tauri::{CustomMenuItem, SystemTray, SystemTrayMenu, SystemTrayEvent};
 
 let tray_menu = SystemTrayMenu::new()
-    .add_item(CustomMenuItem::new("open", "Open Tether"))
+    .add_item(CustomMenuItem::new("open", "Open Workbooks"))
     .add_item(CustomMenuItem::new("status", "Scheduler: Running"))
     .add_native_item(SystemTrayMenuItem::Separator)
     .add_item(CustomMenuItem::new("pause", "Pause Scheduler"))
-    .add_item(CustomMenuItem::new("quit", "Quit Tether"));
+    .add_item(CustomMenuItem::new("quit", "Quit Workbooks"));
 
 let system_tray = SystemTray::new().with_menu(tray_menu);
 ```
@@ -320,12 +320,12 @@ let system_tray = SystemTray::new().with_menu(tray_menu);
 - User can close window, app stays running
 
 **Subsequent Use:**
-- Click menu bar icon → Open Tether
+- Click menu bar icon → Open Workbooks
 - Schedules run in background
 - Notifications on completion (optional)
 
 **Quitting:**
-- Menu → Quit Tether
+- Menu → Quit Workbooks
 - Icon disappears from menu bar
 - Scheduler stops, no more scheduled runs
 - Clean shutdown
@@ -348,7 +348,7 @@ let system_tray = SystemTray::new().with_menu(tray_menu);
 ### Storage
 
 **Run Reports:**
-- `.tether/runs/{run_id}.ipynb` - Full notebook with outputs
+- `.workbooks/runs/{run_id}.ipynb` - Full notebook with outputs
 - Metadata in `runs` table
 - Auto-cleanup after 30 runs per workbook
 

@@ -2,7 +2,7 @@
 
 ## Overview
 
-The MCP (Model Context Protocol) server enables Claude Desktop to interact with Tether projects directly. Users can ask Claude to create notebooks, run pipelines, inspect outputs, and manage project workflows through natural language.
+The MCP (Model Context Protocol) server enables Claude Desktop to interact with Workbooks projects directly. Users can ask Claude to create notebooks, run pipelines, inspect outputs, and manage project workflows through natural language.
 
 ## Key Capabilities
 
@@ -48,17 +48,17 @@ The MCP server is **integrated into the existing FastAPI engine server** (port 8
 
 ### Per-Project MCP Configuration
 
-Each Tether project gets its own MCP server instance configured in Claude Desktop:
+Each Workbooks project gets its own MCP server instance configured in Claude Desktop:
 
 ```json
 {
   "mcpServers": {
-    "tether-my-pipeline": {
-      "command": "tether",
+    "workbooks-my-pipeline": {
+      "command": "workbooks",
       "args": ["mcp", "--project", "/Users/you/Projects/my-pipeline"]
     },
-    "tether-data-analysis": {
-      "command": "tether",
+    "workbooks-data-analysis": {
+      "command": "workbooks",
       "args": ["mcp", "--project", "/Users/you/Projects/data-analysis"]
     }
   }
@@ -71,9 +71,9 @@ Each Tether project gets its own MCP server instance configured in Claude Deskto
 - Can have multiple projects configured side-by-side
 - MCP server knows project context for all operations
 
-### One-Click Claude Integration (Tether App)
+### One-Click Claude Integration (Workbooks App)
 
-**Instead of manual JSON editing**, the Tether app provides:
+**Instead of manual JSON editing**, the Workbooks app provides:
 
 #### "Add to Claude Desktop" Button
 - Located in Project Settings or Sidebar
@@ -81,21 +81,21 @@ Each Tether project gets its own MCP server instance configured in Claude Deskto
   - macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`
   - Windows: `%APPDATA%\Claude\claude_desktop_config.json`
   - Linux: `~/.config/Claude/claude_desktop_config.json`
-- Adds entry: `tether-{project-name}` with correct project path
+- Adds entry: `workbooks-{project-name}` with correct project path
 - Shows success/error messages
-- Warns if `tether` CLI not in PATH
+- Warns if `workbooks` CLI not in PATH
 
 #### "Manage Claude Projects" Dialog
-- Lists all `tether-*` entries in Claude config
+- Lists all `workbooks-*` entries in Claude config
 - Checkboxes to enable/disable projects
-- "Remove all other Tether projects" button
+- "Remove all other Workbooks projects" button
 - Safe config file updates with backup
 - Validation before writing
 
 **Implementation:**
 - Rust handles JSON read/write via `serde_json`
 - Create backup before modifying config
-- Validate `tether` CLI is installed/accessible
+- Validate `workbooks` CLI is installed/accessible
 - Show helpful error messages if config is malformed
 
 ## MCP Tools
@@ -121,7 +121,7 @@ Create a new notebook in the project.
 - Success status
 
 ### 2. `run_notebook`
-Execute a notebook using the Tether engine.
+Execute a notebook using the Workbooks engine.
 
 **Parameters:**
 - `notebook_path` - Relative path to notebook
@@ -208,7 +208,7 @@ Read secret keys (read-only).
 
 **Returns:**
 - Secret keys (names only, or values if user enables)
-- User can **disable this feature** in Tether app settings
+- User can **disable this feature** in Workbooks app settings
 
 **Security:**
 - Default: keys only, no values
@@ -260,11 +260,11 @@ All notebook executions via MCP create run history entries with:
 - **Source field**: `"Claude Desktop: {original_user_request}"`
 - Example: `"Claude Desktop: Run the data cleaning pipeline"`
 - Helps users understand which runs were automated vs manual
-- Visible in Tether app run history UI
+- Visible in Workbooks app run history UI
 
 ## User Privacy & Security Controls
 
-Users can disable MCP features in Tether app settings:
+Users can disable MCP features in Workbooks app settings:
 - ☑ Allow Claude to list project notebooks
 - ☑ Allow Claude to read notebook outputs
 - ☑ Allow Claude to create/modify notebooks
@@ -273,7 +273,7 @@ Users can disable MCP features in Tether app settings:
 - ☐ Allow Claude to read secret values (disabled by default)
 - ☑ Allow Claude to read project metadata
 
-These settings are stored in `.tether/config.toml` and enforced by the MCP server.
+These settings are stored in `.workbooks/config.toml` and enforced by the MCP server.
 
 ## Notification System (Future)
 
@@ -288,7 +288,7 @@ These settings are stored in `.tether/config.toml` and enforced by the MCP serve
 - Scheduled notebook completed
 - Long-running notebook finished
 - Error in execution
-- Custom user notifications via `tether.notify("message")`
+- Custom user notifications via `workbooks.notify("message")`
 
 **Implementation:** TBD based on MCP protocol capabilities.
 
@@ -296,7 +296,7 @@ These settings are stored in `.tether/config.toml` and enforced by the MCP serve
 
 ```bash
 # Start MCP server for a project (called by Claude Desktop)
-tether mcp --project /path/to/project
+workbooks mcp --project /path/to/project
 
 # Ensure engine server is running
 # Start FastMCP server on stdio (MCP protocol)
@@ -304,7 +304,7 @@ tether mcp --project /path/to/project
 ```
 
 **Requirements:**
-- `tether` CLI must be in user's PATH
+- `workbooks` CLI must be in user's PATH
 - Or bundled with Tauri app and symlinked to system PATH during installation
 
 ## Error Handling
@@ -313,7 +313,7 @@ MCP tools should return clear error messages:
 - "Project not found at path: /path/to/project"
 - "Notebook not found: notebooks/missing.ipynb"
 - "Execution failed: ModuleNotFoundError: No module named 'pandas'. Try: !uv add pandas"
-- "Feature disabled: User has disabled notebook execution in Tether settings"
+- "Feature disabled: User has disabled notebook execution in Workbooks settings"
 
 ## Future Enhancements
 

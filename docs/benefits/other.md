@@ -1,6 +1,6 @@
 # Other Benefits
 
-Non-obvious features that make Tether better than traditional notebook tools.
+Non-obvious features that make Workbooks better than traditional notebook tools.
 
 ## HTTP-Based Engine Architecture
 
@@ -12,15 +12,15 @@ Each workbook runs its own Jupyter kernel managed by a local FastAPI server. The
 
 ## Centralized Virtual Environments
 
-Project venvs are stored in `~/.tether/venvs/{project-name}` instead of `.venv` in each project. This keeps venvs machine-specific and out of version control by default.
+Project venvs are stored in `~/.workbooks/venvs/{project-name}` instead of `.venv` in each project. This keeps venvs machine-specific and out of version control by default.
 
-**Why this matters:** Clone a project and Tether automatically sets up the Python environment without polluting the project folder. No accidental venv commits.
+**Why this matters:** Clone a project and Workbooks automatically sets up the Python environment without polluting the project folder. No accidental venv commits.
 
 **Implementation:** `python.rs` hashes project path to generate unique venv location; UV installs packages to centralized location; Jupyter kernel specs point to centralized Python.
 
 ## Machine-Local Secrets
 
-Secrets are stored in `~/.tether/secrets/{project-hash}/secrets.db`, encrypted with AES-256-GCM. The encryption key is stored in macOS Keychain or equivalent platform keychain. Secrets never touch the project folder.
+Secrets are stored in `~/.workbooks/secrets/{project-hash}/secrets.db`, encrypted with AES-256-GCM. The encryption key is stored in macOS Keychain or equivalent platform keychain. Secrets never touch the project folder.
 
 **Why this matters:** Multiple team members can have different secrets for the same project. Secrets can't accidentally be committed to git.
 
@@ -46,7 +46,7 @@ Monaco editor requests completions directly from your running Jupyter kernel, no
 
 Environment variables (including secrets) are injected when the Jupyter kernel starts, not just in the shell. This means they're available to Python subprocess calls and libraries that read from `os.environ`.
 
-**Why this matters:** Secrets work even with libraries that spawn subprocesses. `TETHER_PROJECT_FOLDER` is always set correctly.
+**Why this matters:** Secrets work even with libraries that spawn subprocesses. `WORKBOOKS_PROJECT_FOLDER` is always set correctly.
 
 **Implementation:** `engine_server.py:258-269` merges env vars into kernel launch environment; kernel spec includes `env` dict; kernel process inherits all variables.
 
@@ -68,7 +68,7 @@ Backend limits outputs to first 100 messages, but execution continues in backgro
 
 ## Tab Restoration Per Project
 
-When you reopen a project, Tether restores the tabs you had open last time. Each project remembers its own tab layout independently.
+When you reopen a project, Workbooks restores the tabs you had open last time. Each project remembers its own tab layout independently.
 
 **Why this matters:** Pick up exactly where you left off. No need to reopen the same notebooks every time.
 
@@ -76,7 +76,7 @@ When you reopen a project, Tether restores the tabs you had open last time. Each
 
 ## Standard Jupyter Kernel Protocol
 
-Tether uses the standard Jupyter kernel protocol, not a custom fork. Any Jupyter kernel works (Python, R, Julia, etc). Uses `jupyter_client.AsyncKernelManager` directly.
+Workbooks uses the standard Jupyter kernel protocol, not a custom fork. Any Jupyter kernel works (Python, R, Julia, etc). Uses `jupyter_client.AsyncKernelManager` directly.
 
 **Why this matters:** Full compatibility with Jupyter ecosystem. Install a language kernel and it just works.
 
@@ -84,7 +84,7 @@ Tether uses the standard Jupyter kernel protocol, not a custom fork. Any Jupyter
 
 ## Unsaved Changes Detection
 
-Tether tracks unsaved changes per tab and shows a dot indicator. Cmd+W prompts if you want to save. Closing the app with unsaved changes asks first.
+Workbooks tracks unsaved changes per tab and shows a dot indicator. Cmd+W prompts if you want to save. Closing the app with unsaved changes asks first.
 
 **Why this matters:** Never lose work by accident. Visual indicator shows which tabs need saving.
 
@@ -92,8 +92,8 @@ Tether tracks unsaved changes per tab and shows a dot indicator. Cmd+W prompts i
 
 ## No Hidden State Files
 
-Tether stores very little metadata. Notebooks remain standard `.ipynb` files with optional timing metadata. No `.tether` folder in your project (except secrets, which are machine-local in `~/.tether`).
+Workbooks stores very little metadata. Notebooks remain standard `.ipynb` files with optional timing metadata. No `.workbooks` folder in your project (except secrets, which are machine-local in `~/.workbooks`).
 
-**Why this matters:** Projects stay clean. Share notebooks without sharing Tether-specific files.
+**Why this matters:** Projects stay clean. Share notebooks without sharing Workbooks-specific files.
 
-**Implementation:** All Tether state is either in standard notebook metadata or in `~/.tether` outside the project.
+**Implementation:** All Workbooks state is either in standard notebook metadata or in `~/.workbooks` outside the project.
