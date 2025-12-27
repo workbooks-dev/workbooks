@@ -17,6 +17,8 @@ pub struct ChatSession {
     pub created_at: i64,
     pub updated_at: i64,
     pub messages: Vec<ChatMessage>,
+    pub model: Option<String>, // Claude model used for this session
+    pub project_root: Option<String>, // Project path this session is associated with
 }
 
 fn get_db_path() -> Result<PathBuf> {
@@ -40,10 +42,18 @@ fn init_db() -> Result<Connection> {
             id TEXT PRIMARY KEY,
             title TEXT NOT NULL,
             created_at INTEGER NOT NULL,
-            updated_at INTEGER NOT NULL
+            updated_at INTEGER NOT NULL,
+            model TEXT,
+            project_root TEXT
         )",
         [],
     )?;
+
+    // Add model column if it doesn't exist (for existing databases)
+    let _ = conn.execute("ALTER TABLE sessions ADD COLUMN model TEXT", []);
+
+    // Add project_root column if it doesn't exist (for existing databases)
+    let _ = conn.execute("ALTER TABLE sessions ADD COLUMN project_root TEXT", []);
 
     // Create messages table
     conn.execute(
@@ -61,14 +71,14 @@ fn init_db() -> Result<Connection> {
     Ok(conn)
 }
 
-pub fn create_session(title: String) -> Result<ChatSession> {
+pub fn create_session(title: String, model: Option<String>, project_root: Option<String>) -> Result<ChatSession> {
     let conn = init_db()?;
     let id = uuid::Uuid::new_v4().to_string();
     let now = chrono::Utc::now().timestamp();
 
     conn.execute(
-        "INSERT INTO sessions (id, title, created_at, updated_at) VALUES (?1, ?2, ?3, ?4)",
-        params![id, title, now, now],
+        "INSERT INTO sessions (id, title, created_at, updated_at, model, project_root) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![id, title, now, now, model, project_root],
     )?;
 
     Ok(ChatSession {
@@ -77,22 +87,37 @@ pub fn create_session(title: String) -> Result<ChatSession> {
         created_at: now,
         updated_at: now,
         messages: vec![],
+        model,
+        project_root,
     })
 }
 
-pub fn list_sessions() -> Result<Vec<ChatSession>> {
+pub fn list_sessions(project_root: Option<String>) -> Result<Vec<ChatSession>> {
     let conn = init_db()?;
 
-    let mut stmt = conn.prepare(
-        "SELECT id, title, created_at, updated_at FROM sessions ORDER BY updated_at DESC"
-    )?;
+    let (query, params): (&str, Vec<&dyn rusqlite::ToSql>) = if let Some(ref root) = project_root {
+        // Filter by project_root
+        (
+            "SELECT id, title, created_at, updated_at, model, project_root FROM sessions WHERE project_root = ?1 ORDER BY updated_at DESC",
+            vec![root]
+        )
+    } else {
+        // Return all sessions if no project_root specified
+        (
+            "SELECT id, title, created_at, updated_at, model, project_root FROM sessions ORDER BY updated_at DESC",
+            vec![]
+        )
+    };
 
-    let sessions = stmt.query_map([], |row| {
+    let mut stmt = conn.prepare(query)?;
+    let sessions = stmt.query_map(params.as_slice(), |row| {
         Ok(ChatSession {
             id: row.get(0)?,
             title: row.get(1)?,
             created_at: row.get(2)?,
             updated_at: row.get(3)?,
+            model: row.get(4)?,
+            project_root: row.get(5)?,
             messages: vec![],
         })
     })?
@@ -106,7 +131,7 @@ pub fn get_session(session_id: String) -> Result<ChatSession> {
 
     // Get session info
     let mut stmt = conn.prepare(
-        "SELECT id, title, created_at, updated_at FROM sessions WHERE id = ?1"
+        "SELECT id, title, created_at, updated_at, model, project_root FROM sessions WHERE id = ?1"
     )?;
 
     let session = stmt.query_row(params![session_id], |row| {
@@ -115,6 +140,8 @@ pub fn get_session(session_id: String) -> Result<ChatSession> {
             title: row.get(1)?,
             created_at: row.get(2)?,
             updated_at: row.get(3)?,
+            model: row.get(4)?,
+            project_root: row.get(5)?,
             messages: vec![],
         })
     })?;
@@ -167,15 +194,34 @@ pub fn add_message(session_id: String, role: String, content: String) -> Result<
     Ok(())
 }
 
+pub fn update_session_title(session_id: String, new_title: String) -> Result<()> {
+    let conn = init_db()?;
+    let now = chrono::Utc::now().timestamp();
+
+    conn.execute(
+        "UPDATE sessions SET title = ?1, updated_at = ?2 WHERE id = ?3",
+        params![new_title, now, session_id],
+    )?;
+
+    Ok(())
+}
+
+pub fn get_or_create_project_session(project_root: String, project_name: String) -> Result<ChatSession> {
+    // Always create a new session when opening a project
+    // Previous sessions remain in the database and can be accessed via chat history
+    let title = format!("{} Chat", project_name);
+    create_session(title, Some("claude-sonnet-4-5-20250929".to_string()), Some(project_root))
+}
+
 // Tauri commands
 #[tauri::command]
-pub fn create_chat_session(title: String) -> Result<ChatSession, String> {
-    create_session(title).map_err(|e| e.to_string())
+pub fn create_chat_session(title: String, model: Option<String>, project_root: Option<String>) -> Result<ChatSession, String> {
+    create_session(title, model, project_root).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
-pub fn list_chat_sessions() -> Result<Vec<ChatSession>, String> {
-    list_sessions().map_err(|e| e.to_string())
+pub fn list_chat_sessions(project_root: Option<String>) -> Result<Vec<ChatSession>, String> {
+    list_sessions(project_root).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -191,4 +237,14 @@ pub fn delete_chat_session(session_id: String) -> Result<(), String> {
 #[tauri::command]
 pub fn add_message_to_session(session_id: String, role: String, content: String) -> Result<(), String> {
     add_message(session_id, role, content).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn get_or_create_project_chat_session(project_root: String, project_name: String) -> Result<ChatSession, String> {
+    get_or_create_project_session(project_root, project_name).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn update_chat_session_title(session_id: String, new_title: String) -> Result<(), String> {
+    update_session_title(session_id, new_title).map_err(|e| e.to_string())
 }
