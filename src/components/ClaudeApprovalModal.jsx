@@ -1,6 +1,6 @@
 import { useState } from 'react';
 
-export default function ClaudeApprovalModal({ pendingChanges, onApprove, onDeny, response }) {
+export default function ClaudeApprovalModal({ pendingChanges, onApprove, onDeny }) {
   const [selectedTools, setSelectedTools] = useState(new Set());
 
   if (!pendingChanges || pendingChanges.length === 0) {
@@ -37,7 +37,7 @@ export default function ClaudeApprovalModal({ pendingChanges, onApprove, onDeny,
       acc[change.tool] = [];
     }
     acc[change.tool].push(change);
-    return {};
+    return acc;
   }, {});
 
   const toolTypes = [...new Set(pendingChanges.map(c => c.tool))];
@@ -52,16 +52,6 @@ export default function ClaudeApprovalModal({ pendingChanges, onApprove, onDeny,
             Claude wants to make the following changes. Select which tools to allow:
           </p>
         </div>
-
-        {/* Response preview */}
-        {response && (
-          <div className="px-6 py-3 bg-blue-50 border-b border-blue-100">
-            <p className="text-xs font-medium text-blue-900 mb-1">Claude's Plan:</p>
-            <div className="text-sm text-blue-800 max-h-24 overflow-y-auto">
-              {response}
-            </div>
-          </div>
-        )}
 
         {/* Content - scrollable */}
         <div className="flex-1 overflow-y-auto px-6 py-4">

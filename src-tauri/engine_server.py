@@ -33,6 +33,14 @@ engines: Dict[str, AsyncKernelManager] = {}
 secret_values: Dict[str, Dict[str, str]] = {}  # workbook_path -> {key: value}
 
 
+def normalize_path(path: str) -> str:
+    """
+    Normalize a file path to ensure consistent dictionary keys.
+    Converts to absolute path and normalizes separators/redundant parts.
+    """
+    return os.path.abspath(os.path.normpath(path))
+
+
 def slugify_kernel_name(name: str) -> str:
     """
     Slugify a name to be a valid kernel spec name.
@@ -171,7 +179,8 @@ async def health_check():
 @app.post("/engine/start")
 async def start_engine(request: StartEngineRequest):
     """Start a new Jupyter engine for a workbook."""
-    workbook_path = request.workbook_path
+    # Normalize paths to ensure consistent dictionary keys
+    workbook_path = normalize_path(request.workbook_path)
     project_root = request.project_root
     venv_path = request.venv_path
     engine_name = request.engine_name
@@ -182,6 +191,7 @@ async def start_engine(request: StartEngineRequest):
     print(f"Engine name: {engine_name}")
 
     if workbook_path in engines:
+        print(f"Engine already running for {workbook_path}")
         return {"status": "already_running", "workbook_path": workbook_path}
 
     try:
@@ -348,11 +358,14 @@ MAX_OUTPUTS_END = 50     # Keep last M outputs
 @app.post("/engine/execute", response_model=ExecuteResponse)
 async def execute_code(request: ExecuteRequest):
     """Execute code in a workbook's engine."""
-    workbook_path = request.workbook_path
+    # Normalize path to match start_engine's normalized key
+    workbook_path = normalize_path(request.workbook_path)
     code = request.code
 
     km = engines.get(workbook_path)
     if not km:
+        print(f"ERROR: No engine found for workbook: {workbook_path}")
+        print(f"Available engines: {list(engines.keys())}")
         raise HTTPException(status_code=404, detail="No engine found for this workbook")
 
     try:
@@ -527,11 +540,14 @@ async def execute_code(request: ExecuteRequest):
 @app.post("/engine/execute_stream")
 async def execute_code_stream(request: ExecuteRequest):
     """Execute code and stream outputs in real-time via Server-Sent Events."""
-    workbook_path = request.workbook_path
+    # Normalize path to match start_engine's normalized key
+    workbook_path = normalize_path(request.workbook_path)
     code = request.code
 
     km = engines.get(workbook_path)
     if not km:
+        print(f"ERROR: No engine found for workbook: {workbook_path}")
+        print(f"Available engines: {list(engines.keys())}")
         raise HTTPException(status_code=404, detail="No engine found for this workbook")
 
     async def generate():
@@ -693,24 +709,32 @@ async def execute_code_stream(request: ExecuteRequest):
 @app.post("/engine/stop")
 async def stop_engine(workbook_path: str):
     """Stop a workbook's engine."""
+    # Normalize path to match start_engine's normalized key
+    workbook_path = normalize_path(workbook_path)
     km = engines.pop(workbook_path, None)
     secret_values.pop(workbook_path, None)  # Clean up secret values
 
     if km:
         try:
             await km.shutdown_kernel()
+            print(f"Engine stopped for {workbook_path}")
             return {"status": "stopped", "workbook_path": workbook_path}
         except Exception as e:
             raise HTTPException(status_code=500, detail=str(e))
 
+    print(f"Engine not found for stopping: {workbook_path}")
     return {"status": "not_found", "workbook_path": workbook_path}
 
 
 @app.post("/engine/interrupt")
 async def interrupt_engine(workbook_path: str):
     """Interrupt the currently executing cell in a workbook's engine."""
+    # Normalize path to match start_engine's normalized key
+    workbook_path = normalize_path(workbook_path)
     km = engines.get(workbook_path)
     if not km:
+        print(f"ERROR: No engine found for interrupt: {workbook_path}")
+        print(f"Available engines: {list(engines.keys())}")
         raise HTTPException(status_code=404, detail=f"No engine found for {workbook_path}")
 
     try:
@@ -723,10 +747,12 @@ async def interrupt_engine(workbook_path: str):
 @app.post("/engine/restart")
 async def restart_engine(request: StartEngineRequest):
     """Restart a workbook's engine (stop and start fresh)."""
-    workbook_path = request.workbook_path
+    # Normalize path to match start_engine's normalized key
+    workbook_path = normalize_path(request.workbook_path)
 
     # Stop existing engine if running
     km = engines.pop(workbook_path, None)
+    secret_values.pop(workbook_path, None)  # Clean up secret values
     if km:
         try:
             await km.shutdown_kernel()
@@ -771,11 +797,14 @@ class ExecuteAllResponse(BaseModel):
 @app.post("/engine/execute-all", response_model=ExecuteAllResponse)
 async def execute_all_cells(request: ExecuteAllRequest):
     """Execute all cells in a workbook sequentially."""
-    workbook_path = request.workbook_path
+    # Normalize path to match start_engine's normalized key
+    workbook_path = normalize_path(request.workbook_path)
     cells = request.cells
 
     km = engines.get(workbook_path)
     if not km:
+        print(f"ERROR: No engine found for workbook: {workbook_path}")
+        print(f"Available engines: {list(engines.keys())}")
         raise HTTPException(status_code=404, detail="No engine found for this workbook")
 
     logger.info(f"Executing {len(cells)} cells for {workbook_path}")
@@ -976,12 +1005,15 @@ class CompleteResponse(BaseModel):
 @app.post("/engine/complete", response_model=CompleteResponse)
 async def complete_code(request: CompleteRequest):
     """Get code completions from the Jupyter kernel."""
-    workbook_path = request.workbook_path
+    # Normalize path to match start_engine's normalized key
+    workbook_path = normalize_path(request.workbook_path)
     code = request.code
     cursor_pos = request.cursor_pos
 
     km = engines.get(workbook_path)
     if not km:
+        print(f"ERROR: No engine found for workbook: {workbook_path}")
+        print(f"Available engines: {list(engines.keys())}")
         raise HTTPException(status_code=404, detail="No engine found for this workbook")
 
     try:

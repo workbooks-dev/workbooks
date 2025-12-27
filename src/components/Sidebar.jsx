@@ -97,8 +97,9 @@ function FileTreeItem({ file, level = 0, onFileClick, onFileAction, activeFilePa
           const fileList = await invoke("list_files", {
             directoryPath: file.path,
           });
-          // Include all files, including .ipynb files in folders
-          setChildren(fileList);
+          // Filter out .ipynb files since they're shown in Workbooks section
+          const filteredFiles = fileList.filter(f => f.extension !== "ipynb");
+          setChildren(filteredFiles);
         } catch (err) {
           console.error("Failed to load folder contents:", err);
         } finally {
@@ -316,23 +317,14 @@ export function Sidebar({ projectRoot, projectName, onOpenFile, onFileDeleted, o
         directoryPath: projectRoot,
       });
 
-      // Separate workbooks from other files
-      const notebookFiles = fileList.filter(f => f.extension === "ipynb" && f.name !== "notebooks");
-      // Include notebooks folder in FILES section, but exclude root-level .ipynb files
+      // Include all non-.ipynb files in FILES section
       const otherFiles = fileList.filter(f => f.extension !== "ipynb");
 
       setFiles(otherFiles);
 
-      // Load workbooks from notebooks folder if it exists
-      const notebooksFolder = fileList.find(f => f.is_dir && f.name === "notebooks");
-      if (notebooksFolder) {
-        const notebooksList = await invoke("list_files", {
-          directoryPath: notebooksFolder.path,
-        });
-        setWorkbooks(notebooksList.filter(f => f.extension === "ipynb"));
-      } else {
-        setWorkbooks([]);
-      }
+      // Load all notebooks from entire project (up to 2 levels deep)
+      const allNotebooks = await getAllNotebooksRecursive(projectRoot, 2);
+      setWorkbooks(allNotebooks);
     } catch (err) {
       console.error("Failed to load files:", err);
     } finally {
@@ -386,7 +378,7 @@ export function Sidebar({ projectRoot, projectName, onOpenFile, onFileDeleted, o
   };
 
   // Recursively collect all files from a folder tree
-  const getAllFilesRecursive = async (dirPath) => {
+  const getAllFilesRecursive = async (dirPath, maxDepth = Infinity, currentDepth = 0) => {
     try {
       const fileList = await invoke("list_files", {
         directoryPath: dirPath,
@@ -395,14 +387,51 @@ export function Sidebar({ projectRoot, projectName, onOpenFile, onFileDeleted, o
       const allFiles = [];
       for (const file of fileList) {
         allFiles.push(file);
-        if (file.is_dir) {
-          const subFiles = await getAllFilesRecursive(file.path);
+        if (file.is_dir && currentDepth < maxDepth) {
+          const subFiles = await getAllFilesRecursive(file.path, maxDepth, currentDepth + 1);
           allFiles.push(...subFiles);
         }
       }
       return allFiles;
     } catch (err) {
       console.error("Failed to load folder contents:", err);
+      return [];
+    }
+  };
+
+  // Get all notebooks from the notebooks folder, recursively up to 2 levels deep
+  const getAllNotebooksRecursive = async (dirPath, maxDepth = 2, currentDepth = 0, baseDir = null) => {
+    try {
+      const fileList = await invoke("list_files", {
+        directoryPath: dirPath,
+      });
+
+      // Use baseDir to calculate relative paths for nested notebooks
+      const effectiveBaseDir = baseDir || dirPath;
+
+      const allNotebooks = [];
+      for (const file of fileList) {
+        if (file.extension === "ipynb") {
+          // Add relative path for nested notebooks
+          const relativePath = file.path.replace(effectiveBaseDir, '').replace(/^\//, '');
+          const pathParts = relativePath.split('/');
+          const displayPath = pathParts.length > 1 ? pathParts.slice(0, -1).join('/') : null;
+
+          allNotebooks.push({
+            ...file,
+            displayPath // Store the relative directory path for display
+          });
+        }
+
+        // Recursively search subdirectories up to maxDepth
+        if (file.is_dir && currentDepth < maxDepth) {
+          const subNotebooks = await getAllNotebooksRecursive(file.path, maxDepth, currentDepth + 1, effectiveBaseDir);
+          allNotebooks.push(...subNotebooks);
+        }
+      }
+      return allNotebooks;
+    } catch (err) {
+      console.error("Failed to load notebooks:", err);
       return [];
     }
   };
@@ -725,9 +754,16 @@ export function Sidebar({ projectRoot, projectName, onOpenFile, onFileDeleted, o
                       : 'text-gray-700 hover:bg-white'
                   }`}
                 >
-                  <span className="flex-1 overflow-hidden text-ellipsis whitespace-nowrap text-xs">
-                    {workbook.name.replace('.ipynb', '')}
-                  </span>
+                  <div className="flex flex-col gap-0.5">
+                    <span className="overflow-hidden text-ellipsis whitespace-nowrap text-xs">
+                      {workbook.name.replace('.ipynb', '')}
+                    </span>
+                    {workbook.displayPath && (
+                      <span className="text-xs text-gray-500 overflow-hidden text-ellipsis whitespace-nowrap">
+                        {workbook.displayPath}
+                      </span>
+                    )}
+                  </div>
                 </div>
               );
             })}

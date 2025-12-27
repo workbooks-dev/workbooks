@@ -2,22 +2,21 @@
 
 ## High Priority
 
-- [ ] Ensure each chat stays in the context window
-- [ ] Project-level context for Claude?
-- [ ] Allow users to select model in app settings, default to sonnet "claude-sonnet-4-5-20250929"
-- [ ] Can Claude Agent SDK have Planning be Opus 4.5 (claude-opus-4-5-20251101) and coding be "claude-sonnet-4-5-20250929"
-- [ ] Test with actual Claude Agent SDK (requires valid API key)
-- [ ] Add session title auto-generation from first message
-- [ ] Implement session search/filter functionality
-- [ ] Add Markdown rendering for chat ui
+- [ ] Test AI-first interface with real Claude Code CLI
+- [x] Project-level context injection (DONE - automatic notebook scanning and context)
+- [ ] Ensure focused file context works correctly in prompts
+- [ ] Verify split-view layout works on different screen sizes
+- [ ] Add keyboard shortcut to toggle file viewer (Cmd+B?)
+- [x] Add Markdown rendering for chat UI (code blocks, formatting) (DONE - using react-markdown with Tailwind typography)
+- [ ] Consider adding file contents preview in AI chat when focused
+- [ ] Reload project context when notebooks are added/removed (file watcher integration)
 
 ## Medium Priority
 
-- [ ] Show tool use in chat (when agent reads files, runs commands)
+- [x] Show tool use in chat (DONE - progress indicators show Read, Edit, Bash, etc. with improved visibility)
+- [x] Prominent "New Chat" button (DONE - always visible in header)
 - [ ] Add "copy to clipboard" button for code blocks in responses
-- [ ] Implement markdown rendering for agent responses
-- [ ] Add session rename functionality
-- [ ] Show timestamp on messages
+- [x] Implement markdown rendering for agent responses (DONE - full GFM support with styled code blocks)
 - [ ] Add "clear conversation" button
 
 ## Low Priority

@@ -1271,43 +1271,60 @@ async fn check_claude_cli_installed() -> Result<claude_cli::ClaudeInstallInfo, S
 async fn claude_cli_plan(
     prompt: String,
     project_root: String,
-    session_id: Option<String>,
+    session_name: Option<String>,
+    model: Option<String>,
+    window: tauri::Window,
 ) -> Result<(claude_cli::ClaudeResponse, Vec<claude_cli::PendingChange>), String> {
     let path = PathBuf::from(project_root);
-    claude_cli::run_plan_mode(&prompt, &path, session_id.as_deref()).await
+
+    // Create event name for streaming all events
+    let event_name = "claude-cli-event";
+
+    claude_cli::run_plan_mode(
+        &prompt,
+        &path,
+        session_name.as_deref(),
+        model.as_deref(),
+        move |event| {
+            let _ = window.emit(event_name, event);
+        }
+    ).await
 }
 
 #[tauri::command]
 async fn claude_cli_execute(
     prompt: String,
     project_root: String,
-    session_id: String,
+    session_name: String,
     allowed_tools: Vec<String>,
+    model: Option<String>,
 ) -> Result<claude_cli::ClaudeResponse, String> {
     let path = PathBuf::from(project_root);
-    claude_cli::run_with_approval(&prompt, &path, &session_id, &allowed_tools).await
+    claude_cli::run_with_approval(&prompt, &path, &session_name, &allowed_tools, model.as_deref()).await
 }
 
 #[tauri::command]
 async fn claude_cli_stream(
     prompt: String,
     project_root: String,
-    session_id: Option<String>,
+    session_name: Option<String>,
     allowed_tools: Option<Vec<String>>,
+    model: Option<String>,
     window: tauri::Window,
 ) -> Result<claude_cli::ClaudeResponse, String> {
     let path = PathBuf::from(project_root);
 
-    // Create event name for streaming
-    let event_name = "claude-cli-chunk";
+    // Create event name for streaming all events
+    let event_name = "claude-cli-event";
 
     claude_cli::run_streaming(
         &prompt,
         &path,
-        session_id.as_deref(),
+        session_name.as_deref(),
         allowed_tools.as_deref(),
-        move |chunk| {
-            let _ = window.emit(event_name, chunk);
+        model.as_deref(),
+        move |event| {
+            let _ = window.emit(event_name, event);
         }
     ).await
 }
@@ -1322,11 +1339,86 @@ async fn claude_cli_continue(
 }
 
 #[tauri::command]
-async fn claude_cli_get_session_id(
+async fn claude_cli_get_session_name(
     project_root: String,
 ) -> Result<String, String> {
     let path = PathBuf::from(project_root);
-    claude_cli::get_or_create_session_id(&path)
+    claude_cli::get_or_create_session_name(&path)
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ProjectContext {
+    pub project_name: String,
+    pub project_root: String,
+    pub notebooks: Vec<NotebookInfo>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct NotebookInfo {
+    pub name: String,
+    pub path: String,
+    pub relative_path: String,
+}
+
+#[tauri::command]
+async fn get_project_context(
+    project_root: String,
+) -> Result<ProjectContext, String> {
+    use walkdir::WalkDir;
+
+    let root_path = PathBuf::from(&project_root);
+
+    // Get project name from directory
+    let project_name = root_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("Unknown Project")
+        .to_string();
+
+    // Find all .ipynb files in the project
+    let mut notebooks = Vec::new();
+
+    for entry in WalkDir::new(&root_path)
+        .follow_links(true)
+        .into_iter()
+        .filter_map(|e| e.ok())
+    {
+        let path = entry.path();
+
+        // Skip hidden directories and .workbooks directory
+        if let Some(file_name) = path.file_name() {
+            let file_name_str = file_name.to_string_lossy();
+            if file_name_str.starts_with('.') {
+                continue;
+            }
+        }
+
+        if path.extension().and_then(|s| s.to_str()) == Some("ipynb") {
+            let name = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("unknown")
+                .to_string();
+
+            let relative_path = path
+                .strip_prefix(&root_path)
+                .unwrap_or(path)
+                .to_string_lossy()
+                .to_string();
+
+            notebooks.push(NotebookInfo {
+                name,
+                path: path.to_string_lossy().to_string(),
+                relative_path,
+            });
+        }
+    }
+
+    Ok(ProjectContext {
+        project_name,
+        project_root,
+        notebooks,
+    })
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -1891,12 +1983,15 @@ pub fn run() {
             chat_sessions::get_chat_session,
             chat_sessions::delete_chat_session,
             chat_sessions::add_message_to_session,
+            chat_sessions::get_or_create_project_chat_session,
+            chat_sessions::update_chat_session_title,
             check_claude_cli_installed,
             claude_cli_plan,
             claude_cli_execute,
             claude_cli_stream,
             claude_cli_continue,
-            claude_cli_get_session_id,
+            claude_cli_get_session_name,
+            get_project_context,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

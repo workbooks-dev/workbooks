@@ -6,6 +6,205 @@ This file tracks major features and improvements as they're completed.
 
 ### December 2025
 
+**AI Chat: Markdown Rendering & Enhanced Progress Indicators (Dec 27, 2025)**
+- **Markdown Rendering**: AI responses now display with beautiful, readable formatting
+  - **Full GFM Support**: Code blocks, headers, lists, links, tables all render properly
+  - **Syntax Highlighting**: Code examples in responses are highlighted for readability
+  - **Clean Typography**: Using Tailwind's typography plugin for professional prose styling
+  - **User Messages**: Remain plain text (as typed) for simplicity
+  - **Implementation**: Added react-markdown and remark-gfm libraries
+- **Enhanced Progress Indicators**: Much more visible feedback during AI operations
+  - **Prominent Blue Boxes**: Progress events now displayed in colored, bordered containers
+  - **Animated Dots**: Each event shows pulsing dot indicator for clear visual feedback
+  - **Better Separation**: Progress clearly separated from main response content
+  - **Visible Backgrounds**: Blue background and border for high visibility
+- **Improved Thinking State**: Better feedback when Claude is processing
+  - **"Claude is thinking..." Text**: Clear message alongside bouncing dots
+  - **Blue Theme**: Consistent with app color scheme
+  - **Proper Timing**: Only shows before assistant response appears
+  - **Visual Consistency**: Matches other progress indicators
+- **Bug Fixes**:
+  - Fixed deprecated `onKeyPress` API → replaced with `onKeyDown`
+  - Proper handling of Enter key for sending messages
+  - Maintains Shift+Enter for new lines
+- **Impact**:
+  - Chat is now professional and easy to read
+  - Code examples are highlighted and formatted beautifully
+  - Users can clearly see when Claude is working and what it's doing
+  - No more raw markdown cluttering the interface
+  - Polished, production-ready chat experience
+- **Files**: src/components/AiChatPanel.jsx, package.json (react-markdown, remark-gfm)
+- **Documentation**: features/ai-assistant/done.md, features/ai-assistant/todo.md
+
+### December 2025
+
+**Development: Fixed port conflict preventing dev server from starting (Dec 27, 2025)**
+- **Bug Fix**: Resolved critical issue where development server wouldn't start
+  - **Root Cause**: Port 1420 was already in use by zombie processes from previous dev server instances
+  - **Solution**: Terminate existing processes using `pkill -f "npm run tauri dev" && pkill -f "vite"`
+  - **Impact**: Development environment now reliably starts without manual intervention
+  - Location: features/todo.md critical issues section
+
+**AI Chat: Smart session naming & rename functionality (Dec 27, 2025)**
+- **Chat History Improvements**: Dramatically improved chat session naming and management
+  - **Smart Title Generation**: Auto-generates meaningful titles from first user message
+    - Removes common prefixes ("can you", "please", "help me", etc.)
+    - Capitalizes and truncates intelligently at word boundaries
+    - Examples: "can you help debug?" → "Help debug", "Create data pipeline..." → "Create data pipeline..."
+  - **Rename Functionality**: Added inline session renaming with edit icon on hover
+    - Click edit icon → input field appears
+    - Press Enter to save, Escape to cancel, blur to save
+    - Updates database with new title and timestamp
+  - **Better Metadata Display**: Shows relative timestamps and model info
+    - "just now", "5m ago", "2h ago", "3d ago" format
+    - Model name displayed alongside time (e.g., "2h ago · Sonnet 4.5")
+    - Bold titles for better visual hierarchy
+  - **Impact**:
+    - Chat history is now easy to browse and search through
+    - No more generic "New Chat" titles
+    - Users can find specific conversations quickly
+    - Cleaner, more professional UI
+
+**AI Chat: Fixed blank responses bug (Dec 27, 2025)**
+- **Bug Fix**: Fixed critical issue causing AI assistant to return blank responses
+  - **Root Causes**:
+    1. For messages requiring approval: Enhanced prompt was only used during plan, not execution
+    2. For simple messages: Plan mode response was shown directly (plan mode analyzes but doesn't execute)
+  - **Solutions**:
+    - **Fix #1**: Added `pendingEnhancedPrompt` state and updated `handleApprove()` to use enhanced prompt
+    - **Fix #2**: Changed no-changes path from showing plan response to executing with streaming
+    - Both paths now use enhanced prompt with full project context
+    - Added streaming event listeners for real-time content updates
+    - Proper error handling and cleanup in all execution paths
+  - **Impact**:
+    - AI responses now include proper content in ALL scenarios (simple questions + approved changes)
+    - Claude has consistent context across plan and execution phases
+    - Users get meaningful, helpful responses instead of blank messages
+    - Project context (notebooks, best practices) preserved throughout conversation
+    - Same streaming UX for all responses (progress indicators, real-time updates)
+- **Files**: src/components/AiSidebar.jsx
+- **Documentation**: features/ai-assistant/done.md
+
+**AI Chat: Auto-start chat session on project open (Dec 27, 2025)**
+- **Feature**: Fresh chat sessions automatically created when opening a project
+  - **Backend Changes**:
+    - Added `project_root` field to `ChatSession` struct and database schema
+    - Created `get_or_create_project_session()` function that always creates a new session
+    - New Tauri command `get_or_create_project_chat_session` for frontend integration
+    - Database migration automatically adds `project_root` column to existing sessions
+  - **Frontend Changes**:
+    - Modified `loadProjectFromPath()` in App.jsx to auto-create chat session
+    - Added `initialSession` prop to AiChatPanel component
+    - New useEffect in AiChatPanel watches for initialSession and loads it automatically
+    - All new sessions (manual or auto-created) are associated with current project
+  - **User Experience**:
+    - No need to manually create a chat session when opening a project
+    - Every project open starts with a clean slate for conversation
+    - Previous chat sessions are preserved in the history sidebar
+    - Each session is tagged with the project it was created for (easy to find later)
+  - **Technical Details**:
+    - Always creates new session with project_root for organization
+    - Previous sessions remain in database and accessible via history
+    - Default model (Sonnet 4.5) set for new project sessions
+- **Files**: src-tauri/src/chat_sessions.rs, src-tauri/src/lib.rs, src/App.jsx, src/components/AiChatPanel.jsx
+- **Documentation**: features/ai-assistant/done.md, features/ai-assistant/docs.md
+
+**AI Chat: Improved error handling and UX (Dec 27, 2025)**
+- **Bug Fix**: Fixed poor error handling when Claude CLI fails
+  - **Issue**: When errors occurred, user would see both a streaming placeholder (with blinking cursor) AND an error message
+  - **Root Cause**: Error handler added new error message but never cleaned up the streaming placeholder message
+  - **Impact**: Confusing UI with orphaned streaming messages, unclear error states
+  - **Solution**:
+    - Error handler now finds and replaces the streaming placeholder with error content
+    - Removed `isStreaming` flag and set `isError` flag on the message
+    - Added user-friendly error message: "I encountered an error: [details]. Please try again or rephrase your request."
+    - Fallback logic if streaming message not found (defensive programming)
+  - **Fixed Locations**:
+    - AiChatPanel.jsx:352-378 - Clean up streaming message on error
+    - AiSidebar.jsx:410-436 - Clean up streaming message on error in handleApprove
+  - **Result**: Clean error states, no orphaned UI elements, better error messages
+- **Files**: src/components/AiChatPanel.jsx, src/components/AiSidebar.jsx
+
+**AI Chat: Fixed duplicate message race condition (Dec 27, 2025)**
+- **Bug Fix**: Resolved duplicate messages appearing when Enter is pressed rapidly
+  - **Issue**: Same user message would appear 2-3 times in chat history
+  - **Root Cause**: Race condition - `sending` state was set after adding message to UI state
+  - **Impact**: If user pressed Enter multiple times quickly, `handleSend()` would execute multiple times before `sending` became true
+  - **Solution**: Move `setSending(true)` to execute immediately after validation check, before message creation
+  - **Fixed Locations**:
+    - AiChatPanel.jsx:176 - Set sending state before creating message
+    - AiSidebar.jsx:215 - Set sending state before creating message
+  - **Result**: Chat now properly prevents duplicate sends even with rapid key presses
+- **Files**: src/components/AiChatPanel.jsx, src/components/AiSidebar.jsx
+
+**Workbook Viewer: Fixed cell.source TypeError (Dec 27, 2025)**
+- **Bug Fix**: Resolved TypeError when loading notebooks with string-format cell sources
+  - **Issue**: `TypeError: cell.source.join is not a function` when cell.source was a string instead of array
+  - **Root Cause**: Jupyter notebooks support two formats for cell source - array of strings (older format) or single string (newer format)
+  - **Solution**: Created `getCellSourceAsString()` helper function to handle both formats (src/components/WorkbookViewer.jsx:24-29)
+  - **Updated Locations**:
+    - WorkbookCell initialization (line 179)
+    - Run All filtering and execution (lines 1783, 1786)
+  - **Impact**: Workbooks now load and execute correctly regardless of notebook format version
+- **Files**: src/components/WorkbookViewer.jsx
+
+**AI Assistant: Fixed Invalid Permission Mode (Dec 27, 2025)**
+- **Bug Fix**: Corrected invalid Claude CLI permission mode argument
+  - **Issue**: CLI was using `--permission-mode all` which is not a valid option
+  - **Error**: "error: option '--permission-mode <mode>' argument 'all' is invalid"
+  - **Valid Options**: acceptEdits, bypassPermissions, default, delegate, dontAsk, plan
+  - **Solution**: Changed to `bypassPermissions` for streaming mode (src-tauri/src/claude_cli.rs:266)
+  - **Impact**: AI Assistant streaming functionality now works without errors
+  - **Context**: The `run_streaming` function needed a valid permission mode to allow all tools without prompting
+- **Files**: src-tauri/src/claude_cli.rs
+
+**AI Assistant: Auto-Open Files During Creation/Editing (Dec 27, 2025)**
+- **Feature**: Files automatically open in the UI when Claude creates or edits them
+  - **Auto-Detection**: Detects Write and Edit tool events in real-time
+  - **Instant Opening**: File opens immediately when Claude starts writing/editing
+  - **Type Detection**: Automatically determines file type based on extension (.ipynb, .py, etc.)
+  - **Real-Time Viewing**: Watch content appear as Claude creates it
+  - **Focused Context**: Opened files automatically become context for further conversation
+- **Implementation**:
+  - Added `onOpenFile` callback prop to `AiChatPanel` (passed from `App.jsx`)
+  - Event listener detects tool_use/tool_result events for Write/Edit tools
+  - Extracts file_path from tool input parameters
+  - Calls onOpenFile() with path and type to trigger tab opening
+- **Benefits**: Seamless workflow, no manual file opening, better understanding of AI actions, natural real-time collaboration
+
+**AI Assistant: Model Selection Persistence & Expanded Model List (Dec 27, 2025)**
+- **Feature**: Fixed model selection to persist per-session and show all available models
+  - **Expanded Model List**: Main dropdown now shows all Claude models (Sonnet 4.5, Opus 4.5, Opus Plan, Sonnet, Opus, Haiku, Sonnet 1M, Default)
+  - **Friendly Names**: Models displayed with clear labels and descriptions (e.g., "Sonnet 4.5 - Latest Sonnet (default)")
+  - **Per-Session Persistence**: Each chat session remembers which model was used
+  - **Visual Indicators**: Session list displays model name below chat title
+  - **Auto-Restore**: When loading a session, model selector automatically updates to match
+  - **Simplified UX**: Removed confusing Advanced section with custom model input
+- **Backend**:
+  - Added `model` field to `ChatSession` struct and database schema
+  - Database migration: automatically adds model column to existing sessions table
+  - Updated all CRUD operations to handle model field (create, list, get)
+  - Modified Tauri commands to accept and persist model parameter
+- **Frontend**:
+  - Created `MODEL_OPTIONS` array with all available models and metadata
+  - Added `getModelDisplayName()` helper for friendly names
+  - Updated session creation and loading to save/restore model
+  - Enhanced session list UI to show model context
+  - Default model: `claude-sonnet-4-5-20250929` (latest Sonnet)
+- **Benefits**: All models easily accessible, sessions remember model choice, cleaner UI, better model visibility
+
+**AI Assistant: History Sidebar with Search (Dec 27, 2025)**
+- **Feature**: Redesigned chat history as a filterable sidebar
+  - **Sliding Sidebar**: Slides in from left with overlay backdrop (320px wide)
+  - **Search Filter**: Real-time search input to filter chats by title
+  - **Better Chat List**: Shows title + date, highlights active chat, hover to delete
+  - **Auto-Close**: Loads chat and closes sidebar on click
+  - **Smart States**: Loading, empty, and no-results states
+- **Feature**: Prominent "New Chat" button
+  - **Always Visible**: Button permanently displayed in header with blue styling
+  - **Renamed**: "Sessions" → "History" for clearer purpose
+- **Benefits**: Easier browsing, quick search, familiar UX pattern, cleaner interface
+
 **AI Assistant: Migration to Claude Code CLI (Dec 27, 2025)**
 - **Feature**: Replaced Claude Agent SDK with Claude Code CLI integration
   - **No API Keys**: Users authenticate via Claude Code CLI, no need to manage API keys in Workbooks

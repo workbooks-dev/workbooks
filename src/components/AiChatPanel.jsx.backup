@@ -1,0 +1,760 @@
+import { useState, useEffect, useRef } from "react";
+import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
+import ClaudeApprovalModal from "./ClaudeApprovalModal";
+
+export function AiChatPanel({ projectRoot, aiEnabled, onOpenSettings, focusedFile }) {
+  const [sessions, setSessions] = useState([]);
+  const [activeSession, setActiveSession] = useState(null);
+  const [messages, setMessages] = useState([]);
+  const [inputMessage, setInputMessage] = useState("");
+  const [sending, setSending] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [claudeInstalled, setClaudeInstalled] = useState(null);
+  const [sessionName, setSessionName] = useState(null);
+  const [pendingChanges, setPendingChanges] = useState(null);
+  const [pendingResponse, setPendingResponse] = useState(null);
+  const [pendingPrompt, setPendingPrompt] = useState(null);
+  const [showSessions, setShowSessions] = useState(false);
+  const [projectContext, setProjectContext] = useState(null);
+  const messagesEndRef = useRef(null);
+  const inputRef = useRef(null);
+
+  useEffect(() => {
+    if (aiEnabled) {
+      checkClaudeInstallation();
+      loadSessions();
+    }
+  }, [aiEnabled]);
+
+  useEffect(() => {
+    if (projectRoot && aiEnabled) {
+      loadSessionName();
+      loadProjectContext();
+    }
+  }, [projectRoot, aiEnabled]);
+
+  const loadProjectContext = async () => {
+    try {
+      const context = await invoke("get_project_context", { projectRoot });
+      setProjectContext(context);
+    } catch (err) {
+      console.error("Failed to load project context:", err);
+    }
+  };
+
+  const buildSystemContext = () => {
+    if (!projectContext) return "";
+
+    const notebooksList = projectContext.notebooks.length > 0
+      ? projectContext.notebooks.map(nb => `  - ${nb.relative_path}`).join("\n")
+      : "  (No notebooks found yet)";
+
+    return `# Workbooks Project Context
+
+**Project:** ${projectContext.project_name}
+**Purpose:** Building automations with Jupyter notebooks
+
+## Existing Notebooks
+${notebooksList}
+
+## Your Role
+You are helping build automations using Jupyter notebooks (.ipynb files) in the Workbooks app. When a user asks to automate something:
+
+1. **Check for existing notebooks first:**
+   - Look at the list of existing notebooks above
+   - If a notebook exists that might handle this automation, read its cells using the Read tool
+   - Tell the user what you found and ask if they want to modify it or create a new one
+
+2. **Create new notebooks when needed:**
+   - If no relevant notebook exists, offer to create one
+   - Use the Write tool to create a new .ipynb file in the project root
+   - Start with a basic notebook structure with cells for the automation
+
+3. **Notebook best practices:**
+   - Each automation should be in its own notebook
+   - Use descriptive names like "quickbooks_sync.ipynb" or "data_processing.ipynb"
+   - Include markdown cells explaining what the automation does
+   - Use the workbooks state API to share data between notebooks if needed
+
+4. **Be proactive:**
+   - Don't ask too many questions - make reasonable assumptions
+   - If you see a notebook that looks relevant, read it and tell the user about it
+   - Suggest improvements to existing automations when appropriate
+
+Remember: You have access to all files in this project via the Read, Write, Edit, Glob, and Grep tools. Use them to understand and build automations.`;
+  };
+
+  useEffect(() => {
+    // Auto-scroll to bottom when new messages arrive
+    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [messages]);
+
+  useEffect(() => {
+    // Focus input when component mounts
+    if (inputRef.current) {
+      inputRef.current.focus();
+    }
+  }, []);
+
+  const checkClaudeInstallation = async () => {
+    try {
+      const info = await invoke("check_claude_cli_installed");
+      setClaudeInstalled(info);
+    } catch (err) {
+      console.error("Failed to check Claude installation:", err);
+      setClaudeInstalled({ installed: false, version: null, path: null });
+    }
+  };
+
+  const loadSessionName = async () => {
+    try {
+      const name = await invoke("claude_cli_get_session_name", { projectRoot });
+      setSessionName(name);
+    } catch (err) {
+      console.error("Failed to load session name:", err);
+    }
+  };
+
+  const loadSessions = async () => {
+    try {
+      setLoading(true);
+      const sessionList = await invoke("list_chat_sessions");
+      setSessions(sessionList);
+
+      // Load most recent session by default
+      if (sessionList.length > 0 && !activeSession) {
+        await loadSession(sessionList[0].id);
+      }
+    } catch (err) {
+      console.error("Failed to load chat sessions:", err);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const loadSession = async (sessionId) => {
+    try {
+      const session = await invoke("get_chat_session", { sessionId });
+      setActiveSession(session);
+      setMessages(session.messages || []);
+      setShowSessions(false);
+    } catch (err) {
+      console.error("Failed to load session:", err);
+    }
+  };
+
+  const createNewSession = async () => {
+    try {
+      const session = await invoke("create_chat_session", {
+        title: "New Chat",
+      });
+      setSessions([session, ...sessions]);
+      setActiveSession(session);
+      setMessages([]);
+      setShowSessions(false);
+    } catch (err) {
+      console.error("Failed to create session:", err);
+    }
+  };
+
+  const handleSend = async () => {
+    if (!inputMessage.trim() || sending) return;
+
+    const userMessage = {
+      role: "user",
+      content: inputMessage.trim(),
+      timestamp: Date.now(),
+    };
+
+    // Build comprehensive context
+    let promptWithContext = inputMessage.trim();
+
+    // Add project context (system-level instructions)
+    const systemContext = buildSystemContext();
+    if (systemContext) {
+      promptWithContext = `${systemContext}\n\n---\n\nUser Request: ${inputMessage.trim()}`;
+    }
+
+    // Add focused file context if available
+    if (focusedFile) {
+      promptWithContext = `${systemContext}\n\n[Focused file: ${focusedFile.path}]\n\nUser Request: ${inputMessage.trim()}`;
+    }
+
+    // Add user message immediately
+    setMessages((prev) => [...prev, userMessage]);
+    const prompt = promptWithContext;
+    setInputMessage("");
+    setSending(true);
+
+    try {
+      // Ensure we have a session
+      let chatSessionId = activeSession?.id;
+      if (!chatSessionId) {
+        const newSession = await invoke("create_chat_session", {
+          title: inputMessage.trim().slice(0, 50),
+        });
+        chatSessionId = newSession.id;
+        setActiveSession(newSession);
+        setSessions([newSession, ...sessions]);
+      }
+
+      // Save user message
+      await invoke("add_message_to_session", {
+        sessionId: chatSessionId,
+        role: "user",
+        content: userMessage.content,
+      });
+
+      // Add "analyzing" status message
+      const analyzingMessageIndex = messages.length + 1;
+      const analyzingMessage = {
+        role: "system",
+        content: "🔍 Analyzing request and planning changes...",
+        timestamp: Date.now(),
+        isStatus: true,
+      };
+      setMessages((prev) => [...prev, analyzingMessage]);
+
+      // First, run in plan mode to analyze what Claude wants to do
+      const [response, changes] = await invoke("claude_cli_plan", {
+        prompt,
+        projectRoot,
+        sessionName,
+      });
+
+      // Remove analyzing message
+      setMessages((prev) => prev.filter((_, idx) => idx !== analyzingMessageIndex));
+
+      if (changes && changes.length > 0) {
+        // Changes detected - add plan to chat and show approval modal
+        const planMessage = {
+          role: "assistant",
+          content: response.result,
+          timestamp: Date.now(),
+        };
+        setMessages((prev) => [...prev, planMessage]);
+
+        await invoke("add_message_to_session", {
+          sessionId: chatSessionId,
+          role: "assistant",
+          content: response.result,
+        });
+
+        // Add awaiting approval status
+        const approvalMessage = {
+          role: "system",
+          content: `⏳ Found ${changes.length} action${changes.length !== 1 ? 's' : ''} requiring approval...`,
+          timestamp: Date.now(),
+          isStatus: true,
+        };
+        setMessages((prev) => [...prev, approvalMessage]);
+
+        setPendingChanges(changes);
+        setPendingResponse(response.result);
+        setPendingPrompt(prompt);
+      } else {
+        // No changes - just show the response
+        const assistantMessage = {
+          role: "assistant",
+          content: response.result,
+          timestamp: Date.now(),
+        };
+        setMessages((prev) => [...prev, assistantMessage]);
+
+        await invoke("add_message_to_session", {
+          sessionId: chatSessionId,
+          role: "assistant",
+          content: response.result,
+        });
+      }
+    } catch (err) {
+      console.error("Failed to send message:", err);
+      // Add error message
+      const errorMessage = {
+        role: "assistant",
+        content: `Error: ${err.toString()}`,
+        timestamp: Date.now(),
+        isError: true,
+      };
+      setMessages((prev) => [...prev, errorMessage]);
+    } finally {
+      setSending(false);
+    }
+  };
+
+  const handleApprove = async (allowedTools) => {
+    if (!pendingPrompt || !sessionName) {
+      setPendingChanges(null);
+      setPendingResponse(null);
+      setPendingPrompt(null);
+      return;
+    }
+
+    // Remove "awaiting approval" status message
+    setMessages((prev) => prev.filter((msg) => !msg.isStatus));
+
+    // Add "executing" status message
+    const executingMessage = {
+      role: "system",
+      content: `✅ Approved ${allowedTools.length} tool${allowedTools.length !== 1 ? 's' : ''}. Executing changes...`,
+      timestamp: Date.now(),
+      isStatus: true,
+    };
+    setMessages((prev) => [...prev, executingMessage]);
+
+    setSending(true);
+
+    try {
+      // Add placeholder assistant message for streaming (after status message)
+      const assistantMessageIndex = messages.length + 1; // +1 for the status message we just added
+      const assistantMessage = {
+        role: "assistant",
+        content: "",
+        timestamp: Date.now(),
+        isStreaming: true,
+        progress: [],  // Track progress events
+      };
+      setMessages((prev) => [...prev, assistantMessage]);
+
+      let streamedContent = "";
+      let progressEvents = [];
+
+      // Set up event listener for all Claude events
+      const unlisten = await listen("claude-cli-event", (event) => {
+        const payload = event.payload;
+        const eventType = payload.type;
+
+        // Handle different event types
+        if (eventType === "content") {
+          // Main response content
+          const content = payload.content || "";
+          streamedContent += content;
+          setMessages((prev) => {
+            const newMessages = [...prev];
+            newMessages[assistantMessageIndex] = {
+              ...newMessages[assistantMessageIndex],
+              content: streamedContent,
+            };
+            return newMessages;
+          });
+        } else if (eventType === "tool_use" || eventType === "tool_result") {
+          // Tool usage events (Read, Edit, Bash, etc.)
+          const toolName = payload.tool || payload.name || "Unknown";
+          const toolInput = payload.input || {};
+          const progressMsg = `🔧 Using ${toolName}${toolInput.path ? `: ${toolInput.path}` : ""}`;
+
+          progressEvents.push(progressMsg);
+          setMessages((prev) => {
+            const newMessages = [...prev];
+            newMessages[assistantMessageIndex] = {
+              ...newMessages[assistantMessageIndex],
+              progress: [...progressEvents],
+            };
+            return newMessages;
+          });
+        } else if (eventType === "thinking") {
+          // Thinking/planning events
+          progressEvents.push("💭 Thinking...");
+          setMessages((prev) => {
+            const newMessages = [...prev];
+            newMessages[assistantMessageIndex] = {
+              ...newMessages[assistantMessageIndex],
+              progress: [...progressEvents],
+            };
+            return newMessages;
+          });
+        }
+      });
+
+      // Execute with approved tools
+      const response = await invoke("claude_cli_stream", {
+        prompt: pendingPrompt,
+        projectRoot,
+        sessionName,
+        allowedTools,
+      });
+
+      // Clean up listener
+      unlisten();
+
+      // Remove status message and mark streaming as complete
+      setMessages((prev) => {
+        const newMessages = prev.filter((msg) => !msg.isStatus);
+        const adjustedIndex = assistantMessageIndex - 1; // Adjust for removed status message
+        if (newMessages[adjustedIndex]) {
+          delete newMessages[adjustedIndex].isStreaming;
+          newMessages[adjustedIndex].content = streamedContent || response.result;
+        }
+        return newMessages;
+      });
+
+      // Save assistant message
+      if (activeSession?.id) {
+        await invoke("add_message_to_session", {
+          sessionId: activeSession.id,
+          role: "assistant",
+          content: streamedContent || response.result,
+        });
+      }
+    } catch (err) {
+      console.error("Failed to execute with approval:", err);
+      const errorMessage = {
+        role: "assistant",
+        content: `Error: ${err.toString()}`,
+        timestamp: Date.now(),
+        isError: true,
+      };
+      setMessages((prev) => [...prev, errorMessage]);
+    } finally {
+      setSending(false);
+      setPendingChanges(null);
+      setPendingResponse(null);
+      setPendingPrompt(null);
+    }
+  };
+
+  const handleDeny = () => {
+    // Remove "awaiting approval" status message
+    setMessages((prev) => prev.filter((msg) => !msg.isStatus));
+
+    // Add denial message
+    const denialMessage = {
+      role: "system",
+      content: "❌ Changes denied",
+      timestamp: Date.now(),
+      isStatus: true,
+    };
+    setMessages((prev) => [...prev, denialMessage]);
+
+    // Remove denial message after a moment
+    setTimeout(() => {
+      setMessages((prev) => prev.filter((msg) => !msg.isStatus));
+    }, 2000);
+
+    setPendingChanges(null);
+    setPendingResponse(null);
+    setPendingPrompt(null);
+  };
+
+  const handleKeyPress = (e) => {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      e.stopPropagation();
+      handleSend();
+    }
+  };
+
+  const deleteSession = async (sessionId) => {
+    if (!confirm("Delete this chat session?")) return;
+
+    try {
+      await invoke("delete_chat_session", { sessionId });
+      setSessions(sessions.filter((s) => s.id !== sessionId));
+
+      if (activeSession?.id === sessionId) {
+        setActiveSession(null);
+        setMessages([]);
+      }
+    } catch (err) {
+      console.error("Failed to delete session:", err);
+    }
+  };
+
+  return (
+    <>
+      {pendingChanges && (
+        <ClaudeApprovalModal
+          pendingChanges={pendingChanges}
+          onApprove={handleApprove}
+          onDeny={handleDeny}
+        />
+      )}
+
+      <div className="h-full bg-white flex flex-col">
+        {/* Header */}
+        <div className="px-6 py-4 border-b border-gray-200 bg-white flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <svg
+              className="w-6 h-6 text-blue-600"
+              fill="none"
+              stroke="currentColor"
+              viewBox="0 0 24 24"
+            >
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                strokeWidth={2}
+                d="M8 10h.01M12 10h.01M16 10h.01M9 16H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-5l-5 5v-5z"
+              />
+            </svg>
+            <div>
+              <h2 className="text-lg font-semibold text-gray-900">Claude Code</h2>
+              {focusedFile && (
+                <p className="text-xs text-gray-500">
+                  Focused: <span className="font-mono">{focusedFile.name}</span>
+                </p>
+              )}
+            </div>
+          </div>
+          <div className="flex items-center gap-2">
+            {claudeInstalled && claudeInstalled.version && (
+              <span className="text-xs text-gray-500">
+                v{claudeInstalled.version}
+              </span>
+            )}
+            <button
+              onClick={() => setShowSessions(!showSessions)}
+              className="px-3 py-1.5 text-xs font-medium text-gray-700 bg-white border border-gray-300 rounded hover:bg-gray-50 transition-colors"
+            >
+              {showSessions ? "Hide" : "Sessions"}
+            </button>
+          </div>
+        </div>
+
+        {/* Sessions Dropdown */}
+        {showSessions && (
+          <div className="border-b border-gray-200 bg-gray-50 p-4">
+            <div className="flex items-center justify-between mb-3">
+              <h3 className="text-sm font-semibold text-gray-900">Chat Sessions</h3>
+              <button
+                onClick={createNewSession}
+                className="px-3 py-1.5 text-xs font-medium text-blue-600 bg-blue-50 hover:bg-blue-100 rounded transition-colors"
+              >
+                + New Chat
+              </button>
+            </div>
+            {loading ? (
+              <div className="text-sm text-gray-500">Loading...</div>
+            ) : sessions.length > 0 ? (
+              <div className="space-y-1 max-h-48 overflow-y-auto">
+                {sessions.map((session) => (
+                  <div
+                    key={session.id}
+                    className={`px-3 py-2 rounded cursor-pointer hover:bg-white transition-colors flex items-center justify-between group ${
+                      activeSession?.id === session.id ? "bg-white ring-1 ring-blue-200" : ""
+                    }`}
+                    onClick={() => loadSession(session.id)}
+                  >
+                    <span className="text-sm text-gray-700 truncate flex-1">
+                      {session.title || "Untitled Chat"}
+                    </span>
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        deleteSession(session.id);
+                      }}
+                      className="opacity-0 group-hover:opacity-100 p-1 hover:bg-red-50 rounded transition-all ml-2"
+                      title="Delete session"
+                    >
+                      <svg
+                        className="w-4 h-4 text-red-600"
+                        fill="none"
+                        stroke="currentColor"
+                        viewBox="0 0 24 24"
+                      >
+                        <path
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                          strokeWidth={2}
+                          d="M19 7l-.867 12.142A2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"
+                        />
+                      </svg>
+                    </button>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <div className="text-sm text-gray-500">No sessions yet</div>
+            )}
+          </div>
+        )}
+
+        {/* Claude Not Installed State */}
+        {claudeInstalled && !claudeInstalled.installed ? (
+          <div className="flex-1 flex items-center justify-center px-6 py-12">
+            <div className="text-center max-w-md">
+              <svg
+                className="w-20 h-20 mx-auto mb-6 text-amber-400"
+                fill="none"
+                stroke="currentColor"
+                viewBox="0 0 24 24"
+              >
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  strokeWidth={1.5}
+                  d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"
+                />
+              </svg>
+              <h3 className="text-xl font-semibold text-gray-900 mb-3">
+                Claude Code CLI Not Installed
+              </h3>
+              <p className="text-sm text-gray-600 mb-6">
+                To use the AI assistant, please install Claude Code CLI first
+              </p>
+              <a
+                href="https://claude.com/claude-code"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-block px-6 py-3 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors font-medium"
+              >
+                Install Claude Code
+              </a>
+            </div>
+          </div>
+        ) : !aiEnabled ? (
+          <div className="flex-1 flex items-center justify-center px-6 py-12">
+            <div className="text-center max-w-md">
+              <svg
+                className="w-20 h-20 mx-auto mb-6 text-gray-300"
+                fill="none"
+                stroke="currentColor"
+                viewBox="0 0 24 24"
+              >
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  strokeWidth={1.5}
+                  d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"
+                />
+              </svg>
+              <h3 className="text-xl font-semibold text-gray-900 mb-3">
+                AI Features Disabled
+              </h3>
+              <p className="text-sm text-gray-600 mb-6">
+                Enable AI features in Settings to use the AI assistant
+              </p>
+              <button
+                onClick={onOpenSettings}
+                className="px-6 py-3 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors font-medium"
+              >
+                Open Settings
+              </button>
+            </div>
+          </div>
+        ) : (
+          <>
+            {/* Messages */}
+            <div className="flex-1 overflow-y-auto px-6 py-6 space-y-6">
+              {messages.length === 0 ? (
+                <div className="text-center py-20 text-gray-400">
+                  <svg
+                    className="w-16 h-16 mx-auto mb-4 text-gray-300"
+                    fill="none"
+                    stroke="currentColor"
+                    viewBox="0 0 24 24"
+                  >
+                    <path
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      strokeWidth={1.5}
+                      d="M8 10h.01M12 10h.01M16 10h.01M9 16H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-5l-5 5v-5z"
+                    />
+                  </svg>
+                  <p className="text-lg mb-2">Ask Claude Code to help with your project</p>
+                  <p className="text-sm">Code analysis, debugging, file operations, and more</p>
+                  {focusedFile && (
+                    <p className="text-sm mt-4 text-blue-600">
+                      Currently focused on: <span className="font-mono">{focusedFile.name}</span>
+                    </p>
+                  )}
+                </div>
+              ) : (
+                messages.map((msg, idx) => (
+                  <div
+                    key={idx}
+                    className={`flex ${
+                      msg.role === "user" ? "justify-end" : "justify-start"
+                    }`}
+                  >
+                    <div
+                      className={`max-w-[80%] rounded-lg px-4 py-3 ${
+                        msg.role === "user"
+                          ? "bg-blue-600 text-white"
+                          : msg.isError
+                          ? "bg-red-50 text-red-800 border border-red-200"
+                          : "bg-gray-100 text-gray-800"
+                      }`}
+                    >
+                      {/* Show progress events */}
+                      {msg.progress && msg.progress.length > 0 && (
+                        <div className="mb-3 space-y-1 text-xs text-gray-600 border-b border-gray-300 pb-3">
+                          {msg.progress.map((progress, pIdx) => (
+                            <div key={pIdx} className="flex items-center gap-1">
+                              <span>{progress}</span>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+
+                      <pre className="whitespace-pre-wrap font-sans text-sm">
+                        {msg.content}
+                        {msg.isStreaming && (
+                          <span className="inline-block w-2 h-4 ml-1 bg-gray-800 animate-pulse"></span>
+                        )}
+                      </pre>
+                    </div>
+                  </div>
+                ))
+              )}
+
+              {sending && (
+                <div className="flex justify-start items-center gap-2">
+                  <div className="bg-gray-100 text-gray-800 rounded-lg px-4 py-3">
+                    <div className="flex gap-1">
+                      <div className="w-2 h-2 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: "0ms" }}></div>
+                      <div className="w-2 h-2 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: "150ms" }}></div>
+                      <div className="w-2 h-2 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: "300ms" }}></div>
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              <div ref={messagesEndRef} />
+            </div>
+
+            {/* Input */}
+            <div className="border-t border-gray-200 bg-white px-6 py-4">
+              <div className="flex gap-3">
+                <textarea
+                  ref={inputRef}
+                  value={inputMessage}
+                  onChange={(e) => setInputMessage(e.target.value)}
+                  onKeyPress={handleKeyPress}
+                  onKeyDown={(e) => e.stopPropagation()}
+                  placeholder={focusedFile ? `Ask about ${focusedFile.name}...` : "Ask Claude Code..."}
+                  className="flex-1 px-4 py-3 border border-gray-300 rounded-lg resize-none focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  rows={3}
+                  disabled={sending}
+                />
+                <button
+                  onClick={handleSend}
+                  disabled={!inputMessage.trim() || sending}
+                  className="px-6 bg-blue-600 text-white rounded-lg hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors self-end"
+                >
+                  <svg
+                    className="w-5 h-5"
+                    fill="none"
+                    stroke="currentColor"
+                    viewBox="0 0 24 24"
+                  >
+                    <path
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      strokeWidth={2}
+                      d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8"
+                    />
+                  </svg>
+                </button>
+              </div>
+              <p className="text-xs text-gray-500 mt-2">
+                Press Enter to send, Shift+Enter for new line
+              </p>
+            </div>
+          </>
+        )}
+      </div>
+    </>
+  );
+}

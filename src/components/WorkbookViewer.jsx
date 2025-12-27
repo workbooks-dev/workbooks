@@ -14,6 +14,21 @@ import { vscDarkPlus } from "react-syntax-highlighter/dist/esm/styles/prism";
 import { SecretsWarningModal } from "./SecretsWarningModal";
 
 // ============================================
+// HELPER FUNCTIONS
+// ============================================
+
+/**
+ * Safely converts cell.source to a string
+ * Handles both array format (older Jupyter) and string format (newer Jupyter)
+ */
+function getCellSourceAsString(source) {
+  if (Array.isArray(source)) {
+    return source.join("");
+  }
+  return source || "";
+}
+
+// ============================================
 // STYLING CONSTANTS - DO NOT MODIFY
 // All className strings are defined here
 // Any style changes will be clearly visible in git diff
@@ -161,7 +176,7 @@ function ensureCellIds(cells) {
 
 function WorkbookCell({ cell, index, workbookPath, onUpdate, onDelete, onExecute, onMoveUp, onMoveDown, onClearOutput, isSelected, isEditMode, isRunning, executionElapsed, onSelect, onEnterEditMode, onInsertBelow, autosaveEnabled, swappingCells }) {
   // Initialize content from cell source ONCE on mount - don't sync after that
-  const [content, setContent] = useState(cell.source.join(""));
+  const [content, setContent] = useState(getCellSourceAsString(cell.source));
   const editorRef = useRef(null);
 
   // Check if this cell is being swapped
@@ -1259,7 +1274,8 @@ export function WorkbookViewer({ workbookPath, projectRoot, autosaveEnabled = tr
     // Use functional update to prevent race conditions
     setNotebook(prevNotebook => {
       const newCells = [...prevNotebook.cells];
-      const oldSource = newCells[index].source.join("");
+      // Use helper to safely convert source to string
+      const oldSource = getCellSourceAsString(newCells[index].source);
 
       // Only mark as dirty if content actually changed
       if (oldSource !== newContent) {
@@ -1765,10 +1781,10 @@ export function WorkbookViewer({ workbookPath, projectRoot, autosaveEnabled = tr
     try {
       // Snapshot cell IDs at the start to prevent corruption if cells are reordered during execution
       const cellsToExecute = notebook.cells
-        .filter(cell => cell.cell_type === "code" && cell.source.join("").trim() && cell.metadata?.cell_id)
+        .filter(cell => cell.cell_type === "code" && getCellSourceAsString(cell.source).trim() && cell.metadata?.cell_id)
         .map(cell => ({
           id: cell.metadata.cell_id,
-          code: cell.source.join("")
+          code: getCellSourceAsString(cell.source)
         }));
 
       // Execute all code cells in sequence

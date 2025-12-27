@@ -2,6 +2,443 @@
 
 ## Dec 27, 2024
 
+### Markdown Rendering & Enhanced Progress Indicators
+
+**Dramatically improved chat UX with proper markdown rendering and visible progress feedback**
+
+- [x] Added markdown rendering for AI responses:
+  - Installed `react-markdown` and `remark-gfm` libraries
+  - Assistant messages now render with full GitHub-flavored markdown support
+  - Code blocks properly styled with syntax highlighting
+  - Headers, lists, links, and other markdown elements display correctly
+  - User messages remain plain text (as typed)
+  - Tailwind typography plugin provides beautiful prose styling
+- [x] Enhanced progress indicators:
+  - Progress events now displayed in prominent blue boxes
+  - Each event shows animated pulsing dot indicator
+  - Clear visual separation from main response content
+  - Better visibility with colored backgrounds and borders
+- [x] Improved "thinking" state:
+  - Added "Claude is thinking..." text alongside bouncing dots
+  - Blue theme for better visibility and consistency
+  - Only shows before assistant message appears
+  - Clear feedback that Claude is processing
+- [x] Fixed deprecated API usage:
+  - Replaced `onKeyPress` with `onKeyDown` for textarea
+  - Properly handles Enter key for sending messages
+  - Maintains Shift+Enter for new lines
+- [x] Benefits:
+  - AI responses are now readable and well-formatted
+  - Code examples in responses are syntax-highlighted
+  - Progress feedback is clear and visible
+  - Users can easily tell when Claude is working
+  - Professional, polished chat experience
+  - No more raw markdown text cluttering the UI
+
+## Dec 27, 2024
+
+### Smart Chat Session Naming & Rename Functionality
+
+**Dramatically improved chat history naming and management**
+
+- [x] Added smart title generation from first user message:
+  - Created `generateSmartTitle()` function that extracts meaningful titles
+  - Removes common prefixes ("can you", "please", "i want to", etc.)
+  - Capitalizes first letter and limits to 50 chars at word boundaries
+  - Auto-generates titles for new sessions instead of generic "New Chat"
+  - Auto-updates title when first message is sent to existing session
+- [x] Implemented session rename functionality:
+  - Added `update_session_title()` backend function in chat_sessions.rs
+  - Created `update_chat_session_title` Tauri command
+  - Registered command in lib.rs invoke handler
+  - Updates both title and updated_at timestamp in database
+- [x] Added inline rename UI in session list:
+  - Edit icon appears on hover next to session title
+  - Click edit icon to enter rename mode (input field replaces title)
+  - Press Enter to save, Escape to cancel, or blur to save
+  - Auto-focuses input field when editing starts
+  - Can't select session while editing (prevents accidental switches)
+  - Clean, minimal design matching app aesthetic
+- [x] Improved session list metadata display:
+  - Added `formatRelativeTime()` function for human-friendly timestamps
+  - Shows "just now", "5m ago", "2h ago", "3d ago" format
+  - Displays date for older sessions
+  - Shows model name alongside timestamp (e.g., "2h ago · Sonnet 4.5")
+  - Improved visual hierarchy with bold titles
+- [x] Benefits:
+  - Chat history is now much easier to browse and find
+  - Titles are descriptive and meaningful ("Debug login error", "Create data pipeline")
+  - No more generic "New Chat" or truncated text
+  - Users can customize titles to their preference
+  - Relative timestamps make it easy to find recent conversations
+  - Model info visible at a glance in history
+- [x] Examples of smart titles:
+  - "can you help me debug this?" → "Help me debug this"
+  - "Create a new workbook for data processing" → "Create a new workbook for data processing"
+  - "please fix the authentication error in login.py" → "Fix the authentication error in login.py"
+
+## Dec 27, 2024
+
+### Fixed Blank AI Assistant Responses
+
+**Fixed critical bug causing blank responses from AI assistant**
+
+- [x] Identified root causes:
+  1. **For messages requiring approval**: Enhanced prompt (with project context) was only used during plan phase, not execution
+  2. **For simple messages**: Plan mode response was shown directly, but plan mode only analyzes without executing
+- [x] Fix #1 - Enhanced prompt for approved changes:
+  - Added `pendingEnhancedPrompt` state to store enhanced prompt alongside original
+  - Modified `handleSend()` to save both prompts when changes detected
+  - Updated `handleApprove()` to use `pendingEnhancedPrompt || pendingPrompt` during execution
+  - Updated all cleanup code to clear enhanced prompt state
+- [x] Fix #2 - Execute streaming for simple messages:
+  - Changed no-changes path from showing plan response to executing with streaming
+  - Added streaming event listener for content, tool usage, and thinking events
+  - Uses enhanced prompt with full project context
+  - Properly handles errors and cleanup
+  - Same streaming UX as approval path (progress indicators, real-time updates)
+- [x] Benefits:
+  - AI responses now include proper content and context in ALL cases
+  - Simple questions get proper answers (not blank plan mode responses)
+  - Changes requiring approval get full context during execution
+  - Claude has consistent context across plan and execution phases
+  - Users get meaningful, helpful responses instead of blank messages
+  - Project context is preserved throughout the conversation
+
+## Dec 27, 2024
+
+### Auto-Start Chat Session on Project Open
+
+**Chat sessions now automatically start when you open a project**
+
+- [x] Added `project_root` field to `ChatSession` struct and database:
+  - Associates chat sessions with specific projects
+  - Database automatically migrates existing sessions (adds project_root column)
+  - Enables finding the most recent chat for a project
+- [x] Created `get_or_create_project_session` backend function:
+  - Always creates a new chat session when opening a project
+  - Creates new session with "{Project Name} Chat" title
+  - Previous sessions remain in database and accessible via chat history
+  - Default model is set to Sonnet 4.5
+- [x] Updated `create_chat_session` to accept optional `project_root`:
+  - All new sessions can be associated with a project
+  - Manual "New Chat" creation also associates with current project
+- [x] Added Tauri command `get_or_create_project_chat_session`:
+  - Registered in lib.rs invoke handler
+  - Accepts project root path and project name
+  - Returns session with full message history
+- [x] Modified `loadProjectFromPath` in App.jsx:
+  - Automatically calls `get_or_create_project_chat_session` when project opens
+  - Sets returned session as `initialChatSession` state
+  - Passes session to AiChatPanel component
+- [x] Updated AiChatPanel to handle `initialSession` prop:
+  - New useEffect watches for initialSession changes
+  - Automatically loads session messages and sets as active
+  - Restores model preference from session
+  - Adds session to sessions list if not already present
+- [x] Benefits:
+  - No need to manually create a chat session when opening a project
+  - Every project open starts with a clean slate for conversation
+  - Previous chat sessions are preserved in the history sidebar
+  - Each session is tagged with the project it was created for
+  - Seamless experience - AI is ready to chat immediately
+
+## Dec 27, 2024
+
+### Auto-Open Files During AI Creation/Editing
+
+**Files automatically open in the UI when Claude creates or edits them**
+
+- [x] Added `onOpenFile` callback prop to `AiChatPanel`:
+  - Passed from `App.jsx` to allow AI chat to trigger file opening
+  - Enables automatic file opening when Claude uses Write or Edit tools
+- [x] Implemented auto-file-opening logic in event listener:
+  - Detects `tool_use` and `tool_result` events with type Write or Edit
+  - Extracts `file_path` from tool input parameters
+  - Determines file type based on extension (.ipynb → workbook, .py → python, etc.)
+  - Calls `onOpenFile()` to automatically open the file in the right panel
+- [x] Real-time file viewing:
+  - File opens immediately when Claude starts writing
+  - User sees content appear as Claude creates it
+  - Works for both new files (Write) and modifications (Edit)
+  - Seamless experience - no manual file opening needed
+- [x] Updated documentation:
+  - Added auto-file-opening to user flow in docs.md
+  - Documented technical implementation in Event System section
+  - Explains how file type detection and opening works
+- [x] Benefits:
+  - Watch Claude create files in real-time
+  - No need to manually find and open files Claude creates
+  - Natural workflow - see changes as they happen
+  - Better understanding of what Claude is doing
+  - Files automatically become focused context for further conversation
+
+## Dec 27, 2024
+
+### Model Selection Persistence & Expanded Model List
+
+**Fixed model selection persistence and added more model options**
+
+- [x] Expanded model selector dropdown:
+  - Added all latest Claude models to main dropdown (not just Advanced section)
+  - Now includes: Sonnet 4.5, Opus 4.5, Opus Plan, Sonnet, Opus, Haiku, Sonnet 1M, Default
+  - Each model shows friendly name and description
+  - Removed confusing Advanced section with custom input
+  - Models displayed with proper formatting (e.g., "Sonnet 4.5" instead of "claude-sonnet-4-5-20250929")
+- [x] Added per-session model persistence:
+  - Added `model` field to `ChatSession` struct and database schema
+  - Database automatically migrates existing sessions (adds model column if missing)
+  - Model selection is now saved with each chat session
+  - When loading a session, the model selector automatically updates to match the session's model
+  - Session list displays which model was used for each chat
+- [x] Updated backend (Rust):
+  - Modified `ChatSession` struct to include `model: Option<String>` field
+  - Updated database schema to add `model TEXT` column to sessions table
+  - Modified `create_session()` to accept and store model parameter
+  - Updated all database queries to handle model field (create, list, get)
+  - Updated Tauri command signature to accept model parameter
+- [x] Updated frontend (React):
+  - Created `MODEL_OPTIONS` array with all available models and descriptions
+  - Added `getModelDisplayName()` helper function for friendly names
+  - Modified `createNewSession()` to pass current model when creating sessions
+  - Modified `loadSession()` to restore model from session data
+  - Updated session list UI to display model name below chat title
+  - Removed Advanced section with custom model input (simplified UX)
+  - Default model changed to `claude-sonnet-4-5-20250929` (latest Sonnet)
+- [x] Benefits:
+  - All available Claude models are now easily accessible in main dropdown
+  - Each chat session remembers which model was used
+  - Easier to switch between models without losing track
+  - Session list shows model context at a glance
+  - Cleaner, more user-friendly model selection UI
+  - No need to type model IDs manually
+
+## Dec 27, 2024
+
+### History Sidebar with Search Filter
+
+**Redesigned chat history as a filterable sidebar**
+
+- [x] Created sliding sidebar for chat history:
+  - Slides in from left with semi-transparent overlay
+  - Full-height sidebar (320px wide)
+  - Click overlay or X button to close
+- [x] Added search filter:
+  - Input field at top of sidebar
+  - Filters chats by title in real-time
+  - Shows "No chats matching..." when no results
+- [x] Improved chat list UX:
+  - Shows title and last updated date for each chat
+  - Active chat highlighted with blue left border
+  - Delete button appears on hover
+  - Click chat to load and auto-close sidebar
+- [x] Better empty/loading states:
+  - Loading indicator while fetching chats
+  - Empty state when no chats exist
+  - No results state when filter doesn't match
+- [x] Benefits:
+  - Easier to browse through many chats
+  - Quick search to find specific conversations
+  - Cleaner than dropdown - doesn't push content down
+  - More familiar pattern (like ChatGPT, etc.)
+
+### Prominent New Chat Button
+
+**Made creating new chats more discoverable**
+
+- [x] Added dedicated "New Chat" button to header:
+  - Always visible next to "History" button
+  - Blue styling to stand out as primary action
+  - Plus icon for clear visual indication
+- [x] Renamed "Sessions" to "History":
+  - More user-friendly terminology
+  - Clearer purpose ("view past chats")
+- [x] Benefits:
+  - More discoverable - new users don't miss the feature
+  - Faster workflow - one less click to start fresh chat
+  - Clear visual hierarchy in header
+
+## Dec 27, 2024
+
+### Removed Permission Approval Workflow
+
+**Made AI chat fully autonomous with pre-approved tools**
+
+- [x] Removed plan-then-approve workflow:
+  - Eliminated `claude_cli_plan` call that ran in plan mode first
+  - No longer shows `ClaudeApprovalModal` for common operations
+  - Removed pending changes, pending response, and pending prompt state
+  - Removed `handleApprove` and `handleDeny` functions
+  - Removed `ClaudeApprovalModal` component import and rendering
+- [x] Pre-approved common tools for Workbooks AI chat:
+  - Read, Write, Edit, Bash, Glob, Grep, Task automatically allowed
+  - Users expect Claude to be able to work with files and run commands
+  - The app context itself provides the permission boundary
+- [x] Simplified user experience:
+  - No permission prompts when chatting with Claude
+  - Direct streaming execution with approved tools
+  - Cleaner, faster workflow - just ask and Claude does it
+  - Progress indicators show what Claude is doing (reading files, editing, etc.)
+- [x] Cleaned up UI:
+  - Removed `isPlanning` message type and rendering logic
+  - Removed planning phase progress tracking
+  - Simplified message rendering code
+- [x] Benefits:
+  - Natural conversation flow - no interruptions
+  - Faster execution - no approval step
+  - Users chose to use Workbooks app for automation - permission is implicit
+  - Still see progress indicators for transparency (what Claude is doing)
+  - Consistent with other AI coding assistants that work within app context
+
+## Dec 27, 2024
+
+### Project Context Injection
+
+**Added Workbooks-specific context awareness**
+
+- [x] Created `get_project_context` Tauri command:
+  - Scans project directory for all `.ipynb` files
+  - Returns project name, root path, and list of notebooks
+  - Uses `walkdir` crate to recursively find notebooks
+  - Skips hidden directories and `.workbooks` folder
+- [x] Added context injection to AI Chat:
+  - `buildSystemContext()` function creates comprehensive system prompt
+  - Explains Workbooks purpose: building automations with notebooks
+  - Lists all existing notebooks in the project
+  - Provides instructions for handling automation requests
+- [x] Context-aware prompts include:
+  - Project name and purpose
+  - List of existing notebooks with relative paths
+  - Instructions to check existing notebooks before creating new ones
+  - Best practices for notebook naming and structure
+  - Guidance on using the Workbooks state API
+- [x] Benefits:
+  - Claude now understands it's working with Workbooks automations
+  - Automatically checks for existing notebooks before creating new ones
+  - Proactively reads relevant notebooks when user asks to automate tasks
+  - Suggests improvements to existing automations
+  - No need for users to explain the project structure
+- [x] Example behavior:
+  - User: "I need to automate quickbooks pulls"
+  - Claude: Checks existing notebooks list, reads relevant ones if found
+  - If no notebook exists, offers to create `quickbooks_sync.ipynb`
+  - If notebook exists, reads it and explains what it does
+
+### AI-First Interface Redesign
+
+**Made Claude Code chat the primary interface for projects**
+
+- [x] Created new `AiChatPanel.jsx` component for main panel display
+  - Designed for wider layout (optimized for main panel vs narrow sidebar)
+  - Always visible when project is open (no toggle needed)
+  - Shows focused file context in header
+  - Collapsible session switcher
+  - Larger, more comfortable chat interface
+- [x] Removed `AiSidebar.jsx` integration:
+  - Removed AI sidebar toggle button from tab bar
+  - Removed AI sidebar state management (width, resizing, open/close)
+  - Removed right sidebar from layout grid
+- [x] Implemented split-view layout in `App.jsx`:
+  - AI chat panel always visible in main area
+  - When no file is open: AI chat takes full width
+  - When file is open: 50/50 split (AI left, file viewer right)
+  - Tab bar only shows when files are open
+- [x] Added focused file context system:
+  - Active tab's file info passed to `AiChatPanel` as `focusedFile` prop
+  - Includes: `path`, `name`, `type`
+  - Automatically prepends file context to user prompts: `[Focused file: path]`
+  - Shows focused file in AI chat header
+  - Placeholder text changes to "Ask about filename.py..."
+- [x] Updated architecture documentation:
+  - Changed "Why right sidebar?" → "Why main panel?"
+  - Updated user flow to reflect AI-first experience
+  - Documented focused file context system
+  - Updated technical implementation details
+- [x] Benefits:
+  - AI is the primary way to interact with projects
+  - No friction to start chatting (always visible)
+  - Natural workflow: view file + chat about it side-by-side
+  - Claude automatically knows what file you're working on
+  - Clean, focused interface with AI front and center
+
+## Dec 27, 2024
+
+### Model Selection
+
+**Added ability to choose Claude Code models**
+
+- [x] Added `model` parameter to all CLI functions:
+  - `run_plan_mode()` - Accepts optional model parameter
+  - `run_with_approval()` - Accepts optional model parameter
+  - `run_streaming()` - Accepts optional model parameter
+  - Passes model to CLI using `--model` flag
+- [x] Updated all Tauri commands to accept and forward model parameter:
+  - `claude_cli_plan` - Now accepts `model: Option<String>`
+  - `claude_cli_execute` - Now accepts `model: Option<String>`
+  - `claude_cli_stream` - Now accepts `model: Option<String>`
+- [x] Implemented model selector UI in `AiChatPanel.jsx`:
+  - Dropdown in header showing current model (haiku/sonnet/opus)
+  - Click to toggle dropdown with all available models
+  - Selected model highlighted with checkmark
+  - Clean, minimal design matching app aesthetic
+  - Positioned next to "Claude Code" title in the chat header
+- [x] Model preference persistence:
+  - Saves selected model to localStorage with key `claude-model`
+  - Automatically loads saved preference on component mount
+  - Defaults to "sonnet" if no preference saved
+- [x] All model selections passed to CLI invocations:
+  - Plan mode receives selected model
+  - Streaming execution receives selected model
+  - Session continuations preserve model choice
+- [x] Benefits:
+  - Users can choose speed vs quality tradeoff (haiku/sonnet/opus)
+  - Model preference persists across app restarts
+  - Easy to switch models mid-session
+  - Future-proof for new model versions
+
+### Verbose Output & Progress Indicators
+
+**Added real-time progress visibility for Claude Code CLI**
+
+- [x] Added CLI flags for better visibility:
+  - `--verbose` - Shows tool usage details
+  - `--include-partial-messages` - Includes all streaming events
+- [x] Updated streaming to emit all event types (not just content):
+  - `content` events - Main response text
+  - `tool_use` events - When Claude uses Read, Edit, Bash, etc.
+  - `tool_result` events - Results from tool execution
+  - `thinking` events - When Claude is planning/thinking
+- [x] Changed event handling from simple strings to JSON objects
+- [x] Updated frontend to display progress events:
+  - Shows tool usage with icons (🔧 Using Read: file.txt)
+  - Shows thinking indicators (💭 Thinking...)
+  - Progress events shown above main response
+  - Separated visually with border
+- [x] Event name changed: `claude-cli-chunk` → `claude-cli-event`
+- [x] Benefits:
+  - Users can see what Claude is doing in real-time
+  - No more wondering why it's slow - see the file reads, edits, etc.
+  - Better UX with progress feedback
+  - Helps debug issues (can see which files Claude is accessing)
+
+### Session ID Conflict Fix
+
+**Fixed "Session ID is already in use" error**
+
+- [x] Changed from `--session-id` with UUIDs to `--resume` with session names
+  - Problem: Claude Code CLI tracks active sessions and UUIDs caused conflicts
+  - Solution: Use friendly session names like `workbooks-myproject` instead
+  - Generated from project directory name (alphanumeric + hyphens only)
+- [x] Updated all CLI functions to use `session_name` instead of `session_id`:
+  - `run_plan_mode()` - Now uses `--resume` flag
+  - `run_with_approval()` - Now uses `--resume` flag
+  - `run_streaming()` - Now uses `--resume` flag
+- [x] Renamed function: `get_or_create_session_id()` → `get_or_create_session_name()`
+- [x] Updated Tauri command: `claude_cli_get_session_id` → `claude_cli_get_session_name`
+- [x] Updated frontend to use `sessionName` instead of `sessionId`
+- [x] Removed unused imports (Uuid, Arc, Mutex)
+- [x] Simplified PendingChange ID generation (counter instead of UUIDs)
+
 ### Migration to Claude Code CLI
 
 **Replaced Claude Agent SDK with Claude Code CLI integration**

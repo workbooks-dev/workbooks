@@ -5,12 +5,11 @@ import { listen } from "@tauri-apps/api/event";
 import { ask } from "@tauri-apps/plugin-dialog";
 import { getWindowScreenshot, getScreenshotableWindows } from "tauri-plugin-screenshots-api";
 import { writeImage } from "@tauri-apps/plugin-clipboard-manager";
-import { TbLayoutSidebarRight, TbLayoutSidebarRightFilled } from "react-icons/tb";
 import { ActionWindow } from "./components/ActionWindow";
 import { Welcome } from "./components/Welcome";
 import { CreateProject } from "./components/CreateProject";
 import { Sidebar } from "./components/Sidebar";
-import { AiSidebar } from "./components/AiSidebar";
+import { AiChatPanel } from "./components/AiChatPanel";
 import { WorkbookViewer } from "./components/WorkbookViewer";
 import { FileViewer } from "./components/FileViewer";
 import { SecretsManager } from "./components/SecretsManager";
@@ -29,13 +28,8 @@ function App() {
   const [isDragging, setIsDragging] = useState(false);
   const [showSaveDialog, setShowSaveDialog] = useState(false);
   const [pendingClose, setPendingClose] = useState(null); // 'window' or 'tab'
-  const [aiSidebarOpen, setAiSidebarOpen] = useState(false);
   const [aiEnabled, setAiEnabled] = useState(false);
-  const [aiSidebarWidth, setAiSidebarWidth] = useState(() => {
-    const saved = localStorage.getItem('workbooks_ai_sidebar_width');
-    return saved ? parseInt(saved, 10) : 384;
-  });
-  const [isResizingAiSidebar, setIsResizingAiSidebar] = useState(false);
+  const [initialChatSession, setInitialChatSession] = useState(null);
 
   useEffect(() => {
     // Check URL parameters for initial view/project
@@ -68,40 +62,6 @@ function App() {
       console.error("Failed to load AI config:", error);
     }
   }
-
-  // Persist AI sidebar width to localStorage
-  useEffect(() => {
-    localStorage.setItem('workbooks_ai_sidebar_width', aiSidebarWidth.toString());
-  }, [aiSidebarWidth]);
-
-  // Handle AI sidebar resizing
-  useEffect(() => {
-    if (!isResizingAiSidebar) return;
-
-    const handleMouseMove = (e) => {
-      const newWidth = window.innerWidth - e.clientX;
-      // Constrain width between 280px and 800px
-      const constrainedWidth = Math.min(Math.max(newWidth, 280), 800);
-      setAiSidebarWidth(constrainedWidth);
-    };
-
-    const handleMouseUp = () => {
-      setIsResizingAiSidebar(false);
-      document.body.style.cursor = '';
-      document.body.style.userSelect = '';
-    };
-
-    document.body.style.cursor = 'col-resize';
-    document.body.style.userSelect = 'none';
-
-    window.addEventListener('mousemove', handleMouseMove);
-    window.addEventListener('mouseup', handleMouseUp);
-
-    return () => {
-      window.removeEventListener('mousemove', handleMouseMove);
-      window.removeEventListener('mouseup', handleMouseUp);
-    };
-  }, [isResizingAiSidebar]);
 
   // Listen for menu events from native menu
   useEffect(() => {
@@ -571,6 +531,18 @@ function App() {
       });
       console.log("Python environment initialized");
 
+      // Get or create a chat session for this project
+      try {
+        const chatSession = await invoke("get_or_create_project_chat_session", {
+          projectRoot: project.root,
+          projectName: project.name,
+        });
+        console.log("Loaded chat session for project:", chatSession);
+        setInitialChatSession(chatSession);
+      } catch (error) {
+        console.error("Failed to get/create project chat session:", error);
+      }
+
       setCurrentProject(project);
       restoreTabs(project);
       setView("project");
@@ -897,6 +869,13 @@ function App() {
 
   const activeTab = tabs.find((tab) => tab.id === activeTabId);
 
+  // Prepare focused file info for AI
+  const focusedFile = activeTab ? {
+    path: activeTab.path,
+    name: activeTab.name || activeTab.path.split('/').pop(),
+    type: activeTab.type
+  } : null;
+
   return (
     <div className="flex flex-col h-screen w-screen bg-white relative">
       {isDragging && (
@@ -908,12 +887,7 @@ function App() {
         </div>
       )}
 
-      <div
-        className="grid flex-1 overflow-hidden"
-        style={{
-          gridTemplateColumns: aiSidebarOpen ? `256px 1fr ${aiSidebarWidth}px` : '256px 1fr 0px'
-        }}
-      >
+      <div className="grid flex-1 overflow-hidden" style={{ gridTemplateColumns: '256px 1fr' }}>
         <aside className="border-r border-gray-200 bg-gray-50 overflow-y-auto">
           <Sidebar
             projectRoot={currentProject.root}
@@ -925,90 +899,78 @@ function App() {
             activeFilePath={activeTab?.path}
           />
         </aside>
-        <main className="overflow-auto bg-white flex flex-col min-w-0">
-          <div className="flex items-center border-b border-gray-200 bg-white">
-            <div className="flex-1">
-              <TabBar
-                tabs={tabs}
-                activeTabId={activeTabId}
-                onTabSelect={handleTabSelect}
-                onTabClose={handleTabClose}
+        <main className="overflow-hidden bg-white flex flex-col min-w-0">
+          {/* Tab Bar - only show when there are tabs */}
+          {tabs.length > 0 && (
+            <div className="flex items-center border-b border-gray-200 bg-white">
+              <div className="flex-1">
+                <TabBar
+                  tabs={tabs}
+                  activeTabId={activeTabId}
+                  onTabSelect={handleTabSelect}
+                  onTabClose={handleTabClose}
+                />
+              </div>
+            </div>
+          )}
+
+          {/* Main Content Area - Split View */}
+          <div className="flex-1 flex overflow-hidden">
+            {/* AI Chat Panel - Always visible */}
+            <div className={`${activeTab ? 'w-1/2 border-r border-gray-200' : 'flex-1'} overflow-hidden`}>
+              <AiChatPanel
+                projectRoot={currentProject.root}
+                aiEnabled={aiEnabled}
+                onOpenSettings={handleOpenSettings}
+                focusedFile={focusedFile}
+                onOpenFile={handleOpenFile}
+                initialSession={initialChatSession}
               />
             </div>
-            {/* AI Assistant Toggle */}
-            <button
-              onClick={() => setAiSidebarOpen(!aiSidebarOpen)}
-              className={`px-3 py-2 border-l border-gray-200 hover:bg-gray-50 transition-colors flex items-center gap-2 ${
-                aiSidebarOpen ? 'bg-blue-50 text-blue-600' : 'text-gray-600'
-              }`}
-              title={aiEnabled ? "Toggle AI Assistant" : "AI Assistant (disabled)"}
-            >
-              {aiSidebarOpen ? (
-                <TbLayoutSidebarRightFilled className="w-5 h-5" />
-              ) : (
-                <TbLayoutSidebarRight className="w-5 h-5" />
-              )}
-              <span className="text-xs font-medium">AI</span>
-              {!aiEnabled && (
-                <span className="w-2 h-2 bg-gray-400 rounded-full" title="AI disabled"></span>
-              )}
-            </button>
-          </div>
-          <div className="h-full">
-            {activeTab ? (
-              activeTab.type === "workbook" ? (
-                <WorkbookViewer
-                  key={activeTab.id}
-                  workbookPath={activeTab.path}
-                  projectRoot={currentProject.root}
-                  onClose={() => handleTabClose(activeTab.id)}
-                  onUnsavedChangesUpdate={(hasChanges) => updateTabUnsavedState(activeTab.id, hasChanges)}
-                />
-              ) : activeTab.type === "secrets" ? (
-                <SecretsManager
-                  key={activeTab.id}
-                  projectRoot={currentProject.root}
-                  onClose={() => handleTabClose(activeTab.id)}
-                />
-              ) : activeTab.type === "schedule" ? (
-                <ScheduleTab
-                  key={activeTab.id}
-                  projectRoot={currentProject.root}
-                  onClose={() => handleTabClose(activeTab.id)}
-                />
-              ) : activeTab.type === "settings" ? (
-                <AppSettings
-                  key={activeTab.id}
-                  onClose={() => handleTabClose(activeTab.id)}
-                />
-              ) : (
-                <FileViewer
-                  key={activeTab.id}
-                  filePath={activeTab.path}
-                  projectRoot={currentProject.root}
-                  isDeleted={activeTab.isDeleted}
-                  onClose={() => handleTabClose(activeTab.id)}
-                  onUnsavedChangesUpdate={(hasChanges) => updateTabUnsavedState(activeTab.id, hasChanges)}
-                  onFileRestored={() => handleFileRestored(activeTab.path)}
-                />
-              )
-            ) : (
-              <div className="flex items-center justify-center h-full text-gray-400">
-                <p>Select a file to open</p>
+
+            {/* File Viewer - Only when a tab is active */}
+            {activeTab && (
+              <div className="flex-1 overflow-auto">
+                {activeTab.type === "workbook" ? (
+                  <WorkbookViewer
+                    key={activeTab.id}
+                    workbookPath={activeTab.path}
+                    projectRoot={currentProject.root}
+                    onClose={() => handleTabClose(activeTab.id)}
+                    onUnsavedChangesUpdate={(hasChanges) => updateTabUnsavedState(activeTab.id, hasChanges)}
+                  />
+                ) : activeTab.type === "secrets" ? (
+                  <SecretsManager
+                    key={activeTab.id}
+                    projectRoot={currentProject.root}
+                    onClose={() => handleTabClose(activeTab.id)}
+                  />
+                ) : activeTab.type === "schedule" ? (
+                  <ScheduleTab
+                    key={activeTab.id}
+                    projectRoot={currentProject.root}
+                    onClose={() => handleTabClose(activeTab.id)}
+                  />
+                ) : activeTab.type === "settings" ? (
+                  <AppSettings
+                    key={activeTab.id}
+                    onClose={() => handleTabClose(activeTab.id)}
+                  />
+                ) : (
+                  <FileViewer
+                    key={activeTab.id}
+                    filePath={activeTab.path}
+                    projectRoot={currentProject.root}
+                    isDeleted={activeTab.isDeleted}
+                    onClose={() => handleTabClose(activeTab.id)}
+                    onUnsavedChangesUpdate={(hasChanges) => updateTabUnsavedState(activeTab.id, hasChanges)}
+                    onFileRestored={() => handleFileRestored(activeTab.path)}
+                  />
+                )}
               </div>
             )}
           </div>
         </main>
-        {/* AI Sidebar - integrated into flex layout */}
-        <AiSidebar
-          projectRoot={currentProject.root}
-          isOpen={aiSidebarOpen}
-          onToggle={() => setAiSidebarOpen(!aiSidebarOpen)}
-          aiEnabled={aiEnabled}
-          onOpenSettings={handleOpenSettings}
-          width={aiSidebarWidth}
-          onResizeStart={() => setIsResizingAiSidebar(true)}
-        />
       </div>
 
       {/* Save confirmation dialog */}
