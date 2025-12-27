@@ -1,8 +1,9 @@
 """FastAPI server setup and configuration."""
 
+from contextlib import asynccontextmanager
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from contextlib import asynccontextmanager
 
 from workbooks_engine.config import logger
 
@@ -19,7 +20,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Workbooks Engine Server",
     description="Jupyter kernel management and AI agent",
-    version="0.1.0",
+    version="0.0.1",
     lifespan=lifespan,
 )
 
@@ -32,15 +33,14 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
 # Temporary health endpoint (will be moved to routes/health.py)
 @app.get("/health")
 async def health_check():
     """Health check endpoint."""
     from workbooks_engine.config import engines
-    return {
-        "status": "healthy",
-        "active_engines": len(engines)
-    }
+
+    return {"status": "healthy", "active_engines": len(engines)}
 
 
 logger.info("Workbooks engine server initialized")

@@ -214,7 +214,7 @@ sudo cp target/release/workbooks /usr/local/bin/
 
 ```bash
 workbooks --version
-# Output: workbooks 0.1.0
+# Output: workbooks 0.0.1
 ```
 
 ## CLI Commands
@@ -530,9 +530,9 @@ workbooks version
 
 **Output:**
 ```
-workbooks 0.1.0
-workbooks-app 0.1.0
-engine-server 0.1.0
+workbooks 0.0.1
+workbooks-app 0.0.1
+engine-server 0.0.1
 Python: 3.11.7
 UV: 0.5.0
 ```

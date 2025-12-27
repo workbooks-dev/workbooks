@@ -70,7 +70,7 @@ The project version is defined in three locations:
 **For bug fixes and minor changes (patch bump):**
 ```bash
 npm run version
-# Auto-increments: 0.1.0 → 0.1.1
+# Auto-increments: 0.0.1 → 0.1.1
 ```
 
 **For new features (minor bump):**

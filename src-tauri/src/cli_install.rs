@@ -46,7 +46,7 @@ pub async fn get_installed_cli_version() -> Result<Option<String>, String> {
         if let Ok(output) = output {
             if output.status.success() {
                 let version_str = String::from_utf8_lossy(&output.stdout);
-                // Parse "workbooks 0.1.0" to get just "0.1.0"
+                // Parse "workbooks 0.0.1" to get just "0.0.1"
                 if let Some(version) = version_str.split_whitespace().nth(1) {
                     return Ok(Some(version.trim().to_string()));
                 }
