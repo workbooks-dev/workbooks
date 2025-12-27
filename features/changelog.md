@@ -6,6 +6,28 @@ This file tracks major features and improvements as they're completed.
 
 ### December 2025
 
+**AI Assistant: Migration to Claude Code CLI (Dec 27, 2025)**
+- **Feature**: Replaced Claude Agent SDK with Claude Code CLI integration
+  - **No API Keys**: Users authenticate via Claude Code CLI, no need to manage API keys in Workbooks
+  - **Installation Check**: Automatically detects if Claude Code is installed on startup
+  - **Session Persistence**: Uses `--session-id` flag to maintain conversation history per project
+  - **Two-Phase Workflow**: Plan mode → Approval → Execute ensures user control
+  - **Approval Modal**: New UI shows pending changes with tool-by-tool approval (ClaudeApprovalModal.jsx)
+  - **Tool Permissions**: Users can selectively approve Read, Edit, Write, Bash operations
+  - **Streaming Support**: Real-time output streaming during execution
+  - **Project Sessions**: Each project gets its own Claude session ID stored in `.workbooks/claude_session`
+- **Backend**:
+  - New `claude_cli.rs` module handles CLI execution (src-tauri/src/claude_cli.rs)
+  - Commands: `check_installation()`, `run_plan_mode()`, `run_with_approval()`, `run_streaming()`
+  - Six new Tauri commands: `check_claude_cli_installed`, `claude_cli_plan`, `claude_cli_execute`, `claude_cli_stream`, `claude_cli_continue`, `claude_cli_get_session_id`
+  - **Cleanup**: Removed old SDK code (`agent.rs`, `/agent/chat` endpoint, SDK dependency)
+- **Frontend**:
+  - Updated AiSidebar.jsx to use CLI instead of SDK
+  - Header changed from "AI Assistant" to "Claude Code"
+  - Installation prompt if Claude CLI not detected
+  - Shows Claude Code version in footer
+- **Benefits**: Better security model, easier user setup, built-in permissions, lower maintenance, no SDK version management
+
 **File System: Auto-Sync, Inline Renaming & Tab Lifecycle (Dec 22, 2025)**
 - **Feature**: File list now stays current with external changes
   - **Backend**: Implemented file system watching using `notify` crate (src-tauri/src/watcher.rs)

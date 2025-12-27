@@ -1,5 +1,52 @@
 # AI Assistant - Completed
 
+## Dec 27, 2024
+
+### Migration to Claude Code CLI
+
+**Replaced Claude Agent SDK with Claude Code CLI integration**
+
+- [x] Removed old SDK dependencies and code:
+  - Removed `claude-agent-sdk>=0.1.18` from `engine_pyproject.toml`
+  - Removed `/agent/chat` endpoint from `engine_server.py` (was lines 1028-1134)
+  - Removed `agent.rs` module (renamed to `agent.rs.deprecated`)
+  - Removed `active_agent_requests` from AppState
+  - Removed `send_agent_message` and `cancel_agent_request` Tauri commands
+- [x] Created `claude_cli.rs` module for CLI integration (src-tauri/src/claude_cli.rs)
+  - Installation detection with `check_installation()`
+  - Plan mode execution with `run_plan_mode()` - analyzes without executing
+  - Execution with approval via `run_with_approval()`
+  - Streaming support with `run_streaming()`
+  - Session management with project-specific session IDs
+- [x] Added Tauri commands for Claude CLI:
+  - `check_claude_cli_installed` - Detects if Claude Code is installed
+  - `claude_cli_plan` - Runs in plan mode, returns proposed changes
+  - `claude_cli_execute` - Executes with approved tools
+  - `claude_cli_stream` - Real-time streaming execution
+  - `claude_cli_continue` - Continues last session
+  - `claude_cli_get_session_id` - Gets/creates session ID for project
+- [x] Created `ClaudeApprovalModal.jsx` component
+  - Shows pending file changes before execution
+  - Tool-by-tool approval with checkboxes
+  - Preview of Claude's plan
+  - Select all/deselect all functionality
+  - Color-coded tool badges (Bash=amber, Edit=green, Write=purple)
+- [x] Updated `AiSidebar.jsx` to use Claude CLI:
+  - Added Claude CLI installation check on startup
+  - Changed header from "AI Assistant" to "Claude Code"
+  - Two-phase workflow: plan → approval → execute
+  - Integration with approval modal
+  - Session ID tracking per project (stored in `.workbooks/claude_session`)
+  - Shows Claude Code version in footer
+  - Installation prompt if Claude CLI not found
+- [x] Benefits of this migration:
+  - No API key management needed (uses user's Claude Code auth)
+  - Better file access and permissions model
+  - Built-in session persistence via `--session-id`
+  - Explicit approval for all file changes
+  - Easier for users (just install Claude Code CLI)
+  - Lower maintenance burden
+
 ## Dec 21, 2024
 
 ### Initial Implementation

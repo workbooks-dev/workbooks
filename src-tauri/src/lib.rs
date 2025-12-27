@@ -10,8 +10,8 @@ mod recent_projects;
 pub mod app_credentials;
 pub mod global_config;
 mod chat_sessions;
-mod agent;
 mod watcher;
+mod claude_cli;
 
 #[cfg(target_os = "macos")]
 mod local_auth_macos;
@@ -34,7 +34,6 @@ pub struct AppState {
     pub engine_server: Arc<Mutex<Option<engine_http::EngineServer>>>,
     pub secrets_manager: Arc<Mutex<Option<secrets::SecretsManager>>>,
     pub scheduler_manager: Arc<Mutex<Option<scheduler::SchedulerManager>>>,
-    pub active_agent_requests: agent::ActiveRequests,
 }
 
 // Learn more about Tauri commands at https://tauri.app/develop/calling-rust/
@@ -1261,6 +1260,75 @@ async fn open_project_window(
     Ok(())
 }
 
+// ==================== CLAUDE CODE CLI COMMANDS ====================
+
+#[tauri::command]
+async fn check_claude_cli_installed() -> Result<claude_cli::ClaudeInstallInfo, String> {
+    Ok(claude_cli::check_installation())
+}
+
+#[tauri::command]
+async fn claude_cli_plan(
+    prompt: String,
+    project_root: String,
+    session_id: Option<String>,
+) -> Result<(claude_cli::ClaudeResponse, Vec<claude_cli::PendingChange>), String> {
+    let path = PathBuf::from(project_root);
+    claude_cli::run_plan_mode(&prompt, &path, session_id.as_deref()).await
+}
+
+#[tauri::command]
+async fn claude_cli_execute(
+    prompt: String,
+    project_root: String,
+    session_id: String,
+    allowed_tools: Vec<String>,
+) -> Result<claude_cli::ClaudeResponse, String> {
+    let path = PathBuf::from(project_root);
+    claude_cli::run_with_approval(&prompt, &path, &session_id, &allowed_tools).await
+}
+
+#[tauri::command]
+async fn claude_cli_stream(
+    prompt: String,
+    project_root: String,
+    session_id: Option<String>,
+    allowed_tools: Option<Vec<String>>,
+    window: tauri::Window,
+) -> Result<claude_cli::ClaudeResponse, String> {
+    let path = PathBuf::from(project_root);
+
+    // Create event name for streaming
+    let event_name = "claude-cli-chunk";
+
+    claude_cli::run_streaming(
+        &prompt,
+        &path,
+        session_id.as_deref(),
+        allowed_tools.as_deref(),
+        move |chunk| {
+            let _ = window.emit(event_name, chunk);
+        }
+    ).await
+}
+
+#[tauri::command]
+async fn claude_cli_continue(
+    prompt: String,
+    project_root: String,
+) -> Result<claude_cli::ClaudeResponse, String> {
+    let path = PathBuf::from(project_root);
+    claude_cli::continue_last_session(&prompt, &path).await
+}
+
+#[tauri::command]
+async fn claude_cli_get_session_id(
+    project_root: String,
+) -> Result<String, String> {
+    let path = PathBuf::from(project_root);
+    claude_cli::get_or_create_session_id(&path)
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     use tauri::menu::{MenuBuilder, MenuItemBuilder, SubmenuBuilder};
@@ -1732,7 +1800,6 @@ pub fn run() {
             engine_server: Arc::new(Mutex::new(None)),
             secrets_manager: Arc::new(Mutex::new(None)),
             scheduler_manager: Arc::new(Mutex::new(None)),
-            active_agent_requests: Arc::new(Mutex::new(std::collections::HashMap::new())),
         })
         .invoke_handler(tauri::generate_handler![
             greet,
@@ -1824,8 +1891,12 @@ pub fn run() {
             chat_sessions::get_chat_session,
             chat_sessions::delete_chat_session,
             chat_sessions::add_message_to_session,
-            agent::send_agent_message,
-            agent::cancel_agent_request,
+            check_claude_cli_installed,
+            claude_cli_plan,
+            claude_cli_execute,
+            claude_cli_stream,
+            claude_cli_continue,
+            claude_cli_get_session_id,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
