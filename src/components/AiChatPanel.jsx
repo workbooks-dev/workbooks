@@ -4,7 +4,7 @@ import { listen } from "@tauri-apps/api/event";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
-export function AiChatPanel({ projectRoot, aiEnabled, onOpenSettings, focusedFile, onOpenFile, initialSession }) {
+export function AiChatPanel({ projectRoot, aiEnabled, onOpenSettings, focusedFile, onOpenFile, onRequestNotebookApproval, initialSession }) {
   const [sessions, setSessions] = useState([]);
   const [activeSession, setActiveSession] = useState(null);
   const [messages, setMessages] = useState([]);
@@ -18,6 +18,7 @@ export function AiChatPanel({ projectRoot, aiEnabled, onOpenSettings, focusedFil
   const [selectedModel, setSelectedModel] = useState("sonnet"); // Default to sonnet
   const [showModelSelector, setShowModelSelector] = useState(false);
   const [chatFilter, setChatFilter] = useState("");
+  const [filesUsed, setFilesUsed] = useState(new Set()); // Track files used in conversation
   const messagesEndRef = useRef(null);
   const inputRef = useRef(null);
 
@@ -130,6 +131,58 @@ Remember: You have access to all files in this project via the Read, Write, Edit
     }
   }, []);
 
+  /**
+   * Handle notebook modification by Claude - trigger approval flow
+   * @param {string} filePath - Path to the modified notebook
+   */
+  const handleNotebookModification = async (filePath) => {
+    try {
+      // Save the current version before modification (if it exists)
+      if (projectRoot) {
+        await invoke("save_notebook_version", {
+          projectRoot: projectRoot,
+          workbookPath: filePath,
+        });
+      }
+
+      // Get the previous version content
+      let oldNotebook = null;
+      try {
+        const previousContent = await invoke("get_previous_notebook_version", {
+          projectRoot: projectRoot,
+          workbookPath: filePath,
+        });
+        if (previousContent) {
+          oldNotebook = JSON.parse(previousContent);
+        }
+      } catch (err) {
+        console.log("No previous version found, treating as new notebook");
+        // If there's no previous version, create an empty notebook structure
+        oldNotebook = {
+          cells: [],
+          metadata: {},
+          nbformat: 4,
+          nbformat_minor: 5
+        };
+      }
+
+      // Read the new (current) notebook content
+      const newContent = await invoke("read_workbook", { workbookPath: filePath });
+      const newNotebook = JSON.parse(newContent);
+
+      // Trigger the approval flow
+      if (onRequestNotebookApproval) {
+        onRequestNotebookApproval(filePath, oldNotebook, newNotebook);
+      }
+    } catch (error) {
+      console.error("Failed to handle notebook modification:", error);
+      // On error, fall back to just opening the file
+      if (onOpenFile) {
+        onOpenFile(filePath, "workbook");
+      }
+    }
+  };
+
   const checkClaudeInstallation = async () => {
     try {
       const info = await invoke("check_claude_cli_installed");
@@ -152,7 +205,8 @@ Remember: You have access to all files in this project via the Read, Write, Edit
   const loadSessions = async () => {
     try {
       setLoading(true);
-      const sessionList = await invoke("list_chat_sessions");
+      // Filter sessions by current project
+      const sessionList = await invoke("list_chat_sessions", { projectRoot });
       setSessions(sessionList);
 
       // Load most recent session by default
@@ -187,9 +241,58 @@ Remember: You have access to all files in this project via the Read, Write, Edit
       setSessions([session, ...sessions]);
       setActiveSession(session);
       setMessages([]);
+      setFilesUsed(new Set());
       setShowHistory(false);
     } catch (err) {
       console.error("Failed to create session:", err);
+    }
+  };
+
+  /**
+   * Generate an AI-based title for the chat session
+   * Uses Claude to analyze the conversation and files used
+   */
+  const generateChatTitle = async (userMsg, assistantMsg, files) => {
+    try {
+      const filesContext = files.size > 0
+        ? `\nFiles involved: ${Array.from(files).map(f => {
+            const parts = f.split('/');
+            return parts[parts.length - 1]; // Just filename
+          }).join(', ')}`
+        : '';
+
+      const prompt = `Based on this conversation, generate a SHORT (max 40 chars) descriptive title. Use the format "Topic - Files" if files are involved, otherwise just "Topic".
+
+User: ${userMsg.slice(0, 200)}
+Assistant: ${assistantMsg.slice(0, 200)}${filesContext}
+
+Return ONLY the title, nothing else. Examples:
+- "Fix login bug - auth.js"
+- "Add dark mode"
+- "Database migration - schema.sql"`;
+
+      const response = await invoke("claude_cli_chat", {
+        prompt,
+        projectRoot: null,
+        model: "haiku", // Use fast model for title generation
+      });
+
+      // Extract just the title from response
+      let title = response.result?.trim() || "Chat";
+
+      // Remove quotes if present
+      title = title.replace(/^["']|["']$/g, '');
+
+      // Truncate if too long
+      if (title.length > 50) {
+        title = title.slice(0, 47) + "...";
+      }
+
+      return title;
+    } catch (err) {
+      console.error("Failed to generate chat title:", err);
+      // Fallback to first message
+      return userMsg.slice(0, 40) + (userMsg.length > 40 ? "..." : "");
     }
   };
 
@@ -224,18 +327,25 @@ Remember: You have access to all files in this project via the Read, Write, Edit
     const prompt = promptWithContext;
     setInputMessage("");
 
+    // Track assistant message index for streaming updates
+    const assistantMessageIndex = messages.length + 1; // +1 for user message we just added
+
     try {
       // Ensure we have a session
       let chatSessionId = activeSession?.id;
+      let isNewSession = false;
       if (!chatSessionId) {
+        // Create session with a descriptive title from the first message
+        const title = inputMessage.trim().slice(0, 50) + (inputMessage.trim().length > 50 ? "..." : "");
         const newSession = await invoke("create_chat_session", {
-          title: inputMessage.trim().slice(0, 50),
+          title,
           model: selectedModel,
           projectRoot: projectRoot || null,
         });
         chatSessionId = newSession.id;
         setActiveSession(newSession);
         setSessions([newSession, ...sessions]);
+        isNewSession = true;
       }
 
       // Save user message
@@ -245,12 +355,23 @@ Remember: You have access to all files in this project via the Read, Write, Edit
         content: userMessage.content,
       });
 
+      // Update title for "New Chat" sessions after first message
+      if (!isNewSession && activeSession?.title === "New Chat") {
+        const newTitle = inputMessage.trim().slice(0, 50) + (inputMessage.trim().length > 50 ? "..." : "");
+        await invoke("update_chat_session_title", {
+          sessionId: chatSessionId,
+          newTitle,
+        });
+        // Update local state
+        setActiveSession({ ...activeSession, title: newTitle });
+        setSessions(sessions.map(s => s.id === chatSessionId ? { ...s, title: newTitle } : s));
+      }
+
       // Pre-approve common tools for Workbooks AI chat
       // Users expect Claude to be able to read/write files and run commands without permission prompts
       const allowedTools = ["Read", "Write", "Edit", "Bash", "Glob", "Grep", "Task"];
 
       // Add placeholder assistant message for streaming
-      const assistantMessageIndex = messages.length + 1; // +1 for user message we just added
       const assistantMessage = {
         role: "assistant",
         content: "",
@@ -262,6 +383,7 @@ Remember: You have access to all files in this project via the Read, Write, Edit
 
       let streamedContent = "";
       let progressEvents = [];
+      let conversationFiles = new Set(filesUsed);
 
       // Set up event listener for all Claude events
       const unlisten = await listen("claude-cli-event", (event) => {
@@ -286,18 +408,27 @@ Remember: You have access to all files in this project via the Read, Write, Edit
           const toolName = payload.tool || payload.name || "Unknown";
           const toolInput = payload.input || {};
 
-          // Auto-open files when Claude creates or edits them
-          if ((toolName === "Write" || toolName === "Edit") && toolInput.file_path && onOpenFile) {
+          // Track files used in the conversation
+          if (toolInput.file_path) {
+            conversationFiles.add(toolInput.file_path);
+            setFilesUsed(new Set(conversationFiles));
+          }
+
+          // Handle notebook modifications with approval flow
+          if (eventType === "tool_result" && (toolName === "Write" || toolName === "Edit") && toolInput.file_path) {
             const filePath = toolInput.file_path;
-            // Determine file type based on extension
-            let fileType = "file";
-            if (filePath.endsWith(".ipynb")) {
-              fileType = "workbook";
-            } else if (filePath.endsWith(".py")) {
-              fileType = "python";
+
+            if (filePath.endsWith(".ipynb") && onRequestNotebookApproval) {
+              // Notebook modification - trigger approval flow
+              handleNotebookModification(filePath);
+            } else if (onOpenFile) {
+              // Non-notebook file - auto-open as before
+              let fileType = "file";
+              if (filePath.endsWith(".py")) {
+                fileType = "python";
+              }
+              onOpenFile(filePath, fileType);
             }
-            // Auto-open the file
-            onOpenFile(filePath, fileType);
           }
 
           // Build detailed progress message based on tool type
@@ -371,6 +502,33 @@ Remember: You have access to all files in this project via the Read, Write, Edit
         role: "assistant",
         content: streamedContent || response.result,
       });
+
+      // Generate AI-based title for first exchange or generic titles
+      const shouldGenerateTitle =
+        messages.length === 1 || // First exchange (only has user message)
+        activeSession?.title === "New Chat" ||
+        activeSession?.title?.includes(" - "); // Timestamp-based titles from project sessions
+
+      if (shouldGenerateTitle) {
+        // Generate title in background (don't block UI)
+        generateChatTitle(
+          userMessage.content,
+          streamedContent || response.result,
+          conversationFiles
+        ).then(async (newTitle) => {
+          try {
+            await invoke("update_chat_session_title", {
+              sessionId: chatSessionId,
+              newTitle,
+            });
+            // Update local state
+            setActiveSession(prev => ({ ...prev, title: newTitle }));
+            setSessions(prev => prev.map(s => s.id === chatSessionId ? { ...s, title: newTitle } : s));
+          } catch (err) {
+            console.error("Failed to update chat title:", err);
+          }
+        });
+      }
     } catch (err) {
       console.error("Failed to send message:", err);
 
@@ -764,11 +922,25 @@ Remember: You have access to all files in this project via the Read, Write, Edit
                             </div>
                           ) : (
                             <div className="prose prose-sm max-w-none prose-headings:mt-3 prose-headings:mb-2 prose-p:my-2 prose-pre:bg-gray-800 prose-pre:text-gray-100 prose-code:text-blue-600 prose-code:bg-gray-100 prose-code:px-1 prose-code:py-0.5 prose-code:rounded">
-                              <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                                {msg.content}
-                              </ReactMarkdown>
-                              {msg.isStreaming && (
-                                <span className="inline-block w-2 h-4 ml-1 bg-gray-800 animate-pulse"></span>
+                              {msg.isStreaming && !msg.content && msg.progress?.length === 0 ? (
+                                // Show thinking indicator for streaming messages with no content yet
+                                <div className="flex items-center gap-3 py-2">
+                                  <div className="flex gap-1">
+                                    <div className="w-2 h-2 bg-blue-600 rounded-full animate-bounce" style={{ animationDelay: "0ms" }}></div>
+                                    <div className="w-2 h-2 bg-blue-600 rounded-full animate-bounce" style={{ animationDelay: "150ms" }}></div>
+                                    <div className="w-2 h-2 bg-blue-600 rounded-full animate-bounce" style={{ animationDelay: "300ms" }}></div>
+                                  </div>
+                                  <span className="text-xs font-medium text-blue-800">Claude is thinking...</span>
+                                </div>
+                              ) : (
+                                <>
+                                  <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                                    {msg.content}
+                                  </ReactMarkdown>
+                                  {msg.isStreaming && msg.content && (
+                                    <span className="inline-block w-2 h-4 ml-1 bg-gray-800 animate-pulse"></span>
+                                  )}
+                                </>
                               )}
                             </div>
                           )}

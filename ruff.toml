@@ -1,0 +1,51 @@
+# Ruff configuration for Python linting
+# Ruff has built-in LSP support and is extremely fast
+
+# Exclude common directories
+extend-exclude = [
+    ".venv",
+    "venv",
+    "__pycache__",
+    ".pytest_cache",
+    ".ruff_cache",
+    "node_modules",
+]
+
+# Target Python 3.12+
+target-version = "py312"
+
+# Line length to match Black's default
+line-length = 88
+
+[lint]
+# Enable these rule sets
+select = [
+    "E",      # pycodestyle errors
+    "W",      # pycodestyle warnings
+    "F",      # pyflakes (unused imports, undefined vars, etc.)
+    "I",      # isort (import sorting)
+    "N",      # pep8-naming
+    "UP",     # pyupgrade (modernize Python code)
+    "B",      # flake8-bugbear (likely bugs)
+    "C4",     # flake8-comprehensions
+    "SIM",    # flake8-simplify
+    "RUF",    # Ruff-specific rules
+]
+
+# Specific rules for unused code detection
+extend-select = [
+    "F401",   # Unused import
+    "F841",   # Unused variable
+    "F842",   # Unused annotation
+]
+
+ignore = [
+    "E501",   # Line too long (handled by formatter)
+]
+
+[lint.per-file-ignores]
+# Allow unused imports in __init__.py files
+"__init__.py" = ["F401"]
+
+[lint.isort]
+known-first-party = ["workbooks"]

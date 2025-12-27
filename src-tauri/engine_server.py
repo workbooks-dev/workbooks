@@ -3,34 +3,36 @@
 FastAPI-based Jupyter engine manager for Workbooks.
 Manages engine lifecycle and code execution.
 """
-import sys
-import os
+
 import asyncio
+import json
 import logging
+import os
+import re
+import sys
 from contextlib import asynccontextmanager
-from typing import Dict, List, Any, Optional
+from typing import Any
+
+import uvicorn
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel
 from jupyter_client import AsyncKernelManager
-import uvicorn
-import json
-import re
+from pydantic import BaseModel
 
 # Configure logging with timestamps
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    datefmt='%Y-%m-%d %H:%M:%S'
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
 )
 logger = logging.getLogger(__name__)
 
 # Store engine managers per workbook path
-engines: Dict[str, AsyncKernelManager] = {}
+engines: dict[str, AsyncKernelManager] = {}
 
 # Store secret values per workbook for output redaction
-secret_values: Dict[str, Dict[str, str]] = {}  # workbook_path -> {key: value}
+secret_values: dict[str, dict[str, str]] = {}  # workbook_path -> {key: value}
 
 
 def normalize_path(path: str) -> str:
@@ -47,9 +49,9 @@ def slugify_kernel_name(name: str) -> str:
     Jupyter kernel names must be alphanumeric with dashes/underscores only.
     """
     # Convert to lowercase and replace spaces/special chars with underscores
-    slug = re.sub(r'[^a-z0-9]+', '_', name.lower())
+    slug = re.sub(r"[^a-z0-9]+", "_", name.lower())
     # Remove leading/trailing underscores
-    slug = slug.strip('_')
+    slug = slug.strip("_")
     # Ensure we have a valid name
     if not slug:
         slug = "project"
@@ -79,24 +81,24 @@ def preprocess_code(code: str) -> str:
     if not code:
         return code
 
-    lines = code.split('\n')
+    lines = code.split("\n")
     processed_lines = []
 
     for line in lines:
         # Convert !cd to %cd so directory changes persist
         # Match: !cd followed by space or end of line
         # This preserves other shell commands like !ls, !pwd, etc.
-        if re.match(r'^\s*!cd(\s|$)', line):
+        if re.match(r"^\s*!cd(\s|$)", line):
             # Replace !cd with %cd
-            processed_line = re.sub(r'^(\s*)!cd(\s|$)', r'\1%cd\2', line)
+            processed_line = re.sub(r"^(\s*)!cd(\s|$)", r"\1%cd\2", line)
             processed_lines.append(processed_line)
         else:
             processed_lines.append(line)
 
-    return '\n'.join(processed_lines)
+    return "\n".join(processed_lines)
 
 
-def contains_secret(text: str, secrets: Dict[str, str]) -> bool:
+def contains_secret(text: str, secrets: dict[str, str]) -> bool:
     """
     Check if text contains any secret values.
     Returns True if any secret value is found in the text.
@@ -143,8 +145,8 @@ class StartEngineRequest(BaseModel):
     project_root: str
     venv_path: str
     engine_name: str = "python3"
-    env_vars: Dict[str, str] | None = None  # Optional environment variables to inject
-    secrets: Dict[str, str] | None = None  # Secret key-value pairs for output redaction
+    env_vars: dict[str, str] | None = None  # Optional environment variables to inject
+    secrets: dict[str, str] | None = None  # Secret key-value pairs for output redaction
 
 
 class ExecuteRequest(BaseModel):
@@ -156,17 +158,17 @@ class Output(BaseModel):
     output_type: str
     name: str | None = None
     text: str | None = None
-    data: Dict[str, Any] | None = None
+    data: dict[str, Any] | None = None
     execution_count: int | None = None
     ename: str | None = None
     evalue: str | None = None
-    traceback: List[str] | None = None
-    metadata: Dict[str, Any] | None = None  # For contains_secrets and other flags
+    traceback: list[str] | None = None
+    metadata: dict[str, Any] | None = None  # For contains_secrets and other flags
 
 
 class ExecuteResponse(BaseModel):
     success: bool
-    outputs: List[Output]
+    outputs: list[Output]
     execution_count: int | None = None
 
 
@@ -215,10 +217,9 @@ async def start_engine(request: StartEngineRequest):
 
         # Check if ipykernel is installed
         import subprocess
+
         check_result = subprocess.run(
-            [venv_python, "-c", "import ipykernel"],
-            capture_output=True,
-            text=True
+            [venv_python, "-c", "import ipykernel"], capture_output=True, text=True
         )
         if check_result.returncode != 0:
             error_msg = f"ipykernel not installed in venv. Error: {check_result.stderr}"
@@ -228,8 +229,8 @@ async def start_engine(request: StartEngineRequest):
         print("ipykernel is installed")
 
         # Install kernel spec in the project's venv with proper PATH
-        import subprocess
         import json
+        import subprocess
 
         print("Installing/checking engine spec in project venv...")
         # Slugify the project name to ensure it's a valid kernel spec name (no spaces)
@@ -240,9 +241,19 @@ async def start_engine(request: StartEngineRequest):
 
         # First install the basic kernel spec
         install_result = subprocess.run(
-            [venv_python, "-m", "ipykernel", "install", "--user", "--name", engine_spec_name, "--display-name", f"Workbooks ({os.path.basename(project_root)})"],
+            [
+                venv_python,
+                "-m",
+                "ipykernel",
+                "install",
+                "--user",
+                "--name",
+                engine_spec_name,
+                "--display-name",
+                f"Workbooks ({os.path.basename(project_root)})",
+            ],
             capture_output=True,
-            text=True
+            text=True,
         )
 
         if install_result.returncode != 0:
@@ -254,35 +265,41 @@ async def start_engine(request: StartEngineRequest):
 
         # Now modify the kernel.json to set PATH environment variable
         # This ensures ! commands use the venv's executables
-        kernel_dir = os.path.expanduser(f"~/.local/share/jupyter/kernels/{engine_spec_name}")
+        kernel_dir = os.path.expanduser(
+            f"~/.local/share/jupyter/kernels/{engine_spec_name}"
+        )
         if not os.path.exists(kernel_dir):
-            kernel_dir = os.path.expanduser(f"~/Library/Jupyter/kernels/{engine_spec_name}")
+            kernel_dir = os.path.expanduser(
+                f"~/Library/Jupyter/kernels/{engine_spec_name}"
+            )
 
         kernel_json_path = os.path.join(kernel_dir, "kernel.json")
 
         if os.path.exists(kernel_json_path):
             try:
-                with open(kernel_json_path, 'r') as f:
+                with open(kernel_json_path) as f:
                     kernel_spec = json.load(f)
 
                 # Add environment variables to prepend venv bin to PATH
                 venv_bin = os.path.dirname(venv_python)
-                if 'env' not in kernel_spec:
-                    kernel_spec['env'] = {}
+                if "env" not in kernel_spec:
+                    kernel_spec["env"] = {}
 
                 # Prepend venv bin directory to PATH
                 # This ensures shell commands like !pip use the venv's executables
                 # Use actual system PATH instead of {PATH} placeholder which doesn't always expand
-                current_path = os.environ.get('PATH', '/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin')
-                kernel_spec['env']['PATH'] = f"{venv_bin}:{current_path}"
+                current_path = os.environ.get(
+                    "PATH", "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+                )
+                kernel_spec["env"]["PATH"] = f"{venv_bin}:{current_path}"
 
                 # Inject custom environment variables (like WORKBOOKS_PROJECT_FOLDER)
                 if request.env_vars:
                     for key, value in request.env_vars.items():
-                        kernel_spec['env'][key] = value
+                        kernel_spec["env"][key] = value
                     # Note: Not logging env var injection for security (secrets may be present)
 
-                with open(kernel_json_path, 'w') as f:
+                with open(kernel_json_path, "w") as f:
                     json.dump(kernel_spec, f, indent=2)
 
                 print(f"Updated kernel spec with PATH={venv_bin}:$PATH")
@@ -322,7 +339,10 @@ async def start_engine(request: StartEngineRequest):
         except RuntimeError as e:
             print(f"Engine failed to become ready after 60 seconds: {e}")
             await km.shutdown_kernel()
-            raise HTTPException(status_code=500, detail=f"Engine failed to start after 60 seconds: {str(e)}")
+            raise HTTPException(
+                status_code=500,
+                detail=f"Engine failed to start after 60 seconds: {e!s}",
+            )
 
         engines[workbook_path] = km
 
@@ -344,7 +364,8 @@ async def start_engine(request: StartEngineRequest):
         raise
     except Exception as e:
         import traceback
-        error_detail = f"{str(e)}\n\nTraceback:\n{traceback.format_exc()}"
+
+        error_detail = f"{e!s}\n\nTraceback:\n{traceback.format_exc()}"
         print(f"ERROR starting engine: {error_detail}")
         raise HTTPException(status_code=500, detail=error_detail)
 
@@ -352,7 +373,7 @@ async def start_engine(request: StartEngineRequest):
 # Output limiting constants
 MAX_OUTPUT_LINES = 1000  # Maximum number of output lines to keep
 MAX_OUTPUTS_START = 100  # Keep first N outputs
-MAX_OUTPUTS_END = 50     # Keep last M outputs
+MAX_OUTPUTS_END = 50  # Keep last M outputs
 
 
 @app.post("/engine/execute", response_model=ExecuteResponse)
@@ -378,8 +399,8 @@ async def execute_code(request: ExecuteRequest):
         msg_id = kc.execute(code, store_history=True, silent=False)
 
         # Collect outputs with limiting
-        outputs: List[Output] = []
-        tail_outputs: List[Output] = []  # Ring buffer for last N outputs
+        outputs: list[Output] = []
+        tail_outputs: list[Output] = []  # Ring buffer for last N outputs
         has_error = False
         output_count = 0
         truncated = False
@@ -462,8 +483,12 @@ async def execute_code(request: ExecuteRequest):
                     # Check if error output contains secrets
                     secrets = secret_values.get(workbook_path, {})
                     metadata = None
-                    traceback_text = "\n".join(content["traceback"]) if content["traceback"] else ""
-                    error_text = f"{content['ename']}: {content['evalue']}\n{traceback_text}"
+                    traceback_text = (
+                        "\n".join(content["traceback"]) if content["traceback"] else ""
+                    )
+                    error_text = (
+                        f"{content['ename']}: {content['evalue']}\n{traceback_text}"
+                    )
                     if contains_secret(error_text, secrets):
                         metadata = {"contains_secrets": True}
 
@@ -502,7 +527,7 @@ async def execute_code(request: ExecuteRequest):
                         if len(tail_outputs) > MAX_OUTPUTS_END:
                             tail_outputs.pop(0)
 
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 # Add a message indicating timeout
                 outputs.append(
                     Output(
@@ -518,7 +543,7 @@ async def execute_code(request: ExecuteRequest):
             reply = await asyncio.wait_for(kc.get_shell_msg(), timeout=1.0)
             if reply.get("parent_header", {}).get("msg_id") == msg_id:
                 exec_count = reply.get("content", {}).get("execution_count")
-        except asyncio.TimeoutError:
+        except TimeoutError:
             pass
 
         # Combine outputs: first N + truncation message (if any) + last M
@@ -528,9 +553,7 @@ async def execute_code(request: ExecuteRequest):
             final_outputs = outputs
 
         return ExecuteResponse(
-            success=not has_error,
-            outputs=final_outputs,
-            execution_count=exec_count
+            success=not has_error, outputs=final_outputs, execution_count=exec_count
         )
 
     except Exception as e:
@@ -587,10 +610,14 @@ async def execute_code_stream(request: ExecuteRequest):
                     if msg_type == "status" and content["execution_state"] == "idle":
                         # Get execution count from shell reply
                         try:
-                            reply = await asyncio.wait_for(kc.get_shell_msg(), timeout=1.0)
+                            reply = await asyncio.wait_for(
+                                kc.get_shell_msg(), timeout=1.0
+                            )
                             if reply.get("parent_header", {}).get("msg_id") == msg_id:
-                                exec_count = reply.get("content", {}).get("execution_count")
-                        except asyncio.TimeoutError:
+                                exec_count = reply.get("content", {}).get(
+                                    "execution_count"
+                                )
+                        except TimeoutError:
                             pass
 
                         # Send completion event with execution count
@@ -649,8 +676,14 @@ async def execute_code_stream(request: ExecuteRequest):
                         # Check if error output contains secrets
                         secrets = secret_values.get(workbook_path, {})
                         metadata = None
-                        traceback_text = "\n".join(content["traceback"]) if content["traceback"] else ""
-                        error_text = f"{content['ename']}: {content['evalue']}\n{traceback_text}"
+                        traceback_text = (
+                            "\n".join(content["traceback"])
+                            if content["traceback"]
+                            else ""
+                        )
+                        error_text = (
+                            f"{content['ename']}: {content['evalue']}\n{traceback_text}"
+                        )
                         if contains_secret(error_text, secrets):
                             metadata = {"contains_secrets": True}
 
@@ -669,7 +702,7 @@ async def execute_code_stream(request: ExecuteRequest):
                         event = {
                             "type": "output",
                             "output": output_data,
-                            "index": output_count
+                            "index": output_count,
                         }
                         yield f"data: {json.dumps(event)}\n\n"
 
@@ -681,13 +714,13 @@ async def execute_code_stream(request: ExecuteRequest):
                                     "output_type": "stream",
                                     "name": "stdout",
                                     "text": f"\n... Output limit reached ({MAX_OUTPUT_MESSAGES} messages). Execution continues in background ...\n",
-                                }
+                                },
                             }
                             yield f"data: {json.dumps(truncation_msg)}\n\n"
                             truncated = True
                             skip_outputs = True
 
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     # If skipping and timeout, keep waiting for completion
                     if skip_outputs:
                         continue
@@ -697,10 +730,7 @@ async def execute_code_stream(request: ExecuteRequest):
 
         except Exception as e:
             # Send error event
-            error_event = {
-                "type": "error",
-                "message": str(e)
-            }
+            error_event = {"type": "error", "message": str(e)}
             yield f"data: {json.dumps(error_event)}\n\n"
 
     return StreamingResponse(generate(), media_type="text/event-stream")
@@ -735,13 +765,17 @@ async def interrupt_engine(workbook_path: str):
     if not km:
         print(f"ERROR: No engine found for interrupt: {workbook_path}")
         print(f"Available engines: {list(engines.keys())}")
-        raise HTTPException(status_code=404, detail=f"No engine found for {workbook_path}")
+        raise HTTPException(
+            status_code=404, detail=f"No engine found for {workbook_path}"
+        )
 
     try:
         await km.interrupt_kernel()
         return {"status": "interrupted", "workbook_path": workbook_path}
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to interrupt engine: {str(e)}")
+        raise HTTPException(
+            status_code=500, detail=f"Failed to interrupt engine: {e!s}"
+        )
 
 
 @app.post("/engine/restart")
@@ -766,29 +800,33 @@ async def restart_engine(request: StartEngineRequest):
 
 class Cell(BaseModel):
     """A single cell from a notebook."""
+
     source: str  # Cell source code
     cell_type: str = "code"  # code or markdown
 
 
 class ExecuteAllRequest(BaseModel):
     """Request to execute all cells in a workbook."""
+
     workbook_path: str
-    cells: List[Cell]
+    cells: list[Cell]
 
 
 class CellExecutionResult(BaseModel):
     """Result of executing a single cell."""
+
     cell_index: int
     success: bool
-    outputs: List[Output]
+    outputs: list[Output]
     execution_count: int | None = None
     error: str | None = None
 
 
 class ExecuteAllResponse(BaseModel):
     """Response with results from executing all cells."""
+
     success: bool  # True if all cells succeeded
-    cell_results: List[CellExecutionResult]
+    cell_results: list[CellExecutionResult]
     total_cells: int
     successful_cells: int
     failed_cells: int
@@ -834,7 +872,7 @@ async def execute_all_cells(request: ExecuteAllRequest):
             msg_id = kc.execute(processed_code, store_history=True, silent=False)
 
             # Collect outputs
-            outputs: List[Output] = []
+            outputs: list[Output] = []
             has_error = False
             exec_count = None
 
@@ -893,8 +931,14 @@ async def execute_all_cells(request: ExecuteAllRequest):
                         has_error = True
                         secrets = secret_values.get(workbook_path, {})
                         metadata = None
-                        traceback_text = "\n".join(content["traceback"]) if content["traceback"] else ""
-                        error_text = f"{content['ename']}: {content['evalue']}\n{traceback_text}"
+                        traceback_text = (
+                            "\n".join(content["traceback"])
+                            if content["traceback"]
+                            else ""
+                        )
+                        error_text = (
+                            f"{content['ename']}: {content['evalue']}\n{traceback_text}"
+                        )
                         if contains_secret(error_text, secrets):
                             metadata = {"contains_secrets": True}
 
@@ -912,7 +956,7 @@ async def execute_all_cells(request: ExecuteAllRequest):
                     if new_output:
                         outputs.append(new_output)
 
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     outputs.append(
                         Output(
                             output_type="stream",
@@ -928,7 +972,7 @@ async def execute_all_cells(request: ExecuteAllRequest):
                 reply = await asyncio.wait_for(kc.get_shell_msg(), timeout=1.0)
                 if reply.get("parent_header", {}).get("msg_id") == msg_id:
                     exec_count = reply.get("content", {}).get("execution_count")
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 pass
 
             # Create result for this cell
@@ -972,7 +1016,9 @@ async def execute_all_cells(request: ExecuteAllRequest):
             # Stop on error
             break
 
-    logger.info(f"Execution complete: {successful_cells} successful, {failed_cells} failed")
+    logger.info(
+        f"Execution complete: {successful_cells} successful, {failed_cells} failed"
+    )
 
     return ExecuteAllResponse(
         success=(failed_cells == 0),
@@ -997,7 +1043,7 @@ class CompletionMatch(BaseModel):
 
 
 class CompleteResponse(BaseModel):
-    matches: List[CompletionMatch]
+    matches: list[CompletionMatch]
     cursor_start: int
     cursor_end: int
 
@@ -1039,7 +1085,7 @@ async def complete_code(request: CompleteRequest):
                                 text=match,
                                 start=cursor_start,
                                 end=cursor_end,
-                                type=None  # Jupyter doesn't provide type info by default
+                                type=None,  # Jupyter doesn't provide type info by default
                             )
                             for match in matches
                         ]
@@ -1047,11 +1093,13 @@ async def complete_code(request: CompleteRequest):
                         return CompleteResponse(
                             matches=completion_matches,
                             cursor_start=cursor_start,
-                            cursor_end=cursor_end
+                            cursor_end=cursor_end,
                         )
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 # If timeout, return empty completions
-                return CompleteResponse(matches=[], cursor_start=cursor_pos, cursor_end=cursor_pos)
+                return CompleteResponse(
+                    matches=[], cursor_start=cursor_pos, cursor_end=cursor_pos
+                )
 
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -1059,7 +1107,7 @@ async def complete_code(request: CompleteRequest):
 
 if __name__ == "__main__":
     port = int(sys.argv[1]) if len(sys.argv) > 1 else 8765
-    logger.info(f"=== Workbooks Engine Server Starting ===")
+    logger.info("=== Workbooks Engine Server Starting ===")
     logger.info(f"Port: {port}")
     logger.info(f"Python: {sys.executable}")
     logger.info(f"Working directory: {os.getcwd()}")

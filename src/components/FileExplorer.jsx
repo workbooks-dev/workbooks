@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { ask } from "@tauri-apps/plugin-dialog";
 import { ContextMenu } from "./ContextMenu";
 import { InputDialog } from "./InputDialog";
+import NewWorkbookModal from "./NewWorkbookModal";
 
 function FileTreeItem({ file, level = 0, onFileClick, onFileAction, activeFilePath }) {
   const [isExpanded, setIsExpanded] = useState(false);
@@ -125,8 +126,7 @@ export function FileExplorer({ projectRoot, projectName, onOpenWorkbook, onFileD
   const [files, setFiles] = useState([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(null);
-  const [creatingWorkbook, setCreatingWorkbook] = useState(false);
-  const [workbookName, setWorkbookName] = useState("");
+  const [showNewWorkbookModal, setShowNewWorkbookModal] = useState(false);
   const [renamingFile, setRenamingFile] = useState(null);
   const [duplicatingFile, setDuplicatingFile] = useState(null);
 
@@ -160,17 +160,10 @@ export function FileExplorer({ projectRoot, projectName, onOpenWorkbook, onFileD
   };
 
   const handleNewWorkbook = () => {
-    setCreatingWorkbook(true);
-    setWorkbookName("");
+    setShowNewWorkbookModal(true);
   };
 
-  const handleCreateWorkbook = async (e) => {
-    e.preventDefault();
-
-    if (!workbookName.trim()) {
-      return;
-    }
-
+  const handleCreateBlankWorkbook = async (workbookName) => {
     try {
       const workbooksDir = `${projectRoot}/notebooks`;
       const workbookPath = await invoke("create_workbook", {
@@ -179,8 +172,7 @@ export function FileExplorer({ projectRoot, projectName, onOpenWorkbook, onFileD
       });
 
       console.log("Created workbook:", workbookPath);
-      setCreatingWorkbook(false);
-      setWorkbookName("");
+      setShowNewWorkbookModal(false);
 
       // Refresh the file list
       await loadRootFiles();
@@ -193,9 +185,13 @@ export function FileExplorer({ projectRoot, projectName, onOpenWorkbook, onFileD
     }
   };
 
-  const handleCancelCreate = () => {
-    setCreatingWorkbook(false);
-    setWorkbookName("");
+  const handleGenerateWithAI = async (workbookName, description) => {
+    // TODO: Implement AI generation
+    // For now, just create a blank workbook with a comment about the description
+    console.log("Generate workbook with AI:", { workbookName, description });
+
+    // For now, create blank and close modal
+    await handleCreateBlankWorkbook(workbookName);
   };
 
   const handleFileAction = (action, file) => {
@@ -295,36 +291,6 @@ export function FileExplorer({ projectRoot, projectName, onOpenWorkbook, onFileD
         </button>
       </div>
 
-      {creatingWorkbook && (
-        <div className="px-4 py-3 border-b border-gray-200 bg-gray-50">
-          <form onSubmit={handleCreateWorkbook} className="flex flex-col gap-2">
-            <input
-              type="text"
-              value={workbookName}
-              onChange={(e) => setWorkbookName(e.target.value)}
-              placeholder="Workbook name"
-              className="w-full px-2 py-1.5 text-sm border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
-              autoFocus
-            />
-            <div className="flex gap-1.5">
-              <button
-                type="submit"
-                className="flex-1 px-3 py-1.5 text-xs font-medium text-white bg-blue-600 hover:bg-blue-700 rounded transition-colors"
-              >
-                Create
-              </button>
-              <button
-                type="button"
-                onClick={handleCancelCreate}
-                className="flex-1 px-3 py-1.5 text-xs font-medium text-gray-700 bg-white hover:bg-gray-50 border border-gray-300 rounded transition-colors"
-              >
-                Cancel
-              </button>
-            </div>
-          </form>
-        </div>
-      )}
-
       {loading && <div className="px-4 py-3 text-xs text-gray-500">Loading...</div>}
 
       {error && (
@@ -372,6 +338,14 @@ export function FileExplorer({ projectRoot, projectName, onOpenWorkbook, onFileD
           onCancel={() => setDuplicatingFile(null)}
         />
       )}
+
+      {/* New Workbook Modal */}
+      <NewWorkbookModal
+        isOpen={showNewWorkbookModal}
+        onClose={() => setShowNewWorkbookModal(false)}
+        onCreateBlank={handleCreateBlankWorkbook}
+        onGenerateWithAI={handleGenerateWithAI}
+      />
     </div>
   );
 }

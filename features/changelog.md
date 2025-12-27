@@ -6,6 +6,58 @@ This file tracks major features and improvements as they're completed.
 
 ### December 2025
 
+**Resizable and Collapsible Panels (Dec 27, 2025)**
+- **ResizablePanel Component**: New reusable component for creating resizable panels
+  - Drag handles with visual feedback (blue highlight on hover/drag)
+  - Configurable min/max width constraints
+  - Automatic persistence of panel sizes to localStorage
+  - Support for left or right-side resize handles
+- **VS Code-Style Panel Toggles**: Professional panel management in top right corner
+  - Icon-only toggle buttons positioned in top right (VS Code standard)
+  - Three panels: Primary Sidebar (left), Panel (middle/AI chat), Secondary Sidebar (right/file viewer)
+  - Clean, minimal design with white background
+  - Active state shown with blue icon color
+  - Hover effects with subtle gray background
+  - Tooltips showing keyboard shortcuts
+- **Standard Keyboard Shortcuts** (matching VS Code):
+  - `Cmd+B` (or `Ctrl+B`) - Toggle Primary Sidebar (left sidebar)
+  - `Cmd+J` (or `Ctrl+J`) - Toggle Panel (AI chat panel)
+  - `Cmd+Shift+B` (or `Ctrl+Shift+B`) - Toggle Secondary Sidebar (file viewer)
+- **Panel Management**:
+  - Left sidebar: 200-500px range, defaults to 256px
+  - AI chat panel: 300-1200px range, defaults to 500px
+  - Right panel (file viewer): Toggleable visibility
+  - Panel visibility state persisted to localStorage
+  - Smooth collapse/expand animations
+  - When AI chat is the only visible panel, it takes full width (no resize handle)
+  - Maximum flexibility: hide any combination of panels to focus on what matters
+- **Smart Layout**:
+  - Panels collapse to zero width (completely hidden)
+  - File viewer always takes remaining space
+  - Resize handles appear on the right side of panels
+  - Drag cursor and visual feedback during resize
+- **Files**:
+  - `src/components/ResizablePanel.jsx` (new) - Reusable resize component
+  - `src/App.jsx` - Panel integration, keyboard shortcuts, toolbar
+  - `features/todo.md` - Updated to mark feature complete
+  - `features/changelog.md` - This entry
+
+**AI Chat: Immediate Thinking Indicator Fix (Dec 27, 2025)**
+- **Problem**: Blank gray box for 30+ seconds after sending message - no feedback that Claude was processing
+- **Solution**: Added inline "Claude is thinking..." indicator with animated bouncing dots
+- **Triggers**: Shows immediately when streaming message has no content/progress yet
+- **Impact**: Eliminates user confusion about whether app is working or frozen
+- **Location**: src/components/AiChatPanel.jsx:824-843
+
+**AI Chat: Notebook Change Approval System (Dec 27, 2025)**
+- **Diff Modal**: Beautiful cell-by-cell comparison when Claude modifies notebooks
+- **Color Coding**: Green (added), blue (modified), red (deleted) for clear visibility
+- **Approval Flow**: User must approve/reject changes before they're saved
+- **Version History**: Automatic snapshots saved to `.workbooks/versions/{notebook}/{timestamp}.ipynb`
+- **Manual Revert**: "↶ Revert" button in WorkbookViewer toolbar for easy undo
+- **Backend**: 6 new Tauri commands for complete version control
+- **Safety**: No unwanted AI changes can be saved without explicit user approval
+
 **AI Chat: Markdown Rendering & Enhanced Progress Indicators (Dec 27, 2025)**
 - **Markdown Rendering**: AI responses now display with beautiful, readable formatting
   - **Full GFM Support**: Code blocks, headers, lists, links, tables all render properly

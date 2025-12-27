@@ -3,9 +3,12 @@
 Jupyter kernel manager for Workbooks notebooks.
 Manages kernel lifecycle and code execution with state preservation.
 """
-import sys
+
 import json
+import sys
+
 import jupyter_client
+
 
 class KernelManager:
     def __init__(self):
@@ -24,10 +27,7 @@ class KernelManager:
     def execute(self, code):
         """Execute code in the kernel and return results"""
         if not self.kernel_client:
-            return {
-                "success": False,
-                "error": "Kernel not started"
-            }
+            return {"success": False, "error": "Kernel not started"}
 
         # Execute the code
         msg_id = self.kernel_client.execute(code, store_history=True)
@@ -38,39 +38,44 @@ class KernelManager:
         while True:
             try:
                 msg = self.kernel_client.get_iopub_msg(timeout=30)
-                msg_type = msg['header']['msg_type']
-                content = msg['content']
+                msg_type = msg["header"]["msg_type"]
+                content = msg["content"]
 
-                if msg_type == 'stream':
-                    outputs.append({
-                        'output_type': 'stream',
-                        'name': content['name'],
-                        'text': content['text']
-                    })
+                if msg_type == "stream":
+                    outputs.append(
+                        {
+                            "output_type": "stream",
+                            "name": content["name"],
+                            "text": content["text"],
+                        }
+                    )
 
-                elif msg_type == 'execute_result':
-                    outputs.append({
-                        'output_type': 'execute_result',
-                        'data': content['data'],
-                        'execution_count': content['execution_count']
-                    })
+                elif msg_type == "execute_result":
+                    outputs.append(
+                        {
+                            "output_type": "execute_result",
+                            "data": content["data"],
+                            "execution_count": content["execution_count"],
+                        }
+                    )
 
-                elif msg_type == 'display_data':
-                    outputs.append({
-                        'output_type': 'display_data',
-                        'data': content['data']
-                    })
+                elif msg_type == "display_data":
+                    outputs.append(
+                        {"output_type": "display_data", "data": content["data"]}
+                    )
 
-                elif msg_type == 'error':
-                    outputs.append({
-                        'output_type': 'error',
-                        'ename': content['ename'],
-                        'evalue': content['evalue'],
-                        'traceback': content['traceback']
-                    })
+                elif msg_type == "error":
+                    outputs.append(
+                        {
+                            "output_type": "error",
+                            "ename": content["ename"],
+                            "evalue": content["evalue"],
+                            "traceback": content["traceback"],
+                        }
+                    )
 
-                elif msg_type == 'status':
-                    if content['execution_state'] == 'idle':
+                elif msg_type == "status":
+                    if content["execution_state"] == "idle":
                         break
 
             except jupyter_client.queue.Empty:
@@ -78,12 +83,9 @@ class KernelManager:
 
         # Get the execution reply
         reply = self.kernel_client.get_shell_msg(timeout=5)
-        success = reply['content']['status'] == 'ok'
+        success = reply["content"]["status"] == "ok"
 
-        return {
-            'success': success,
-            'outputs': outputs
-        }
+        return {"success": success, "outputs": outputs}
 
     def shutdown(self):
         """Shutdown the kernel"""
@@ -92,6 +94,7 @@ class KernelManager:
         if self.kernel_manager:
             self.kernel_manager.shutdown_kernel()
         return {"status": "shutdown"}
+
 
 def main():
     """Main loop for kernel manager"""
@@ -108,22 +111,22 @@ def main():
             sys.stderr.flush()
 
             command = json.loads(line.strip())
-            action = command.get('action')
+            action = command.get("action")
             sys.stderr.write(f"Action: {action}\n")
             sys.stderr.flush()
 
-            if action == 'start':
+            if action == "start":
                 sys.stderr.write("Starting kernel...\n")
                 sys.stderr.flush()
                 result = manager.start()
                 sys.stderr.write(f"Kernel started: {result}\n")
                 sys.stderr.flush()
-            elif action == 'execute':
-                code = command.get('code', '')
+            elif action == "execute":
+                code = command.get("code", "")
                 sys.stderr.write(f"Executing code: {code[:50]}...\n")
                 sys.stderr.flush()
                 result = manager.execute(code)
-            elif action == 'shutdown':
+            elif action == "shutdown":
                 sys.stderr.write("Shutting down kernel...\n")
                 sys.stderr.flush()
                 result = manager.shutdown()
@@ -137,10 +140,11 @@ def main():
             sys.stderr.flush()
 
         except Exception as e:
-            sys.stderr.write(f"Error: {str(e)}\n")
+            sys.stderr.write(f"Error: {e!s}\n")
             sys.stderr.flush()
             error_result = {"error": str(e)}
             print(json.dumps(error_result), flush=True)
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     main()

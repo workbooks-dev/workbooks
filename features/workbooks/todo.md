@@ -3,7 +3,14 @@
 
 ## High Priority
 
-None - core functionality is complete!
+**All high priority items have been completed!**
+
+- [x] **Notebook change approval and undo** (COMPLETED - Dec 27, 2025)
+  - Diff modal shows cell-by-cell changes from AI
+  - Approval flow with approve/reject buttons
+  - Version history system in `.workbooks/versions/`
+  - Manual revert button in toolbar
+  - See: features/ai-assistant/done.md for implementation details
 
 ## Medium Priority
 

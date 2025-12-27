@@ -3,13 +3,15 @@
 Standalone test script to debug kernel startup issues.
 Run this directly to test kernel functionality without the Tauri app.
 """
-import sys
-import os
+
 import asyncio
+import os
+import sys
 from pathlib import Path
 
 # Add current directory to path
 sys.path.insert(0, str(Path(__file__).parent))
+
 
 async def test_kernel_start():
     """Test starting a kernel for a project."""
@@ -17,9 +19,9 @@ async def test_kernel_start():
     project_root = "/Users/jmitch/Desktop/Test"
     venv_python = os.path.join(project_root, ".venv", "bin", "python")
 
-    print(f"=" * 80)
-    print(f"Testing Kernel Startup")
-    print(f"=" * 80)
+    print("=" * 80)
+    print("Testing Kernel Startup")
+    print("=" * 80)
     print(f"Project root: {project_root}")
     print(f"Python path: {venv_python}")
     print(f"Python exists: {os.path.exists(venv_python)}")
@@ -28,13 +30,14 @@ async def test_kernel_start():
     # Test 1: Check if ipykernel is installed
     print("Test 1: Checking if ipykernel is installed...")
     import subprocess
+
     check_result = subprocess.run(
         [venv_python, "-c", "import ipykernel; print(ipykernel.__version__)"],
         capture_output=True,
-        text=True
+        text=True,
     )
     if check_result.returncode != 0:
-        print(f"❌ FAILED: ipykernel not installed")
+        print("❌ FAILED: ipykernel not installed")
         print(f"Error: {check_result.stderr}")
         return
     print(f"✅ PASSED: ipykernel version {check_result.stdout.strip()}")
@@ -46,16 +49,26 @@ async def test_kernel_start():
     print(f"Kernel spec name: {kernel_spec_name}")
 
     install_result = subprocess.run(
-        [venv_python, "-m", "ipykernel", "install", "--user", "--name", kernel_spec_name, "--display-name", f"Workbooks ({os.path.basename(project_root)})"],
+        [
+            venv_python,
+            "-m",
+            "ipykernel",
+            "install",
+            "--user",
+            "--name",
+            kernel_spec_name,
+            "--display-name",
+            f"Workbooks ({os.path.basename(project_root)})",
+        ],
         capture_output=True,
-        text=True
+        text=True,
     )
 
     if install_result.returncode != 0:
-        print(f"❌ FAILED: Could not install kernel spec")
+        print("❌ FAILED: Could not install kernel spec")
         print(f"Error: {install_result.stderr}")
         return
-    print(f"✅ PASSED: Kernel spec installed")
+    print("✅ PASSED: Kernel spec installed")
     print(f"Output: {install_result.stdout.strip()}")
     print()
 
@@ -79,7 +92,7 @@ async def test_kernel_start():
         try:
             await asyncio.wait_for(kc.wait_for_ready(), timeout=30)
             print("✅ PASSED: Kernel is ready")
-        except asyncio.TimeoutError:
+        except TimeoutError:
             print("❌ FAILED: Kernel did not become ready in 30 seconds")
             await km.shutdown_kernel()
             return
@@ -87,7 +100,9 @@ async def test_kernel_start():
         # Test 5: Execute code
         print()
         print("Test 5: Executing test code...")
-        msg_id = kc.execute("print('Hello from Workbooks!')", store_history=True, silent=False)
+        msg_id = kc.execute(
+            "print('Hello from Workbooks!')", store_history=True, silent=False
+        )
 
         # Collect output
         outputs = []
@@ -99,9 +114,11 @@ async def test_kernel_start():
                 if msg_type == "stream":
                     content = msg["content"]
                     outputs.append(content["text"])
-                elif msg_type == "status" and msg["content"]["execution_state"] == "idle":
+                elif (
+                    msg_type == "status" and msg["content"]["execution_state"] == "idle"
+                ):
                     break
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 break
 
         if outputs:
@@ -123,7 +140,9 @@ async def test_kernel_start():
     except Exception as e:
         print(f"❌ FAILED: {e}")
         import traceback
+
         traceback.print_exc()
+
 
 if __name__ == "__main__":
     print("Starting kernel test...\n")

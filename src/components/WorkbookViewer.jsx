@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, forwardRef, useImperativeHandle } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { ask } from "@tauri-apps/plugin-dialog";
 import { listen } from "@tauri-apps/api/event";
@@ -12,6 +12,7 @@ import rehypeRaw from "rehype-raw";
 import { Prism as SyntaxHighlighter } from "react-syntax-highlighter";
 import { vscDarkPlus } from "react-syntax-highlighter/dist/esm/styles/prism";
 import { SecretsWarningModal } from "./SecretsWarningModal";
+import * as Diff from "diff";
 
 // ============================================
 // HELPER FUNCTIONS
@@ -172,6 +173,147 @@ function ensureCellIds(cells) {
       cell_id: cell.metadata?.cell_id || generateCellId()
     }
   }));
+}
+
+// ============================================
+// UNIFIED DIFF CELL COMPONENT
+// ============================================
+
+/**
+ * UnifiedDiffCell - Shows a cell with inline diff (git-style)
+ * Used when AI has made changes that are pending review
+ */
+function UnifiedDiffCell({ oldCell, newCell, type, cellIndex, onAccept, onReject }) {
+  // Determine border color based on change type
+  const borderColors = {
+    added: "border-l-green-500",
+    modified: "border-l-blue-500",
+    deleted: "border-l-red-500",
+  };
+
+  const bgColors = {
+    added: "bg-green-50",
+    modified: "bg-blue-50",
+    deleted: "bg-red-50",
+  };
+
+  const badgeColors = {
+    added: "bg-green-100 text-green-800",
+    modified: "bg-blue-100 text-blue-800",
+    deleted: "bg-red-100 text-red-800",
+  };
+
+  const badgeLabels = {
+    added: "Added",
+    modified: "Modified",
+    deleted: "Deleted",
+  };
+
+  // Compute unified diff for modified cells
+  const computeUnifiedDiff = () => {
+    if (type !== "modified") return null;
+
+    const oldSource = getCellSourceAsString(oldCell.source);
+    const newSource = getCellSourceAsString(newCell.source);
+
+    const diff = Diff.diffLines(oldSource, newSource);
+    return diff;
+  };
+
+  const diffParts = type === "modified" ? computeUnifiedDiff() : null;
+
+  return (
+    <div className={`relative mb-4 pl-3 border-l-4 ${borderColors[type]} ${bgColors[type]} rounded-r-lg p-4`}>
+      {/* Header */}
+      <div className="flex items-center justify-between mb-3">
+        <div className="flex items-center gap-2">
+          <span className="text-sm font-medium text-gray-700">
+            Cell {cellIndex + 1}
+          </span>
+          <span className={`px-2 py-0.5 rounded text-xs font-medium ${badgeColors[type]}`}>
+            {badgeLabels[type]}
+          </span>
+          {(oldCell || newCell) && (
+            <span className="text-xs text-gray-500">
+              ({(oldCell || newCell).cell_type})
+            </span>
+          )}
+        </div>
+
+        {/* Accept/Reject buttons */}
+        <div className="flex gap-2">
+          <button
+            onClick={() => onAccept(cellIndex)}
+            className="px-3 py-1 text-sm bg-green-600 hover:bg-green-700 text-white rounded font-medium"
+            title="Accept this change"
+          >
+            ✓ Accept
+          </button>
+          <button
+            onClick={() => onReject(cellIndex)}
+            className="px-3 py-1 text-sm bg-red-600 hover:bg-red-700 text-white rounded font-medium"
+            title="Reject this change"
+          >
+            ✗ Reject
+          </button>
+        </div>
+      </div>
+
+      {/* Diff content */}
+      <div className="font-mono text-sm bg-white border border-gray-200 rounded p-3 overflow-x-auto">
+        {type === "added" && newCell && (
+          <div>
+            {getCellSourceAsString(newCell.source).split('\n').map((line, idx) => (
+              <div key={idx} className="bg-green-100 text-green-900">
+                <span className="text-green-600 mr-2">+</span>
+                {line}
+              </div>
+            ))}
+          </div>
+        )}
+
+        {type === "deleted" && oldCell && (
+          <div>
+            {getCellSourceAsString(oldCell.source).split('\n').map((line, idx) => (
+              <div key={idx} className="bg-red-100 text-red-900">
+                <span className="text-red-600 mr-2">-</span>
+                {line}
+              </div>
+            ))}
+          </div>
+        )}
+
+        {type === "modified" && diffParts && (
+          <div>
+            {diffParts.map((part, idx) => {
+              if (part.added) {
+                return part.value.split('\n').filter(line => line.length > 0 || part.value.endsWith('\n')).map((line, lineIdx) => (
+                  <div key={`${idx}-${lineIdx}`} className="bg-green-100 text-green-900">
+                    <span className="text-green-600 mr-2">+</span>
+                    {line}
+                  </div>
+                ));
+              } else if (part.removed) {
+                return part.value.split('\n').filter(line => line.length > 0 || part.value.endsWith('\n')).map((line, lineIdx) => (
+                  <div key={`${idx}-${lineIdx}`} className="bg-red-100 text-red-900">
+                    <span className="text-red-600 mr-2">-</span>
+                    {line}
+                  </div>
+                ));
+              } else {
+                return part.value.split('\n').filter(line => line.length > 0 || part.value.endsWith('\n')).map((line, lineIdx) => (
+                  <div key={`${idx}-${lineIdx}`} className="text-gray-700">
+                    <span className="text-gray-400 mr-2"> </span>
+                    {line}
+                  </div>
+                ));
+              }
+            })}
+          </div>
+        )}
+      </div>
+    </div>
+  );
 }
 
 function WorkbookCell({ cell, index, workbookPath, onUpdate, onDelete, onExecute, onMoveUp, onMoveDown, onClearOutput, isSelected, isEditMode, isRunning, executionElapsed, onSelect, onEnterEditMode, onInsertBelow, autosaveEnabled, swappingCells }) {
@@ -663,7 +805,6 @@ function WorkbookCell({ cell, index, workbookPath, onUpdate, onDelete, onExecute
 
 function CellOutput({ output }) {
   const [expanded, setExpanded] = useState(false);
-  const [zoomedImage, setZoomedImage] = useState(null);
   const MAX_LINES = 20; // Show first 20 lines by default
 
   // Check if output was truncated by the backend
@@ -690,6 +831,7 @@ function CellOutput({ output }) {
   const stripAnsi = (text) => {
     if (!text) return text;
     // Remove ANSI escape sequences
+    // eslint-disable-next-line no-control-regex
     return text.replace(/\x1b\[[0-9;]*m/g, '');
   };
 
@@ -894,7 +1036,7 @@ function CellOutput({ output }) {
   return null;
 }
 
-export function WorkbookViewer({ workbookPath, projectRoot, autosaveEnabled = true, onClose, onUnsavedChangesUpdate }) {
+export const WorkbookViewer = forwardRef(function WorkbookViewer({ workbookPath, projectRoot, autosaveEnabled = true, onClose, onUnsavedChangesUpdate }, ref) {
   const [notebook, setNotebook] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
@@ -903,14 +1045,12 @@ export function WorkbookViewer({ workbookPath, projectRoot, autosaveEnabled = tr
   const [editMode, setEditMode] = useState(false);
   const [isRunningAll, setIsRunningAll] = useState(false);
   const [runningCellId, setRunningCellId] = useState(null);
-  const [cellExecutionStartTime, setCellExecutionStartTime] = useState(null); // Track when cell execution started
+  const [, setCellExecutionStartTime] = useState(null); // Track when cell execution started
   const [cellExecutionElapsed, setCellExecutionElapsed] = useState(0); // Track elapsed time in ms
   const [engineStatus, setEngineStatus] = useState('starting'); // 'starting', 'idle', 'busy', 'error', 'restarting'
-  const [engineReady, setEngineReady] = useState(false);
+  const [, setEngineReady] = useState(false);
   const engineStartedRef = useRef(false);
-  const cellRefs = useRef([]);
   const currentUnlistenRef = useRef(null);
-  const executingCellRef = useRef(null);
   const lastDKeyPressRef = useRef(0); // Track last 'D' key press for double-tap delete
   const executionTimerRef = useRef(null); // Timer for updating elapsed time
   const outputListenerRef = useRef(null); // Track active output listener to prevent duplicates
@@ -919,6 +1059,25 @@ export function WorkbookViewer({ workbookPath, projectRoot, autosaveEnabled = tr
   const [hasSecretsInOutputs, setHasSecretsInOutputs] = useState(false);
   const contentScrollRef = useRef(null); // Ref for scroll container
   const [swappingCells, setSwappingCells] = useState(null); // Track cells being swapped { from, to }
+
+  // AI diff state
+  const [pendingChanges, setPendingChanges] = useState(null);
+  // Structure: { originalNotebook, proposedNotebook, cellDiffs: [...], decisions: {} }
+  // decisions tracks which cells have been accepted/rejected
+
+  // Expose handleAiChanges function to parent component via ref
+  useImperativeHandle(ref, () => ({
+    handleAiChanges: (oldNotebook, newNotebook) => {
+      const cellDiffs = computeNotebookDiff(oldNotebook, newNotebook);
+
+      setPendingChanges({
+        originalNotebook: oldNotebook,
+        proposedNotebook: newNotebook,
+        cellDiffs: cellDiffs,
+        decisions: {}, // Track which cells have been accepted/rejected
+      });
+    }
+  }));
 
   useEffect(() => {
     loadWorkbook();
@@ -1146,6 +1305,37 @@ export function WorkbookViewer({ workbookPath, projectRoot, autosaveEnabled = tr
     }
   };
 
+  const revertToPreviousVersion = async () => {
+    const confirmRevert = confirm("Revert to the previous version? This will discard all current changes.");
+    if (!confirmRevert) return;
+
+    try {
+      // Get the previous version
+      const previousContent = await invoke("get_previous_notebook_version", {
+        projectRoot: projectRoot,
+        workbookPath: workbookPath,
+      });
+
+      if (!previousContent) {
+        alert("No previous version available to revert to.");
+        return;
+      }
+
+      // Parse and set the notebook
+      const previousNotebook = JSON.parse(previousContent);
+      setNotebook(previousNotebook);
+      setHasUnsavedChanges(true);
+
+      // Save the reverted version
+      await saveWorkbook();
+
+      alert("Successfully reverted to previous version.");
+    } catch (err) {
+      console.error("Failed to revert to previous version:", err);
+      alert(`Failed to revert: ${err}`);
+    }
+  };
+
   const interruptExecution = async () => {
     try {
       await invoke("interrupt_engine", {
@@ -1268,6 +1458,214 @@ export function WorkbookViewer({ workbookPath, projectRoot, autosaveEnabled = tr
 
     // Save without secrets check
     await saveWorkbook(true);
+  };
+
+  // ============================================
+  // AI DIFF HANDLING FUNCTIONS
+  // ============================================
+
+  /**
+   * Compute differences between old and new notebooks
+   * Similar to the old NotebookDiffModal logic
+   */
+  const computeNotebookDiff = (oldNotebook, newNotebook) => {
+    const diffs = [];
+    const oldCells = oldNotebook.cells || [];
+    const newCells = newNotebook.cells || [];
+
+    const maxLength = Math.max(oldCells.length, newCells.length);
+
+    for (let i = 0; i < maxLength; i++) {
+      const oldCell = oldCells[i];
+      const newCell = newCells[i];
+
+      if (!oldCell && newCell) {
+        // Cell was added
+        diffs.push({
+          type: 'added',
+          cellIndex: i,
+          oldCell: null,
+          newCell: newCell
+        });
+      } else if (oldCell && !newCell) {
+        // Cell was deleted
+        diffs.push({
+          type: 'deleted',
+          cellIndex: i,
+          oldCell: oldCell,
+          newCell: null
+        });
+      } else if (oldCell && newCell) {
+        // Check if cell was modified
+        const oldSource = getCellSourceAsString(oldCell.source);
+        const newSource = getCellSourceAsString(newCell.source);
+
+        if (oldSource !== newSource || oldCell.cell_type !== newCell.cell_type) {
+          diffs.push({
+            type: 'modified',
+            cellIndex: i,
+            oldCell: oldCell,
+            newCell: newCell
+          });
+        }
+      }
+    }
+
+    return diffs;
+  };
+
+  /**
+   * Handle when AI proposes changes to the notebook
+   * This will be called from App.jsx via prop
+   */
+  const handleAiChanges = (oldNotebook, newNotebook) => {
+    const cellDiffs = computeNotebookDiff(oldNotebook, newNotebook);
+
+    setPendingChanges({
+      originalNotebook: oldNotebook,
+      proposedNotebook: newNotebook,
+      cellDiffs: cellDiffs,
+      decisions: {}, // Track which cells have been accepted/rejected
+    });
+  };
+
+  /**
+   * Accept a single cell change
+   */
+  const handleAcceptCell = (cellIndex) => {
+    if (!pendingChanges) return;
+
+    setPendingChanges(prev => ({
+      ...prev,
+      decisions: {
+        ...prev.decisions,
+        [cellIndex]: 'accepted'
+      }
+    }));
+
+    // Check if all cells have been decided
+    const allDecided = pendingChanges.cellDiffs.every(diff =>
+      pendingChanges.decisions[diff.cellIndex] === 'accepted' ||
+      pendingChanges.decisions[diff.cellIndex] === 'rejected' ||
+      diff.cellIndex === cellIndex
+    );
+
+    if (allDecided) {
+      applyPendingChanges();
+    }
+  };
+
+  /**
+   * Reject a single cell change
+   */
+  const handleRejectCell = (cellIndex) => {
+    if (!pendingChanges) return;
+
+    setPendingChanges(prev => ({
+      ...prev,
+      decisions: {
+        ...prev.decisions,
+        [cellIndex]: 'rejected'
+      }
+    }));
+
+    // Check if all cells have been decided
+    const allDecided = pendingChanges.cellDiffs.every(diff =>
+      pendingChanges.decisions[diff.cellIndex] === 'accepted' ||
+      pendingChanges.decisions[diff.cellIndex] === 'rejected' ||
+      diff.cellIndex === cellIndex
+    );
+
+    if (allDecided) {
+      applyPendingChanges();
+    }
+  };
+
+  /**
+   * Accept all AI changes
+   */
+  const handleAcceptAll = () => {
+    if (!pendingChanges) return;
+
+    // Mark all as accepted
+    const allAccepted = {};
+    pendingChanges.cellDiffs.forEach(diff => {
+      allAccepted[diff.cellIndex] = 'accepted';
+    });
+
+    setPendingChanges(prev => ({
+      ...prev,
+      decisions: allAccepted
+    }));
+
+    // Apply changes immediately
+    setTimeout(() => applyPendingChanges(), 0);
+  };
+
+  /**
+   * Reject all AI changes
+   */
+  const handleRejectAll = () => {
+    if (!pendingChanges) return;
+
+    // Just clear pending changes without applying anything
+    setPendingChanges(null);
+  };
+
+  /**
+   * Apply the pending changes based on user decisions
+   */
+  const applyPendingChanges = async () => {
+    if (!pendingChanges) return;
+
+    const { originalNotebook, proposedNotebook, cellDiffs, decisions } = pendingChanges;
+
+    // Build the final notebook based on decisions
+    const finalCells = [];
+    const maxLength = Math.max(
+      originalNotebook.cells?.length || 0,
+      proposedNotebook.cells?.length || 0
+    );
+
+    for (let i = 0; i < maxLength; i++) {
+      const diff = cellDiffs.find(d => d.cellIndex === i);
+
+      if (!diff) {
+        // Cell unchanged, use original
+        if (originalNotebook.cells[i]) {
+          finalCells.push(originalNotebook.cells[i]);
+        }
+      } else {
+        const decision = decisions[i];
+
+        if (decision === 'accepted') {
+          // Use new cell (if it exists - might be deleted)
+          if (diff.newCell) {
+            finalCells.push(diff.newCell);
+          }
+          // If no newCell (deleted), don't add anything
+        } else {
+          // Use old cell (if it exists - might be newly added)
+          if (diff.oldCell) {
+            finalCells.push(diff.oldCell);
+          }
+          // If no oldCell (new addition that was rejected), don't add anything
+        }
+      }
+    }
+
+    // Update notebook with final cells
+    setNotebook({
+      ...proposedNotebook,
+      cells: ensureCellIds(finalCells)
+    });
+
+    // Save the notebook
+    setHasUnsavedChanges(true);
+    await saveWorkbook();
+
+    // Clear pending changes
+    setPendingChanges(null);
   };
 
   const updateCell = (index, newContent) => {
@@ -1909,26 +2307,27 @@ export function WorkbookViewer({ workbookPath, projectRoot, autosaveEnabled = tr
     return workbookPath.split("/").pop();
   };
 
-  const handleClose = async () => {
-    if (hasUnsavedChanges) {
-      const shouldSave = await ask(
-        "You have unsaved changes. Do you want to save before closing?",
-        {
-          title: "Unsaved Changes",
-          kind: "warning",
-          okLabel: "Save",
-          cancelLabel: "Don't Save"
-        }
-      );
-
-      if (shouldSave) {
-        await saveWorkbook();
-      }
-    }
-
-    // Close the notebook
-    onClose();
-  };
+  // Unused for now - may be needed for explicit close handling in the future
+  // const handleClose = async () => {
+  //   if (hasUnsavedChanges) {
+  //     const shouldSave = await ask(
+  //       "You have unsaved changes. Do you want to save before closing?",
+  //       {
+  //         title: "Unsaved Changes",
+  //         kind: "warning",
+  //         okLabel: "Save",
+  //         cancelLabel: "Don't Save"
+  //       }
+  //     );
+  //
+  //     if (shouldSave) {
+  //       await saveWorkbook();
+  //     }
+  //   }
+  //
+  //   // Close the notebook
+  //   onClose();
+  // };
 
   if (loading) {
     return (
@@ -2046,6 +2445,13 @@ export function WorkbookViewer({ workbookPath, projectRoot, autosaveEnabled = tr
             >
               🔄 Restart
             </button>
+            <button
+              onClick={revertToPreviousVersion}
+              className={STYLES.viewer.button}
+              title="Revert to previous version"
+            >
+              ↶ Revert
+            </button>
           </div>
 
           <div className={STYLES.viewer.separator}></div>
@@ -2083,12 +2489,54 @@ export function WorkbookViewer({ workbookPath, projectRoot, autosaveEnabled = tr
             </button>
           </div>
         )}
+
+        {/* AI Diff Toolbar - shown when reviewing AI changes */}
+        {pendingChanges && (
+          <div className="mb-6 p-4 bg-blue-50 border border-blue-200 rounded-lg">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-3">
+                <span className="text-lg">⚠️</span>
+                <div>
+                  <h3 className="font-semibold text-gray-900">AI made changes to this notebook</h3>
+                  <p className="text-sm text-gray-600">
+                    {pendingChanges.cellDiffs.filter(d => d.type === 'added').length > 0 && (
+                      <span className="text-green-700">{pendingChanges.cellDiffs.filter(d => d.type === 'added').length} added</span>
+                    )}
+                    {pendingChanges.cellDiffs.filter(d => d.type === 'added').length > 0 && pendingChanges.cellDiffs.filter(d => d.type === 'modified').length > 0 && <span className="text-gray-400"> • </span>}
+                    {pendingChanges.cellDiffs.filter(d => d.type === 'modified').length > 0 && (
+                      <span className="text-blue-700">{pendingChanges.cellDiffs.filter(d => d.type === 'modified').length} modified</span>
+                    )}
+                    {pendingChanges.cellDiffs.filter(d => d.type === 'modified').length > 0 && pendingChanges.cellDiffs.filter(d => d.type === 'deleted').length > 0 && <span className="text-gray-400"> • </span>}
+                    {pendingChanges.cellDiffs.filter(d => d.type === 'deleted').length > 0 && (
+                      <span className="text-red-700">{pendingChanges.cellDiffs.filter(d => d.type === 'deleted').length} deleted</span>
+                    )}
+                  </p>
+                </div>
+              </div>
+              <div className="flex gap-2">
+                <button
+                  onClick={handleRejectAll}
+                  className="px-4 py-2 text-gray-700 bg-white hover:bg-gray-100 border border-gray-300 rounded font-medium"
+                >
+                  Reject All
+                </button>
+                <button
+                  onClick={handleAcceptAll}
+                  className="px-4 py-2 text-white bg-blue-600 hover:bg-blue-700 rounded font-medium"
+                >
+                  Accept All
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
+
         {notebook.cells.length === 0 && (
           <div className={STYLES.viewer.emptyState}>
             <p>Empty notebook. Add a cell to get started.</p>
           </div>
         )}
-        {notebook.cells.map((cell, index) => (
+        {!pendingChanges && notebook.cells.map((cell, index) => (
           <WorkbookCell
             key={cell.metadata?.cell_id || index}
             cell={cell}
@@ -2114,6 +2562,26 @@ export function WorkbookViewer({ workbookPath, projectRoot, autosaveEnabled = tr
             swappingCells={swappingCells}
           />
         ))}
+
+        {/* Diff mode - show UnifiedDiffCell for changed cells */}
+        {pendingChanges && pendingChanges.cellDiffs.map((diff) => {
+          // Skip cells that have already been decided
+          if (pendingChanges.decisions[diff.cellIndex]) {
+            return null;
+          }
+
+          return (
+            <UnifiedDiffCell
+              key={`diff-${diff.cellIndex}`}
+              oldCell={diff.oldCell}
+              newCell={diff.newCell}
+              type={diff.type}
+              cellIndex={diff.cellIndex}
+              onAccept={handleAcceptCell}
+              onReject={handleRejectCell}
+            />
+          );
+        })}
       </div>
 
       {/* Secrets Warning Modal */}
@@ -2127,4 +2595,4 @@ export function WorkbookViewer({ workbookPath, projectRoot, autosaveEnabled = tr
       )}
     </div>
   );
-}
+});

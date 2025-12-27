@@ -1,6 +1,95 @@
 # AI Assistant - Completed
 
-## Dec 27, 2024
+## Dec 27, 2025
+
+### Immediate Thinking Indicator Fix
+
+**Fixed critical UX issue where AI chat showed no feedback for 30+ seconds after sending a message**
+
+- [x] **Problem Identified**:
+  - When user sent a message, placeholder assistant message was created
+  - Existing thinking indicator only showed when last message was NOT an assistant
+  - This caused blank screen with no feedback during initial processing
+  - Users thought the app was frozen or broken
+
+- [x] **Solution Implemented**:
+  - Added inline thinking indicator inside assistant messages
+  - Shows "Claude is thinking..." with bouncing dots immediately
+  - Triggers when: `isStreaming=true` AND no content AND no progress events
+  - Switches to actual content/progress as soon as first event arrives
+  - Location: src/components/AiChatPanel.jsx:824-843
+
+- [x] **User Experience**:
+  - **Before**: Blank gray box for 30+ seconds with no indication of progress
+  - **After**: Immediate "Claude is thinking..." indicator with animated dots
+  - Users now have clear feedback that their request is being processed
+  - No more confusion about whether the app is working
+
+### Notebook Change Visibility and Approval System
+
+**Comprehensive solution for safe AI-driven notebook modifications with full visibility, approval workflow, and version control**
+
+- [x] **NotebookDiffModal Component** (src/components/NotebookDiffModal.jsx):
+  - Beautiful diff view showing cell-by-cell changes
+  - Color-coded indicators: green (added), blue (modified), red (deleted)
+  - Side-by-side before/after view for modified cells
+  - Summary counts showing number of additions, modifications, deletions
+  - Clean, professional UI matching Workbooks design system
+  - Approve/Reject buttons with clear call-to-action
+
+- [x] **Notebook Versioning System** (Rust backend):
+  - Automatic version snapshots saved to `.workbooks/versions/{notebook_name}/{timestamp}.ipynb`
+  - Six new Tauri commands:
+    - `save_notebook_version` - Save current state before modification
+    - `list_notebook_versions` - List all available versions
+    - `get_notebook_version` - Retrieve specific version by timestamp
+    - `get_previous_notebook_version` - Get most recent version
+    - `revert_notebook_to_version` - Restore a specific version
+    - `cleanup_old_notebook_versions` - Maintain version history size
+  - File system functions in src-tauri/src/fs.rs
+  - Versions organized by notebook name for easy navigation
+
+- [x] **AI Chat Integration** (src/components/AiChatPanel.jsx):
+  - Intercepts Write/Edit operations on `.ipynb` files
+  - Triggers on `tool_result` event (after Claude completes the operation)
+  - Automatically saves previous version before showing diff
+  - Loads both old and new notebook content for comparison
+  - Falls back to empty notebook structure for new files
+  - Error handling with graceful fallback to direct file opening
+
+- [x] **App-Level Approval Flow** (src/App.jsx):
+  - Modal state management for diff approval
+  - `handleRequestNotebookApproval` - Receives old/new notebooks from AI chat
+  - `handleApproveNotebookChanges` - Saves new version and opens notebook
+  - `handleRejectNotebookChanges` - Reverts to previous version
+  - `handleCloseDiffModal` - Treats close as rejection (safety first)
+  - Passed to AiChatPanel via `onRequestNotebookApproval` prop
+
+- [x] **Manual Revert Button** (src/components/WorkbookViewer.jsx):
+  - New "↶ Revert" button in toolbar next to Restart
+  - Confirmation dialog before reverting
+  - Loads previous version from version history
+  - Updates notebook state and saves automatically
+  - Clear user feedback on success/failure
+  - Available anytime, not just for AI changes
+
+- [x] **Benefits**:
+  - **Safety**: No unwanted AI changes can be saved without approval
+  - **Visibility**: Users see exactly what Claude changed, cell by cell
+  - **Control**: Easy approve/reject workflow with clear consequences
+  - **Recovery**: Version history enables reverting any changes
+  - **Confidence**: Users can safely let Claude edit notebooks
+  - **Audit trail**: Timestamped versions track modification history
+
+- [x] **User Flow**:
+  1. User asks Claude to create or modify a notebook
+  2. Claude uses Write/Edit tool to make changes
+  3. System saves current version (if exists) to `.workbooks/versions/`
+  4. Diff modal automatically appears showing all changes
+  5. User reviews cell-by-cell diffs with visual indicators
+  6. User clicks "Approve" → changes saved and notebook opens
+  7. OR user clicks "Reject" → changes discarded, reverts to previous
+  8. Anytime later, user can click "Revert" button to undo
 
 ### Markdown Rendering & Enhanced Progress Indicators
 

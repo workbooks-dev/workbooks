@@ -1,8 +1,7 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { listen } from "@tauri-apps/api/event";
-import { ask } from "@tauri-apps/plugin-dialog";
 import { getWindowScreenshot, getScreenshotableWindows } from "tauri-plugin-screenshots-api";
 import { writeImage } from "@tauri-apps/plugin-clipboard-manager";
 import { ActionWindow } from "./components/ActionWindow";
@@ -17,6 +16,7 @@ import { ScheduleTab } from "./components/ScheduleTab";
 import { AppSettings } from "./components/AppSettings";
 import { TabBar } from "./components/TabBar";
 import { SaveConfirmDialog } from "./components/SaveConfirmDialog";
+import { ResizablePanel } from "./components/ResizablePanel";
 import "./App.css";
 
 function App() {
@@ -30,6 +30,23 @@ function App() {
   const [pendingClose, setPendingClose] = useState(null); // 'window' or 'tab'
   const [aiEnabled, setAiEnabled] = useState(false);
   const [initialChatSession, setInitialChatSession] = useState(null);
+
+  // Panel visibility state
+  const [showLeftSidebar, setShowLeftSidebar] = useState(() => {
+    const saved = localStorage.getItem('workbooks_show_left_sidebar');
+    return saved === null ? true : saved === 'true';
+  });
+  const [showAiChat, setShowAiChat] = useState(() => {
+    const saved = localStorage.getItem('workbooks_show_ai_chat');
+    return saved === null ? true : saved === 'true';
+  });
+  const [showRightPanel, setShowRightPanel] = useState(() => {
+    const saved = localStorage.getItem('workbooks_show_right_panel');
+    return saved === null ? true : saved === 'true';
+  });
+
+  // WorkbookViewer ref - used to trigger inline diff when AI makes changes
+  const workbookViewerRef = useRef(null);
 
   useEffect(() => {
     // Check URL parameters for initial view/project
@@ -190,7 +207,7 @@ function App() {
       unlistenOpenProject = await listen("open-project", async (event) => {
         console.log("Received open-project event:", event.payload);
         try {
-          const { path, name } = event.payload;
+          const { path } = event.payload;
           await loadProjectFromPath(path);
         } catch (error) {
           console.error("Failed to open project from tray:", error);
@@ -440,10 +457,44 @@ function App() {
     };
   }, [view, tabs]);
 
-  // Handle Command+W to close tabs or reset to Action Window
+  // Save panel visibility to localStorage
+  useEffect(() => {
+    localStorage.setItem('workbooks_show_left_sidebar', showLeftSidebar.toString());
+  }, [showLeftSidebar]);
+
+  useEffect(() => {
+    localStorage.setItem('workbooks_show_ai_chat', showAiChat.toString());
+  }, [showAiChat]);
+
+  useEffect(() => {
+    localStorage.setItem('workbooks_show_right_panel', showRightPanel.toString());
+  }, [showRightPanel]);
+
+  // Handle keyboard shortcuts for panels and tabs
   useEffect(() => {
     const handleKeyDown = async (event) => {
-      // Command+W on macOS or Ctrl+W on other platforms
+      // Cmd+B (or Ctrl+B) - Toggle left sidebar (VS Code standard)
+      if ((event.metaKey || event.ctrlKey) && event.key === "b" && !event.shiftKey) {
+        event.preventDefault();
+        setShowLeftSidebar(prev => !prev);
+        return;
+      }
+
+      // Cmd+J (or Ctrl+J) - Toggle AI chat panel (VS Code standard for bottom panel)
+      if ((event.metaKey || event.ctrlKey) && event.key === "j" && !event.shiftKey) {
+        event.preventDefault();
+        setShowAiChat(prev => !prev);
+        return;
+      }
+
+      // Cmd+Shift+B (or Ctrl+Shift+B) - Toggle right panel (file viewer)
+      if ((event.metaKey || event.ctrlKey) && event.shiftKey && event.key === "B") {
+        event.preventDefault();
+        setShowRightPanel(prev => !prev);
+        return;
+      }
+
+      // Command+W on macOS or Ctrl+W on other platforms - Close tab
       if ((event.metaKey || event.ctrlKey) && event.key === "w") {
         event.preventDefault();
 
@@ -499,7 +550,7 @@ function App() {
     return () => {
       window.removeEventListener("keydown", handleKeyDown);
     };
-  }, [view, tabs, activeTabId]);
+  }, [view, tabs, activeTabId, showLeftSidebar, showAiChat, showRightPanel]);
 
   async function checkCurrentProject() {
     try {
@@ -627,6 +678,41 @@ function App() {
 
     setTabs([...tabs, newTab]);
     setActiveTabId(newTab.id);
+  }
+
+  // === Notebook Change Approval Handlers ===
+
+  /**
+   * Request user approval for AI-generated notebook changes (inline diff)
+   * @param {string} filePath - Path to the notebook being modified
+   * @param {object} oldNotebook - Previous notebook content (parsed JSON)
+   * @param {object} newNotebook - New notebook content (parsed JSON)
+   */
+  async function handleRequestNotebookApproval(filePath, oldNotebook, newNotebook) {
+    // First, open the notebook if it's not already open
+    const existingTab = tabs.find(t => t.path === filePath && t.type === "workbook");
+
+    if (!existingTab) {
+      // Open the notebook
+      handleOpenFile(filePath, "workbook");
+
+      // Wait a bit for the component to mount and ref to be attached
+      setTimeout(() => {
+        if (workbookViewerRef.current) {
+          workbookViewerRef.current.handleAiChanges(oldNotebook, newNotebook);
+        }
+      }, 100);
+    } else {
+      // Notebook is already open, activate it and trigger diff
+      setActiveTabId(existingTab.id);
+
+      // Small delay to ensure the WorkbookViewer is rendered and ref is available
+      setTimeout(() => {
+        if (workbookViewerRef.current) {
+          workbookViewerRef.current.handleAiChanges(oldNotebook, newNotebook);
+        }
+      }, 50);
+    }
   }
 
   function handleTabSelect(tabId) {
@@ -887,19 +973,63 @@ function App() {
         </div>
       )}
 
-      <div className="grid flex-1 overflow-hidden" style={{ gridTemplateColumns: '256px 1fr' }}>
-        <aside className="border-r border-gray-200 bg-gray-50 overflow-y-auto">
-          <Sidebar
-            projectRoot={currentProject.root}
-            projectName={currentProject.name}
-            onOpenFile={handleOpenFile}
-            onFileDeleted={handleFileDeleted}
-            onFileRenamed={handleFileRenamed}
-            onOpenSettings={handleOpenSettings}
-            activeFilePath={activeTab?.path}
-          />
-        </aside>
-        <main className="overflow-hidden bg-white flex flex-col min-w-0">
+      {/* Top Bar with Panel Toggles (VS Code style) */}
+      <div className="flex items-center justify-end gap-1 px-3 py-1.5 border-b border-gray-200 bg-white">
+        <button
+          onClick={() => setShowLeftSidebar(!showLeftSidebar)}
+          className={`p-1.5 hover:bg-gray-100 transition-colors ${showLeftSidebar ? 'text-blue-600' : 'text-gray-600'}`}
+          title="Toggle Primary Sidebar (⌘B)"
+        >
+          <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 16 16">
+            <path d="M14 2H2a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V3a1 1 0 0 0-1-1zM2 3h3v10H2V3zm4 0h8v10H6V3z"/>
+          </svg>
+        </button>
+        <button
+          onClick={() => setShowAiChat(!showAiChat)}
+          className={`p-1.5 hover:bg-gray-100 transition-colors ${showAiChat ? 'text-blue-600' : 'text-gray-600'}`}
+          title="Toggle Panel (⌘J)"
+        >
+          <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 16 16">
+            <path d="M14 2H2a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V3a1 1 0 0 0-1-1zM2 3h12v7H2V3zm0 8h12v2H2v-2z"/>
+          </svg>
+        </button>
+        <button
+          onClick={() => setShowRightPanel(!showRightPanel)}
+          className={`p-1.5 hover:bg-gray-100 transition-colors ${showRightPanel ? 'text-blue-600' : 'text-gray-600'}`}
+          title="Toggle Secondary Sidebar (⌘⇧B)"
+        >
+          <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 16 16">
+            <path d="M14 2H2a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V3a1 1 0 0 0-1-1zM2 3h8v10H2V3zm9 0h3v10h-3V3z"/>
+          </svg>
+        </button>
+      </div>
+
+      <div className="flex flex-1 overflow-hidden">
+        {/* Left Sidebar */}
+        <ResizablePanel
+          isCollapsed={!showLeftSidebar}
+          defaultWidth={256}
+          minWidth={200}
+          maxWidth={500}
+          side="right"
+          storageKey="workbooks_left_sidebar_width"
+          className="border-r border-gray-200 bg-gray-50"
+        >
+          <div className="h-full overflow-y-auto">
+            <Sidebar
+              projectRoot={currentProject.root}
+              projectName={currentProject.name}
+              onOpenFile={handleOpenFile}
+              onFileDeleted={handleFileDeleted}
+              onFileRenamed={handleFileRenamed}
+              onOpenSettings={handleOpenSettings}
+              activeFilePath={activeTab?.path}
+            />
+          </div>
+        </ResizablePanel>
+
+        {/* Main Content Area */}
+        <main className="flex-1 overflow-hidden bg-white flex flex-col min-w-0">
           {/* Tab Bar - only show when there are tabs */}
           {tabs.length > 0 && (
             <div className="flex items-center border-b border-gray-200 bg-white">
@@ -914,25 +1044,52 @@ function App() {
             </div>
           )}
 
-          {/* Main Content Area - Split View */}
+          {/* Content Split View */}
           <div className="flex-1 flex overflow-hidden">
-            {/* AI Chat Panel - Always visible */}
-            <div className={`${activeTab ? 'w-1/2 border-r border-gray-200' : 'flex-1'} overflow-hidden`}>
-              <AiChatPanel
-                projectRoot={currentProject.root}
-                aiEnabled={aiEnabled}
-                onOpenSettings={handleOpenSettings}
-                focusedFile={focusedFile}
-                onOpenFile={handleOpenFile}
-                initialSession={initialChatSession}
-              />
-            </div>
+            {/* AI Chat Panel */}
+            {showAiChat && (
+              <>
+                {activeTab ? (
+                  <ResizablePanel
+                    defaultWidth={500}
+                    minWidth={300}
+                    maxWidth={1200}
+                    side="right"
+                    storageKey="workbooks_ai_chat_width"
+                    className="border-r border-gray-200 overflow-hidden"
+                  >
+                    <AiChatPanel
+                      projectRoot={currentProject.root}
+                      aiEnabled={aiEnabled}
+                      onOpenSettings={handleOpenSettings}
+                      focusedFile={focusedFile}
+                      onOpenFile={handleOpenFile}
+                      onRequestNotebookApproval={handleRequestNotebookApproval}
+                      initialSession={initialChatSession}
+                    />
+                  </ResizablePanel>
+                ) : (
+                  <div className="flex-1 overflow-hidden">
+                    <AiChatPanel
+                      projectRoot={currentProject.root}
+                      aiEnabled={aiEnabled}
+                      onOpenSettings={handleOpenSettings}
+                      focusedFile={focusedFile}
+                      onOpenFile={handleOpenFile}
+                      onRequestNotebookApproval={handleRequestNotebookApproval}
+                      initialSession={initialChatSession}
+                    />
+                  </div>
+                )}
+              </>
+            )}
 
-            {/* File Viewer - Only when a tab is active */}
-            {activeTab && (
+            {/* File Viewer - Only when a tab is active and right panel is visible */}
+            {activeTab && showRightPanel && (
               <div className="flex-1 overflow-auto">
                 {activeTab.type === "workbook" ? (
                   <WorkbookViewer
+                    ref={workbookViewerRef}
                     key={activeTab.id}
                     workbookPath={activeTab.path}
                     projectRoot={currentProject.root}

@@ -1,5 +1,16 @@
 # AI Assistant - Todo
 
+## Critical Issues
+
+**All critical issues have been resolved!**
+
+- [x] **Notebook change visibility and approval** (COMPLETED - Dec 27, 2025)
+  - Implemented full diff modal showing cell-by-cell changes when AI modifies notebooks
+  - Approve/reject flow prevents unwanted changes from being saved
+  - Version history system stores previous notebook states
+  - Manual revert button in WorkbookViewer toolbar
+  - See: src/components/NotebookDiffModal.jsx, features/ai-assistant/done.md
+
 ## High Priority
 
 - [ ] Test AI-first interface with real Claude Code CLI

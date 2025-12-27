@@ -209,7 +209,8 @@ pub fn update_session_title(session_id: String, new_title: String) -> Result<()>
 pub fn get_or_create_project_session(project_root: String, project_name: String) -> Result<ChatSession> {
     // Always create a new session when opening a project
     // Previous sessions remain in the database and can be accessed via chat history
-    let title = format!("{} Chat", project_name);
+    let now = chrono::Local::now();
+    let title = format!("{} - {}", project_name, now.format("%b %d, %Y %H:%M"));
     create_session(title, Some("claude-sonnet-4-5-20250929".to_string()), Some(project_root))
 }
 

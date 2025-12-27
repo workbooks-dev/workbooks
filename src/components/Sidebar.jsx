@@ -6,6 +6,7 @@ import { ContextMenu } from "./ContextMenu";
 import { InputDialog } from "./InputDialog";
 import { WorkbooksTableView } from "./WorkbooksTableView";
 import { FileInfoDialog } from "./FileInfoDialog";
+import NewWorkbookModal from "./NewWorkbookModal";
 
 // Collapsible section component
 function SidebarSection({ title, children, defaultExpanded = true, onHeaderClick }) {
@@ -231,8 +232,7 @@ export function Sidebar({ projectRoot, projectName, onOpenFile, onFileDeleted, o
   const [files, setFiles] = useState([]);
   const [workbooks, setWorkbooks] = useState([]);
   const [loading, setLoading] = useState(false);
-  const [creatingWorkbook, setCreatingWorkbook] = useState(false);
-  const [workbookName, setWorkbookName] = useState("");
+  const [showNewWorkbookModal, setShowNewWorkbookModal] = useState(false);
   const [showWorkbooksTable, setShowWorkbooksTable] = useState(false);
   const [renamingFile, setRenamingFile] = useState(null);
   const [recentWorkbooks, setRecentWorkbooks] = useState([]);
@@ -467,9 +467,6 @@ export function Sidebar({ projectRoot, projectName, onOpenFile, onFileDeleted, o
     return () => clearTimeout(timeoutId);
   }, [fileSearchQuery, projectRoot]);
 
-  const filteredFiles = filterFiles(files, fileSearchQuery);
-  const displayFiles = fileSearchQuery.trim() ? searchResults : files;
-
   const handleFileClick = (file) => {
     if (file.extension === "ipynb") {
       onOpenFile?.(file.path, "workbook");
@@ -480,14 +477,10 @@ export function Sidebar({ projectRoot, projectName, onOpenFile, onFileDeleted, o
   };
 
   const handleNewWorkbook = () => {
-    setCreatingWorkbook(true);
-    setWorkbookName("");
+    setShowNewWorkbookModal(true);
   };
 
-  const handleCreateWorkbook = async (e) => {
-    e.preventDefault();
-    if (!workbookName.trim()) return;
-
+  const handleCreateBlankWorkbook = async (workbookName) => {
     try {
       const workbooksDir = `${projectRoot}/notebooks`;
       const workbookPath = await invoke("create_workbook", {
@@ -495,14 +488,22 @@ export function Sidebar({ projectRoot, projectName, onOpenFile, onFileDeleted, o
         workbookName: workbookName,
       });
 
-      setCreatingWorkbook(false);
-      setWorkbookName("");
+      setShowNewWorkbookModal(false);
       await loadProjectFiles();
       onOpenFile?.(workbookPath, "workbook");
       updateRecentWorkbook(workbookPath);
     } catch (err) {
       console.error("Failed to create workbook:", err);
     }
+  };
+
+  const handleGenerateWithAI = async (workbookName, description) => {
+    // TODO: Implement AI generation
+    // For now, just create a blank workbook with a comment about the description
+    console.log("Generate workbook with AI:", { workbookName, description });
+
+    // For now, create blank and close modal
+    await handleCreateBlankWorkbook(workbookName);
   };
 
   const handleFileAction = async (action, file, extraData) => {
@@ -512,7 +513,7 @@ export function Sidebar({ projectRoot, projectName, onOpenFile, onFileDeleted, o
         setRenamingFilePath(file.path);
         break;
 
-      case 'delete':
+      case 'delete': {
         const confirmed = await ask(
           `Are you sure you want to delete "${file.name}"? This cannot be undone.`,
           {
@@ -533,6 +534,7 @@ export function Sidebar({ projectRoot, projectName, onOpenFile, onFileDeleted, o
           }
         }
         break;
+      }
 
       case 'newFile':
         setCreatingFile(true);
@@ -707,36 +709,6 @@ export function Sidebar({ projectRoot, projectName, onOpenFile, onFileDeleted, o
               <span>+</span>
               <span>New Workbook</span>
             </button>
-
-            {creatingWorkbook && (
-              <div className="mb-2 p-2 bg-white border border-gray-200 rounded">
-                <form onSubmit={handleCreateWorkbook} className="flex flex-col gap-2">
-                  <input
-                    type="text"
-                    value={workbookName}
-                    onChange={(e) => setWorkbookName(e.target.value)}
-                    placeholder="Workbook name"
-                    className="w-full px-2 py-1.5 text-sm border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
-                    autoFocus
-                  />
-                  <div className="flex gap-1.5">
-                    <button
-                      type="submit"
-                      className="flex-1 px-3 py-1.5 text-xs font-medium text-white bg-blue-600 hover:bg-blue-700 rounded"
-                    >
-                      Create
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setCreatingWorkbook(false)}
-                      className="flex-1 px-3 py-1.5 text-xs font-medium text-gray-700 bg-white hover:bg-gray-50 border border-gray-300 rounded"
-                    >
-                      Cancel
-                    </button>
-                  </div>
-                </form>
-              </div>
-            )}
 
             {orderedWorkbooks.length === 0 && !loading && (
               <p className="text-xs text-gray-400 text-center py-4">No workbooks yet</p>
@@ -1005,6 +977,14 @@ export function Sidebar({ projectRoot, projectName, onOpenFile, onFileDeleted, o
           onClose={() => setFileInfo(null)}
         />
       )}
+
+      {/* New Workbook Modal */}
+      <NewWorkbookModal
+        isOpen={showNewWorkbookModal}
+        onClose={() => setShowNewWorkbookModal(false)}
+        onCreateBlank={handleCreateBlankWorkbook}
+        onGenerateWithAI={handleGenerateWithAI}
+      />
     </div>
   );
 }

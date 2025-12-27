@@ -134,7 +134,7 @@ export function AiSidebar({ projectRoot, isOpen, onToggle, aiEnabled, onOpenSett
   const [sending, setSending] = useState(false);
   const [loading, setLoading] = useState(true);
   const [claudeInstalled, setClaudeInstalled] = useState(null);
-  const [sessionName, setSessionName] = useState(null);
+  const [, setSessionName] = useState(null);
   const [claudeSessionId, setClaudeSessionId] = useState(null); // UUID session ID from Claude CLI
   const [pendingChanges, setPendingChanges] = useState(null);
   const [pendingResponse, setPendingResponse] = useState(null);
@@ -481,9 +481,11 @@ export function AiSidebar({ projectRoot, isOpen, onToggle, aiEnabled, onOpenSett
 
     setSending(true);
 
+    // Track assistant message index for streaming updates
+    const assistantMessageIndex = messages.length;
+
     try {
       // Add placeholder assistant message for streaming
-      const assistantMessageIndex = messages.length;
       const assistantMessage = {
         role: "assistant",
         content: "",
@@ -722,9 +724,9 @@ export function AiSidebar({ projectRoot, isOpen, onToggle, aiEnabled, onOpenSett
       )}
 
       <div
-        className={\`h-full bg-gray-50 flex overflow-hidden relative \${
+        className={`h-full bg-gray-50 flex overflow-hidden relative ${
           isOpen ? 'border-l border-gray-200' : ''
-        }\`}
+        }`}
       >
         {/* Resize Handle */}
         {isOpen && (
@@ -739,7 +741,7 @@ export function AiSidebar({ projectRoot, isOpen, onToggle, aiEnabled, onOpenSett
             <div className="absolute inset-y-0 -left-1 -right-1" />
           </div>
         )}
-        <div className="h-full flex flex-col" style={{ width: \`\${width}px\`, opacity: isOpen ? 1 : 0 }}>
+        <div className="h-full flex flex-col" style={{ width: `${width}px`, opacity: isOpen ? 1 : 0 }}>
         {/* Header */}
         <div className="px-4 py-3 border-b border-gray-200 bg-white flex items-center justify-between">
           <div className="flex items-center gap-2">
@@ -781,9 +783,9 @@ export function AiSidebar({ projectRoot, isOpen, onToggle, aiEnabled, onOpenSett
                           setSelectedModel(model.value);
                           setShowModelSelector(false);
                         }}
-                        className={\`w-full px-3 py-2 text-left text-sm hover:bg-gray-100 transition-colors \${
+                        className={`w-full px-3 py-2 text-left text-sm hover:bg-gray-100 transition-colors ${
                           selectedModel === model.value ? "bg-blue-50 text-blue-700" : "text-gray-700"
-                        }\`}
+                        }`}
                       >
                         <div className="flex items-center justify-between">
                           <div className="flex-1">
@@ -906,9 +908,9 @@ export function AiSidebar({ projectRoot, isOpen, onToggle, aiEnabled, onOpenSett
               {sessions.slice(0, 5).map((session) => (
                 <div
                   key={session.id}
-                  className={\`px-4 py-2 cursor-pointer hover:bg-gray-50 transition-colors flex items-center justify-between group \${
+                  className={`px-4 py-2 cursor-pointer hover:bg-gray-50 transition-colors flex items-center justify-between group ${
                     activeSession?.id === session.id ? "bg-blue-50" : ""
-                  }\`}
+                  }`}
                   onClick={() => {
                     if (editingSessionId !== session.id) {
                       loadSession(session.id);
@@ -1024,18 +1026,18 @@ export function AiSidebar({ projectRoot, isOpen, onToggle, aiEnabled, onOpenSett
             messages.map((msg, idx) => (
               <div
                 key={idx}
-                className={\`flex \${
+                className={`flex ${
                   msg.role === "user" ? "justify-end" : "justify-start"
-                }\`}
+                }`}
               >
                 <div
-                  className={\`max-w-[85%] rounded-lg px-3 py-2 text-sm \${
+                  className={`max-w-[85%] rounded-lg px-3 py-2 text-sm ${
                     msg.role === "user"
                       ? "bg-blue-600 text-white"
                       : msg.isError
                       ? "bg-red-50 text-red-800 border border-red-200"
                       : "bg-white text-gray-800 border border-gray-200"
-                  }\`}
+                  }`}
                 >
                   {/* Show progress events */}
                   {msg.progress && msg.progress.length > 0 && (

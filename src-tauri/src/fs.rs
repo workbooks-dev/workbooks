@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct FileEntry {
@@ -616,4 +616,160 @@ pub fn reveal_in_finder(file_path: &Path) -> Result<()> {
     }
 
     Ok(())
+}
+
+// ===== Notebook Versioning =====
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct NotebookVersion {
+    pub timestamp: i64,
+    pub filename: String,
+    pub path: String,
+}
+
+/// Get the versions directory for a given project root
+fn get_versions_dir(project_root: &Path) -> PathBuf {
+    project_root.join(".workbooks").join("versions")
+}
+
+/// Get the version directory for a specific notebook
+fn get_notebook_version_dir(project_root: &Path, workbook_path: &Path) -> Result<PathBuf> {
+    // Extract notebook name from path
+    let notebook_name = workbook_path
+        .file_stem()
+        .ok_or_else(|| anyhow::anyhow!("Invalid notebook path"))?
+        .to_string_lossy()
+        .to_string();
+
+    Ok(get_versions_dir(project_root).join(notebook_name))
+}
+
+/// Save the current version of a notebook before modifying it
+/// Returns the path to the saved version
+pub fn save_notebook_version(project_root: &Path, workbook_path: &Path) -> Result<String> {
+    // Only save if the notebook currently exists
+    if !workbook_path.exists() {
+        return Ok(String::new()); // No current version to save
+    }
+
+    // Create versions directory structure
+    let version_dir = get_notebook_version_dir(project_root, workbook_path)?;
+    if !version_dir.exists() {
+        fs::create_dir_all(&version_dir)
+            .context("Failed to create versions directory")?;
+    }
+
+    // Generate timestamp-based filename
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+
+    let version_filename = format!("{}.ipynb", timestamp);
+    let version_path = version_dir.join(&version_filename);
+
+    // Copy current notebook to versions directory
+    fs::copy(workbook_path, &version_path)
+        .context("Failed to save notebook version")?;
+
+    Ok(version_path.to_string_lossy().to_string())
+}
+
+/// List all versions of a notebook
+pub fn list_notebook_versions(project_root: &Path, workbook_path: &Path) -> Result<Vec<NotebookVersion>> {
+    let version_dir = get_notebook_version_dir(project_root, workbook_path)?;
+
+    if !version_dir.exists() {
+        return Ok(Vec::new()); // No versions yet
+    }
+
+    let mut versions = Vec::new();
+
+    for entry in fs::read_dir(&version_dir)
+        .context("Failed to read versions directory")? {
+        let entry = entry.context("Failed to read directory entry")?;
+        let path = entry.path();
+
+        if path.extension().and_then(|e| e.to_str()) == Some("ipynb") {
+            if let Some(filename) = path.file_stem() {
+                if let Ok(timestamp) = filename.to_string_lossy().parse::<i64>() {
+                    versions.push(NotebookVersion {
+                        timestamp,
+                        filename: entry.file_name().to_string_lossy().to_string(),
+                        path: path.to_string_lossy().to_string(),
+                    });
+                }
+            }
+        }
+    }
+
+    // Sort by timestamp descending (newest first)
+    versions.sort_by(|a, b| b.timestamp.cmp(&a.timestamp));
+
+    Ok(versions)
+}
+
+/// Get the content of a specific notebook version
+pub fn get_notebook_version(project_root: &Path, workbook_path: &Path, timestamp: i64) -> Result<String> {
+    let version_dir = get_notebook_version_dir(project_root, workbook_path)?;
+    let version_filename = format!("{}.ipynb", timestamp);
+    let version_path = version_dir.join(version_filename);
+
+    if !version_path.exists() {
+        anyhow::bail!("Version not found");
+    }
+
+    read_file(&version_path)
+}
+
+/// Get the previous (most recent) version of a notebook
+pub fn get_previous_notebook_version(project_root: &Path, workbook_path: &Path) -> Result<Option<String>> {
+    let versions = list_notebook_versions(project_root, workbook_path)?;
+
+    if versions.is_empty() {
+        return Ok(None);
+    }
+
+    // Get the most recent version (already sorted newest first)
+    let latest = &versions[0];
+    let content = get_notebook_version(project_root, workbook_path, latest.timestamp)?;
+
+    Ok(Some(content))
+}
+
+/// Revert a notebook to a specific version
+pub fn revert_notebook_to_version(project_root: &Path, workbook_path: &Path, timestamp: i64) -> Result<()> {
+    // First, save the current state as a version (before reverting)
+    save_notebook_version(project_root, workbook_path)?;
+
+    // Get the version content
+    let version_content = get_notebook_version(project_root, workbook_path, timestamp)?;
+
+    // Write it to the workbook path
+    save_workbook(workbook_path, &version_content)?;
+
+    Ok(())
+}
+
+/// Delete old notebook versions, keeping only the most recent N versions
+pub fn cleanup_old_versions(project_root: &Path, workbook_path: &Path, keep_count: usize) -> Result<usize> {
+    let mut versions = list_notebook_versions(project_root, workbook_path)?;
+
+    if versions.len() <= keep_count {
+        return Ok(0); // Nothing to delete
+    }
+
+    // Sort by timestamp ascending (oldest first) for deletion
+    versions.sort_by(|a, b| a.timestamp.cmp(&b.timestamp));
+
+    let to_delete = versions.len() - keep_count;
+    let mut deleted = 0;
+
+    for version in versions.iter().take(to_delete) {
+        if let Ok(_) = fs::remove_file(&version.path) {
+            deleted += 1;
+        }
+    }
+
+    Ok(deleted)
 }

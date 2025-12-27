@@ -35,6 +35,12 @@
 ## High Priority Features
 
 ### AI Assistant Enhancements
+
+- [x] **Notebook change visibility and approval** (COMPLETED - Dec 27, 2025)
+  - Full diff modal with cell-by-cell comparison
+  - Approve/reject flow for AI notebook modifications
+  - Version history and revert functionality
+  - See: features/ai-assistant/done.md and features/workbooks/done.md
 - [ ] **AI Chat streaming responses** - Investigate why Claude Code responses may not be outputting
   - Verify Claude Code CLI is installed and working
   - Check streaming event handling in AiChatPanel.jsx
@@ -69,11 +75,14 @@
 
 
 ### UX Improvements
-- [ ] **Collapsible left sidebar**
-  - Allow hiding/showing the left sidebar to maximize workspace
-  - Keyboard shortcut (Cmd+B or similar)
-  - Persist state in localStorage
-  - Critical for focusing on AI chat + file viewer
+- [x] **Resizable and collapsible panels** (COMPLETED - Dec 27, 2025)
+  - All three panels (left sidebar, AI chat, file viewer) are now resizable and collapsible
+  - VS Code-style panel toggles in top right corner (icon-only buttons)
+  - Standard keyboard shortcuts: Cmd+B (left sidebar), Cmd+J (AI chat), Cmd+Shift+B (right panel)
+  - Panel sizes and visibility persisted to localStorage
+  - Active panels shown with blue icon color
+  - Maximum workspace flexibility - hide any combination of panels
+  - See: features/changelog.md
 
 - [ ] **Context-aware chat switching**
   - When opening a notebook that was previously closed, load notebook-specific context

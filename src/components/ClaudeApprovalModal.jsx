@@ -31,15 +31,6 @@ export default function ClaudeApprovalModal({ pendingChanges, onApprove, onDeny 
     onApprove(allowedTools);
   };
 
-  // Group changes by tool type
-  const changesByTool = pendingChanges.reduce((acc, change) => {
-    if (!acc[change.tool]) {
-      acc[change.tool] = [];
-    }
-    acc[change.tool].push(change);
-    return acc;
-  }, {});
-
   const toolTypes = [...new Set(pendingChanges.map(c => c.tool))];
 
   return (

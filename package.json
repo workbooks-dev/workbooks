@@ -12,7 +12,15 @@
     "prebuild:cli": "cd src-tauri && cargo build --release --bin workbooks-cli",
     "app:build": "npm run prebuild:cli && tauri build",
     "tauri": "tauri",
-    "version": "node scripts/update-version.js"
+    "version": "node scripts/update-version.js",
+    "lint": "npm run lint:js && npm run lint:py && npm run lint:rust",
+    "lint:js": "eslint src/",
+    "lint:js:fix": "eslint src/ --fix",
+    "lint:py": "uv run ruff check .",
+    "lint:py:fix": "uv run ruff check --fix .",
+    "lint:rust": "cd src-tauri && cargo clippy -- -D warnings",
+    "format:py": "uv run ruff format .",
+    "format:check:py": "uv run ruff format --check ."
   },
   "dependencies": {
     "@monaco-editor/react": "^4.7.0",
@@ -22,6 +30,7 @@
     "@tauri-apps/plugin-fs": "^2.4.4",
     "@tauri-apps/plugin-opener": "^2",
     "@xyflow/react": "^12.10.0",
+    "diff": "^8.0.2",
     "marked": "^17.0.1",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
@@ -35,10 +44,15 @@
     "tauri-plugin-screenshots-api": "^2.2.0"
   },
   "devDependencies": {
+    "@eslint/js": "^9.18.0",
     "@tailwindcss/typography": "^0.5.19",
     "@tauri-apps/cli": "^2",
     "@vitejs/plugin-react": "^4.6.0",
     "autoprefixer": "^10.4.23",
+    "eslint": "^9.18.0",
+    "eslint-plugin-react": "^7.37.2",
+    "eslint-plugin-react-hooks": "^5.1.0",
+    "globals": "^15.14.0",
     "postcss": "^8.5.6",
     "tailwindcss": "^3.4.19",
     "vite": "^7.0.4"

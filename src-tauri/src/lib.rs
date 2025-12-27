@@ -437,6 +437,71 @@ async fn handle_dropped_item(
     fs::handle_dropped_item(&proj_path, &item_path).map_err(|e| e.to_string())
 }
 
+// ===== Notebook Versioning Commands =====
+
+#[tauri::command]
+async fn save_notebook_version(
+    project_root: String,
+    workbook_path: String,
+) -> Result<String, String> {
+    let proj_path = PathBuf::from(&project_root);
+    let wb_path = PathBuf::from(&workbook_path);
+    fs::save_notebook_version(&proj_path, &wb_path).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn list_notebook_versions(
+    project_root: String,
+    workbook_path: String,
+) -> Result<Vec<fs::NotebookVersion>, String> {
+    let proj_path = PathBuf::from(&project_root);
+    let wb_path = PathBuf::from(&workbook_path);
+    fs::list_notebook_versions(&proj_path, &wb_path).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn get_notebook_version(
+    project_root: String,
+    workbook_path: String,
+    timestamp: i64,
+) -> Result<String, String> {
+    let proj_path = PathBuf::from(&project_root);
+    let wb_path = PathBuf::from(&workbook_path);
+    fs::get_notebook_version(&proj_path, &wb_path, timestamp).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn get_previous_notebook_version(
+    project_root: String,
+    workbook_path: String,
+) -> Result<Option<String>, String> {
+    let proj_path = PathBuf::from(&project_root);
+    let wb_path = PathBuf::from(&workbook_path);
+    fs::get_previous_notebook_version(&proj_path, &wb_path).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn revert_notebook_to_version(
+    project_root: String,
+    workbook_path: String,
+    timestamp: i64,
+) -> Result<(), String> {
+    let proj_path = PathBuf::from(&project_root);
+    let wb_path = PathBuf::from(&workbook_path);
+    fs::revert_notebook_to_version(&proj_path, &wb_path, timestamp).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn cleanup_old_notebook_versions(
+    project_root: String,
+    workbook_path: String,
+    keep_count: usize,
+) -> Result<usize, String> {
+    let proj_path = PathBuf::from(&project_root);
+    let wb_path = PathBuf::from(&workbook_path);
+    fs::cleanup_old_versions(&proj_path, &wb_path, keep_count).map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 async fn ensure_engine_server(state: State<'_, AppState>) -> Result<(), String> {
     // Use async mutex to hold lock across await - prevents race condition
@@ -597,6 +662,124 @@ async fn execute_cell_stream(
     Ok(StreamExecutionResult {
         success,
         execution_count,
+    })
+}
+
+#[derive(serde::Serialize)]
+struct ExecuteAllResult {
+    success: bool,
+    total_cells: usize,
+    successful_cells: usize,
+    failed_cells: usize,
+    outputs: Vec<serde_json::Value>,
+}
+
+#[tauri::command]
+async fn execute_workbook_all_cells(
+    workbook_path: String,
+    project_path: String,
+    window: tauri::Window,
+    state: State<'_, AppState>,
+) -> Result<ExecuteAllResult, String> {
+    log::info!("Executing all cells in workbook: {}", workbook_path);
+
+    // Ensure engine is started for this workbook
+    start_engine(workbook_path.clone(), project_path.clone(), None, state.clone()).await?;
+
+    // Read the notebook file to get cells
+    let notebook_content = std::fs::read_to_string(&workbook_path)
+        .map_err(|e| format!("Failed to read workbook: {}", e))?;
+
+    let notebook: serde_json::Value = serde_json::from_str(&notebook_content)
+        .map_err(|e| format!("Failed to parse workbook: {}", e))?;
+
+    let cells_json = notebook.get("cells")
+        .ok_or("No cells found in notebook")?;
+
+    let cells: Vec<engine_http::Cell> = cells_json
+        .as_array()
+        .ok_or("Cells is not an array")?
+        .iter()
+        .filter_map(|cell| {
+            let cell_type = cell.get("cell_type")?.as_str()?;
+            if cell_type != "code" {
+                return None; // Skip non-code cells
+            }
+
+            let source = cell.get("source")?;
+            let source_str = if source.is_array() {
+                source.as_array()?.iter()
+                    .filter_map(|s| s.as_str())
+                    .collect::<Vec<_>>()
+                    .join("")
+            } else {
+                source.as_str()?.to_string()
+            };
+
+            Some(engine_http::Cell {
+                source: source_str,
+                cell_type: cell_type.to_string(),
+            })
+        })
+        .collect();
+
+    log::info!("Found {} code cells to execute", cells.len());
+
+    let port = {
+        let server = state.engine_server.lock().await;
+        server.as_ref().map(|s| s.port).ok_or("Engine server not initialized")?
+    };
+
+    // Create event name for streaming to chat
+    let event_name = "workbook-execution";
+
+    // Emit start event
+    let _ = window.emit(event_name, serde_json::json!({
+        "type": "start",
+        "workbook_path": workbook_path,
+        "total_cells": cells.len(),
+    }));
+
+    // Execute all cells
+    let result = engine_http::EngineServer::execute_all_http(port, &workbook_path, cells)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    // Emit results for each cell
+    for cell_result in &result.cell_results {
+        let _ = window.emit(event_name, serde_json::json!({
+            "type": "cell_result",
+            "cell_index": cell_result.cell_index,
+            "success": cell_result.success,
+            "outputs": cell_result.outputs,
+            "execution_count": cell_result.execution_count,
+            "error": cell_result.error,
+        }));
+    }
+
+    // Emit completion event
+    let _ = window.emit(event_name, serde_json::json!({
+        "type": "complete",
+        "success": result.success,
+        "total_cells": result.total_cells,
+        "successful_cells": result.successful_cells,
+        "failed_cells": result.failed_cells,
+    }));
+
+    log::info!(
+        "Execution complete: {}/{} cells succeeded",
+        result.successful_cells,
+        result.total_cells
+    );
+
+    Ok(ExecuteAllResult {
+        success: result.success,
+        total_cells: result.total_cells,
+        successful_cells: result.successful_cells,
+        failed_cells: result.failed_cells,
+        outputs: result.cell_results.iter()
+            .map(|r| serde_json::to_value(r).unwrap_or(serde_json::Value::Null))
+            .collect(),
     })
 }
 
@@ -1346,6 +1529,50 @@ async fn claude_cli_get_session_name(
     claude_cli::get_or_create_session_name(&path)
 }
 
+/// Simple Claude CLI chat command for quick, non-streaming requests (e.g., title generation)
+#[tauri::command]
+async fn claude_cli_chat(
+    prompt: String,
+    project_root: Option<String>,
+    model: Option<String>,
+) -> Result<claude_cli::ClaudeResponse, String> {
+    use tokio::process::Command;
+    use std::process::Stdio;
+
+    let mut cmd = Command::new("claude");
+    cmd.arg("-p")
+        .arg(&prompt)
+        .arg("--output-format")
+        .arg("json")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    // Set working directory if provided
+    if let Some(root) = project_root {
+        cmd.current_dir(root);
+    }
+
+    // Set model if provided
+    if let Some(m) = model {
+        cmd.arg("--model").arg(m);
+    }
+
+    let output = cmd
+        .output()
+        .await
+        .map_err(|e| format!("Failed to run Claude CLI: {}", e))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("Claude CLI error: {}", stderr));
+    }
+
+    let response: claude_cli::ClaudeResponse = serde_json::from_slice(&output.stdout)
+        .map_err(|e| format!("Failed to parse Claude response: {}", e))?;
+
+    Ok(response)
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ProjectContext {
     pub project_name: String,
@@ -1927,10 +2154,17 @@ pub fn run() {
             save_dropped_file,
             save_dropped_folder,
             handle_dropped_item,
+            save_notebook_version,
+            list_notebook_versions,
+            get_notebook_version,
+            get_previous_notebook_version,
+            revert_notebook_to_version,
+            cleanup_old_notebook_versions,
             ensure_engine_server,
             start_engine,
             execute_cell,
             execute_cell_stream,
+            execute_workbook_all_cells,
             complete_code,
             stop_engine,
             interrupt_engine,
@@ -1991,6 +2225,7 @@ pub fn run() {
             claude_cli_stream,
             claude_cli_continue,
             claude_cli_get_session_name,
+            claude_cli_chat,
             get_project_context,
         ])
         .build(tauri::generate_context!())
