@@ -17,6 +17,7 @@ import { AppSettings } from "./components/AppSettings";
 import { TabBar } from "./components/TabBar";
 import { SaveConfirmDialog } from "./components/SaveConfirmDialog";
 import { ResizablePanel } from "./components/ResizablePanel";
+import { NotebookDiffModal } from "./components/NotebookDiffModal";
 import "./App.css";
 
 function App() {
@@ -30,6 +31,10 @@ function App() {
   const [pendingClose, setPendingClose] = useState(null); // 'window' or 'tab'
   const [aiEnabled, setAiEnabled] = useState(false);
   const [initialChatSession, setInitialChatSession] = useState(null);
+
+  // Notebook diff modal state
+  const [showDiffModal, setShowDiffModal] = useState(false);
+  const [pendingNotebookChange, setPendingNotebookChange] = useState(null);
 
   // Panel visibility state
   const [showLeftSidebar, setShowLeftSidebar] = useState(() => {
@@ -637,12 +642,30 @@ function App() {
     setView("project");
   }
 
-  function handleOpenFile(filePath, fileType) {
+  async function handleOpenFile(filePath, fileType) {
     // Check if file is already open
     const existingTab = tabs.find((tab) => tab.path === filePath);
     if (existingTab) {
       setActiveTabId(existingTab.id);
       return;
+    }
+
+    // Get the tab name
+    let tabName;
+    if (fileType === 'secrets') {
+      tabName = 'Secrets';
+    } else if (fileType === 'schedule') {
+      tabName = 'Schedule';
+    } else if (fileType === 'workbook') {
+      // Try to load the label from the workbook metadata
+      try {
+        const content = await invoke("read_workbook", { workbookPath: filePath });
+        const notebook = JSON.parse(content);
+        tabName = notebook.metadata?.label || undefined;
+      } catch (err) {
+        console.error("Failed to read workbook label:", err);
+        tabName = undefined;
+      }
     }
 
     // Create new tab
@@ -651,8 +674,7 @@ function App() {
       path: filePath,
       type: fileType,
       hasUnsavedChanges: false,
-      // For special tabs like secrets and schedule, use a friendly name
-      name: fileType === 'secrets' ? 'Secrets' : fileType === 'schedule' ? 'Schedule' : undefined,
+      name: tabName,
     };
 
     setTabs([...tabs, newTab]);
@@ -683,36 +705,126 @@ function App() {
   // === Notebook Change Approval Handlers ===
 
   /**
-   * Request user approval for AI-generated notebook changes (inline diff)
-   * @param {string} filePath - Path to the notebook being modified
+   * Handle notebook modification by Claude - show diff modal for approval
+   * @param {string} filePath - Path to the modified notebook
    * @param {object} oldNotebook - Previous notebook content (parsed JSON)
    * @param {object} newNotebook - New notebook content (parsed JSON)
    */
   async function handleRequestNotebookApproval(filePath, oldNotebook, newNotebook) {
-    // First, open the notebook if it's not already open
-    const existingTab = tabs.find(t => t.path === filePath && t.type === "workbook");
+    console.log("🎯 handleRequestNotebookApproval called for:", filePath);
+    console.log("   Old cells:", oldNotebook?.cells?.length, "New cells:", newNotebook?.cells?.length);
 
-    if (!existingTab) {
+    // Store the pending changes so we can apply them once the tab is active
+    const pendingDiff = { filePath, oldNotebook, newNotebook };
+
+    // Open the notebook tab (this will make it active)
+    console.log("📂 Opening notebook file:", filePath);
+    handleOpenFile(filePath, "workbook");
+
+    // Wait for the tab to render and the ref to be available
+    // We'll retry a few times to ensure the WorkbookViewer has mounted
+    let retries = 10;
+    const tryApplyDiff = async () => {
+      console.log("🔄 Attempt to apply diff, retries left:", retries);
+      console.log("   workbookViewerRef.current:", !!workbookViewerRef.current);
+      console.log("   handleAiChanges available:", !!workbookViewerRef.current?.handleAiChanges);
+
+      if (workbookViewerRef.current && workbookViewerRef.current.handleAiChanges) {
+        // Verify this is the correct workbook by checking the active tab
+        const activeTab = tabs.find(t => t.id === activeTabId);
+        console.log("   Active tab:", activeTab?.path);
+        console.log("   Target file:", filePath);
+
+        if (activeTab && activeTab.path === filePath) {
+          console.log("✅ Calling handleAiChanges on WorkbookViewer");
+          workbookViewerRef.current.handleAiChanges(oldNotebook, newNotebook);
+          return true;
+        } else {
+          console.log("⚠️ Active tab doesn't match target file");
+        }
+      }
+
+      if (retries > 0) {
+        retries--;
+        await new Promise(resolve => setTimeout(resolve, 50));
+        return tryApplyDiff();
+      }
+
+      return false;
+    };
+
+    const success = await tryApplyDiff();
+
+    if (!success) {
+      console.error("❌ Failed to trigger inline diff mode, falling back to modal");
+      // Fallback to modal if inline diff fails
+      setPendingNotebookChange({
+        filePath,
+        oldNotebook,
+        newNotebook,
+      });
+      setShowDiffModal(true);
+    } else {
+      console.log("✅ Inline diff mode triggered successfully");
+    }
+  }
+
+  /**
+   * Approve the pending notebook changes - save them and open the notebook
+   */
+  async function handleApproveNotebookChanges() {
+    if (!pendingNotebookChange) return;
+
+    try {
+      const { filePath, newNotebook } = pendingNotebookChange;
+
+      // Save the new notebook content
+      await invoke("save_workbook", {
+        workbookPath: filePath,
+        content: JSON.stringify(newNotebook, null, 2),
+      });
+
+      // Close the modal
+      setShowDiffModal(false);
+      setPendingNotebookChange(null);
+
       // Open the notebook
       handleOpenFile(filePath, "workbook");
-
-      // Wait a bit for the component to mount and ref to be attached
-      setTimeout(() => {
-        if (workbookViewerRef.current) {
-          workbookViewerRef.current.handleAiChanges(oldNotebook, newNotebook);
-        }
-      }, 100);
-    } else {
-      // Notebook is already open, activate it and trigger diff
-      setActiveTabId(existingTab.id);
-
-      // Small delay to ensure the WorkbookViewer is rendered and ref is available
-      setTimeout(() => {
-        if (workbookViewerRef.current) {
-          workbookViewerRef.current.handleAiChanges(oldNotebook, newNotebook);
-        }
-      }, 50);
+    } catch (error) {
+      console.error("Failed to apply notebook changes:", error);
+      alert(`Failed to apply changes: ${error}`);
     }
+  }
+
+  /**
+   * Reject the pending notebook changes - revert to previous version
+   */
+  async function handleRejectNotebookChanges() {
+    if (!pendingNotebookChange) return;
+
+    try {
+      const { filePath, oldNotebook } = pendingNotebookChange;
+
+      // Revert to old notebook content
+      await invoke("save_workbook", {
+        workbookPath: filePath,
+        content: JSON.stringify(oldNotebook, null, 2),
+      });
+
+      // Close the modal
+      setShowDiffModal(false);
+      setPendingNotebookChange(null);
+    } catch (error) {
+      console.error("Failed to revert notebook changes:", error);
+      alert(`Failed to revert changes: ${error}`);
+    }
+  }
+
+  /**
+   * Close the diff modal - treat as rejection (safety first)
+   */
+  function handleCloseDiffModal() {
+    handleRejectNotebookChanges();
   }
 
   function handleTabSelect(tabId) {
@@ -1084,46 +1196,48 @@ function App() {
               </>
             )}
 
-            {/* File Viewer - Only when a tab is active and right panel is visible */}
-            {activeTab && showRightPanel && (
-              <div className="flex-1 overflow-auto">
-                {activeTab.type === "workbook" ? (
-                  <WorkbookViewer
-                    ref={workbookViewerRef}
-                    key={activeTab.id}
-                    workbookPath={activeTab.path}
-                    projectRoot={currentProject.root}
-                    onClose={() => handleTabClose(activeTab.id)}
-                    onUnsavedChangesUpdate={(hasChanges) => updateTabUnsavedState(activeTab.id, hasChanges)}
-                  />
-                ) : activeTab.type === "secrets" ? (
-                  <SecretsManager
-                    key={activeTab.id}
-                    projectRoot={currentProject.root}
-                    onClose={() => handleTabClose(activeTab.id)}
-                  />
-                ) : activeTab.type === "schedule" ? (
-                  <ScheduleTab
-                    key={activeTab.id}
-                    projectRoot={currentProject.root}
-                    onClose={() => handleTabClose(activeTab.id)}
-                  />
-                ) : activeTab.type === "settings" ? (
-                  <AppSettings
-                    key={activeTab.id}
-                    onClose={() => handleTabClose(activeTab.id)}
-                  />
-                ) : (
-                  <FileViewer
-                    key={activeTab.id}
-                    filePath={activeTab.path}
-                    projectRoot={currentProject.root}
-                    isDeleted={activeTab.isDeleted}
-                    onClose={() => handleTabClose(activeTab.id)}
-                    onUnsavedChangesUpdate={(hasChanges) => updateTabUnsavedState(activeTab.id, hasChanges)}
-                    onFileRestored={() => handleFileRestored(activeTab.path)}
-                  />
-                )}
+            {/* File Viewer - Render all tabs but show only active one to preserve state */}
+            {showRightPanel && (
+              <div className="flex-1 relative overflow-hidden">
+                {tabs.map((tab) => (
+                  <div
+                    key={tab.path || tab.type}
+                    className={`absolute inset-0 overflow-auto ${tab.id === activeTabId ? 'block' : 'hidden'}`}
+                  >
+                    {tab.type === "workbook" ? (
+                      <WorkbookViewer
+                        ref={tab.id === activeTabId ? workbookViewerRef : null}
+                        workbookPath={tab.path}
+                        projectRoot={currentProject.root}
+                        onClose={() => handleTabClose(tab.id)}
+                        onUnsavedChangesUpdate={(hasChanges) => updateTabUnsavedState(tab.id, hasChanges)}
+                      />
+                    ) : tab.type === "secrets" ? (
+                      <SecretsManager
+                        projectRoot={currentProject.root}
+                        onClose={() => handleTabClose(tab.id)}
+                      />
+                    ) : tab.type === "schedule" ? (
+                      <ScheduleTab
+                        projectRoot={currentProject.root}
+                        onClose={() => handleTabClose(tab.id)}
+                      />
+                    ) : tab.type === "settings" ? (
+                      <AppSettings
+                        onClose={() => handleTabClose(tab.id)}
+                      />
+                    ) : (
+                      <FileViewer
+                        filePath={tab.path}
+                        projectRoot={currentProject.root}
+                        isDeleted={tab.isDeleted}
+                        onClose={() => handleTabClose(tab.id)}
+                        onUnsavedChangesUpdate={(hasChanges) => updateTabUnsavedState(tab.id, hasChanges)}
+                        onFileRestored={() => handleFileRestored(tab.path)}
+                      />
+                    )}
+                  </div>
+                ))}
               </div>
             )}
           </div>
@@ -1138,6 +1252,18 @@ function App() {
         onCancel={handleCancelClose}
         message="You have unsaved changes. Would you like to save before closing?"
       />
+
+      {/* Notebook diff approval modal */}
+      {showDiffModal && pendingNotebookChange && (
+        <NotebookDiffModal
+          oldNotebook={pendingNotebookChange.oldNotebook}
+          newNotebook={pendingNotebookChange.newNotebook}
+          notebookPath={pendingNotebookChange.filePath}
+          onApprove={handleApproveNotebookChanges}
+          onReject={handleRejectNotebookChanges}
+          onClose={handleCloseDiffModal}
+        />
+      )}
     </div>
   );
 }

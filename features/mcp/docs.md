@@ -110,7 +110,7 @@ Create a new notebook in the project.
 - `template` - Optional template name ("blank", "analysis", "ml_training")
 
 **Behavior:**
-- Creates `.ipynb` file in project root or `notebooks/` directory
+- Creates `.ipynb` file in project root (user specifies path)
 - Scaffolds with common imports if requested
 - Returns info about installed packages (from `pyproject.toml`)
 - Suggests packages to install via `!uv add <package>`
@@ -311,7 +311,7 @@ workbooks mcp --project /path/to/project
 
 MCP tools should return clear error messages:
 - "Project not found at path: /path/to/project"
-- "Notebook not found: notebooks/missing.ipynb"
+- "Notebook not found: missing.ipynb"
 - "Execution failed: ModuleNotFoundError: No module named 'pandas'. Try: !uv add pandas"
 - "Feature disabled: User has disabled notebook execution in Workbooks settings"
 

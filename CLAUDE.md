@@ -159,11 +159,10 @@ state.set("customers_clean", df_clean)
 ├── .venv/                    # uv-managed virtual environment
 ├── pyproject.toml            # Dependencies
 ├── uv.lock                   # Locked versions
-├── notebooks/
-│   ├── load_data.ipynb
-│   ├── transform.ipynb
-│   └── train_model.ipynb
-└── My Pipeline.workbooks        # Shortcut file (double-click opens app)
+├── load_data.ipynb           # Workbooks can be anywhere in the project
+├── transform.ipynb
+├── train_model.ipynb
+└── My Pipeline.workbooks     # Shortcut file (double-click opens app)
 ```
 
 ## Architecture Diagram

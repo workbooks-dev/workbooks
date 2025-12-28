@@ -48,7 +48,10 @@ export function WorkbooksTableView({ workbooks, onClose, onOpenWorkbook }) {
                   </td>
                 </tr>
               )}
-              {workbooks.map((workbook) => (
+              {workbooks.map((workbook) => {
+                // Use label if available, otherwise fall back to filename
+                const displayName = workbook.label || workbook.name.replace('.ipynb', '');
+                return (
                 <tr
                   key={workbook.path}
                   className="hover:bg-gray-50 cursor-pointer transition-colors"
@@ -61,7 +64,7 @@ export function WorkbooksTableView({ workbooks, onClose, onOpenWorkbook }) {
                     <div className="flex items-center gap-2">
                       <span className="text-sm">📓</span>
                       <span className="text-sm font-medium text-gray-900">
-                        {workbook.name.replace('.ipynb', '')}
+                        {displayName}
                       </span>
                     </div>
                   </td>
@@ -89,7 +92,8 @@ export function WorkbooksTableView({ workbooks, onClose, onOpenWorkbook }) {
                     </button>
                   </td>
                 </tr>
-              ))}
+              );
+              })}
             </tbody>
           </table>
         </div>

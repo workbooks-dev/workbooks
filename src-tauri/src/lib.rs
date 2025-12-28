@@ -873,6 +873,68 @@ async fn restart_engine(
         .map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+async fn force_restart_engine(
+    workbook_path: String,
+    project_path: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    // Ensure engine server is running
+    ensure_engine_server(state.clone()).await?;
+
+    let project_root = PathBuf::from(&project_path);
+
+    // Get package name from current project or load it
+    let current = state.current_project.lock().await;
+    let package_name = if let Some(project) = current.as_ref() {
+        if project.root == project_root {
+            project.package_name.clone()
+        } else {
+            drop(current);
+            let loaded_project = project::load_project(&project_root).map_err(|e| e.to_string())?;
+            loaded_project.package_name
+        }
+    } else {
+        drop(current);
+        let loaded_project = project::load_project(&project_root).map_err(|e| e.to_string())?;
+        loaded_project.package_name
+    };
+
+    // Get venv path
+    let venv_path = python::get_venv_path(&project_root, &package_name)
+        .map_err(|e| e.to_string())?;
+
+    // Get the port
+    let port = {
+        let server = state.engine_server.lock().await;
+        server.as_ref().map(|s| s.port).ok_or("Engine server not initialized")?
+    };
+
+    // Now call the static method without holding any locks
+    engine_http::EngineServer::force_restart_engine_http(port, &workbook_path, &project_root, &venv_path)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+async fn cleanup_orphaned_kernels(
+    state: State<'_, AppState>,
+) -> Result<serde_json::Value, String> {
+    // Ensure engine server is running
+    ensure_engine_server(state.clone()).await?;
+
+    // Get the port
+    let port = {
+        let server = state.engine_server.lock().await;
+        server.as_ref().map(|s| s.port).ok_or("Engine server not initialized")?
+    };
+
+    // Call the cleanup endpoint
+    engine_http::EngineServer::cleanup_orphaned_kernels_http(port)
+        .await
+        .map_err(|e| e.to_string())
+}
+
 // Secrets management commands
 
 /// Helper function to get or create the SecretsManager for a project
@@ -2169,6 +2231,8 @@ pub fn run() {
             stop_engine,
             interrupt_engine,
             restart_engine,
+            force_restart_engine,
+            cleanup_orphaned_kernels,
             add_secret,
             get_secret,
             get_secret_authenticated,

@@ -178,6 +178,90 @@ async def health_check():
     return {"status": "healthy", "active_engines": len(engines)}
 
 
+@app.post("/cleanup/orphaned_kernels")
+async def cleanup_orphaned_kernels():
+    """
+    Kill all orphaned Jupyter kernel processes.
+    This finds and kills ipykernel processes that are not currently managed by this server.
+    """
+    import subprocess
+    import signal
+    import platform
+
+    killed_count = 0
+    errors = []
+
+    try:
+        # Get list of all ipykernel processes
+        if platform.system() == "Windows":
+            # Windows: Use tasklist to find python.exe running ipykernel
+            result = subprocess.run(
+                ["tasklist", "/FI", "IMAGENAME eq python.exe", "/FO", "CSV"],
+                capture_output=True,
+                text=True
+            )
+            # Parse CSV output and check command line for ipykernel
+            # This is a simplified approach - production code would need more robust parsing
+            pass  # TODO: Implement Windows kernel cleanup
+        else:
+            # Unix-like systems (macOS, Linux)
+            # Find all python processes running ipykernel_launcher
+            result = subprocess.run(
+                ["ps", "aux"],
+                capture_output=True,
+                text=True
+            )
+
+            if result.returncode == 0:
+                lines = result.stdout.split("\n")
+                for line in lines:
+                    # Look for ipykernel_launcher processes
+                    if "ipykernel_launcher" in line and "python" in line.lower():
+                        # Extract PID (second column in ps aux output)
+                        parts = line.split()
+                        if len(parts) >= 2:
+                            try:
+                                pid = int(parts[1])
+
+                                # Check if this PID is managed by our server
+                                is_managed = False
+                                for km in engines.values():
+                                    if hasattr(km, 'kernel') and km.kernel and hasattr(km.kernel, 'pid'):
+                                        if km.kernel.pid == pid:
+                                            is_managed = True
+                                            break
+
+                                # If not managed, kill it
+                                if not is_managed:
+                                    print(f"Killing orphaned kernel process: PID {pid}")
+                                    try:
+                                        os.kill(pid, signal.SIGKILL)
+                                        killed_count += 1
+                                    except ProcessLookupError:
+                                        print(f"Process {pid} already dead")
+                                    except Exception as kill_err:
+                                        error_msg = f"Failed to kill PID {pid}: {kill_err}"
+                                        print(error_msg)
+                                        errors.append(error_msg)
+
+                            except (ValueError, IndexError) as e:
+                                print(f"Error parsing line: {e}")
+                                continue
+
+        return {
+            "status": "success",
+            "killed_count": killed_count,
+            "errors": errors if errors else None
+        }
+
+    except Exception as e:
+        return {
+            "status": "error",
+            "message": str(e),
+            "killed_count": killed_count
+        }
+
+
 @app.post("/engine/start")
 async def start_engine(request: StartEngineRequest):
     """Start a new Jupyter engine for a workbook."""
@@ -793,6 +877,51 @@ async def restart_engine(request: StartEngineRequest):
             print(f"Stopped existing engine for {workbook_path}")
         except Exception as e:
             print(f"Warning: Error stopping engine: {e}")
+
+    # Start new engine (reuse start_engine logic)
+    return await start_engine(request)
+
+
+@app.post("/engine/force_restart")
+async def force_restart_engine(request: StartEngineRequest):
+    """Force restart a workbook's engine by killing the kernel process."""
+    import signal
+
+    # Normalize path to match start_engine's normalized key
+    workbook_path = normalize_path(request.workbook_path)
+
+    # Stop existing engine if running
+    km = engines.pop(workbook_path, None)
+    secret_values.pop(workbook_path, None)  # Clean up secret values
+
+    if km:
+        try:
+            # Get the kernel process ID if available
+            if hasattr(km, 'kernel') and km.kernel and hasattr(km.kernel, 'pid'):
+                kernel_pid = km.kernel.pid
+                if kernel_pid:
+                    print(f"Force killing kernel process {kernel_pid} for {workbook_path}")
+                    try:
+                        os.kill(kernel_pid, signal.SIGKILL)
+                        print(f"Kernel process {kernel_pid} killed successfully")
+                    except ProcessLookupError:
+                        print(f"Kernel process {kernel_pid} already dead")
+                    except Exception as kill_err:
+                        print(f"Error killing kernel process: {kill_err}")
+
+            # Also try graceful shutdown (in case process is already dead)
+            try:
+                await km.shutdown_kernel()
+                print(f"Shutdown engine for {workbook_path}")
+            except Exception as shutdown_err:
+                print(f"Error during shutdown: {shutdown_err}")
+
+        except Exception as e:
+            print(f"Warning: Error force stopping engine: {e}")
+
+    # Give the OS a moment to clean up
+    import asyncio
+    await asyncio.sleep(0.5)
 
     # Start new engine (reuse start_engine logic)
     return await start_engine(request)

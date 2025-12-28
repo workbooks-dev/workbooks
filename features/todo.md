@@ -46,18 +46,19 @@
   - Check streaming event handling in AiChatPanel.jsx
   - Review error logs for streaming failures
 
-- [ ] **Enable Claude Code to run notebooks**
-  - Allow AI to execute notebooks on user request (requires MCP or new Tauri commands)
-  - Should include execution status feedback to chat
-  - Related: Enable scheduling notebooks from chat too
+- [x] **Enable Claude Code to run notebooks** (COMPLETED - Dec 27, 2025)
+  - Claude can now execute notebooks using `workbooks run` command via Bash tool
+  - Execution output visible in chat for iteration
+  - System prompt updated to guide Claude on running notebooks
+  - See: features/ai-assistant/done.md
 
 - [ ] **AI-driven notebook operations**
-  - Create new notebooks (with naming suggestions based on task)
-  - Update existing notebooks (with confirmation)
-  - Delete notebooks (with user confirmation modal)
-  - Run notebooks and stream execution results to chat
-  - Schedule notebooks via cron expressions
-  - Prompt for environment variables if needed (modal UI)
+  - [x] Create new notebooks (with naming suggestions based on task)
+  - [x] Update existing notebooks (with confirmation)
+  - [ ] Delete notebooks (with user confirmation modal)
+  - [x] Run notebooks and stream execution results to chat
+  - [ ] Schedule notebooks via cron expressions from chat
+  - [ ] Prompt for environment variables if needed (modal UI)
 
 - [ ] **Session rename functionality**
   - Allow users to rename chat sessions for better organization
@@ -91,11 +92,12 @@
   - Option 2: Update focused file context in current session
   - Needs UX decision on best approach
 
-- [ ] **Notebook labels for user-friendly names**
-  - Allow assigning friendly labels/titles to notebooks
-  - Display labels instead of filenames in UI (e.g., "Daily Sales Report" vs "sales_report_v3.ipynb")
-  - Store in notebook metadata
-  - Fallback to filename if no label set
+- [x] **Notebook labels for user-friendly names** (COMPLETED - Dec 27, 2025)
+  - Friendly labels/titles displayed instead of filenames
+  - Labels shown in sidebar, table view, and tab titles
+  - Click-to-edit UI in WorkbookViewer header
+  - Stored in notebook metadata, fallback to filename
+  - See: features/workbooks/done.md
 
 - [ ] **File tabs positioning review**
   - Verify: File tabs should be above file viewer, not above chat

@@ -88,6 +88,7 @@ pub fn create_workbook(workbook_path: &Path, workbook_name: &str) -> Result<Stri
     let notebook_content = json!({
         "cells": [],
         "metadata": {
+            "label": workbook_name.trim_end_matches(".ipynb"),
             "kernelspec": {
                 "display_name": "Python 3",
                 "language": "python",

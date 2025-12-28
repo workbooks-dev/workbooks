@@ -42,7 +42,7 @@
   - [ ] Generate `.ipynb` JSON structure
   - [ ] Support templates ("blank", "analysis", "ml_training")
   - [ ] Scaffold with common imports if requested
-  - [ ] Save to project root or `notebooks/` directory
+  - [ ] Save to project root (user specifies path)
   - [ ] Return installed packages from `pyproject.toml`
   - [ ] Check `mcp.allow_create_notebooks` setting
 

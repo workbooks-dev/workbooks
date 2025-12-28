@@ -57,8 +57,7 @@ else:
 
 ```
 my-project/
-├── notebooks/
-│   └── analysis.ipynb         # Your workbook
+├── analysis.ipynb             # Your workbook (anywhere in project)
 ├── data/
 │   ├── raw/
 │   │   └── sales.csv

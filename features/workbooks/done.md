@@ -93,11 +93,19 @@
   - [x] Stop engine
   - [x] Interrupt execution (Ctrl+C equivalent)
   - [x] Restart engine (clear kernel state)
+  - [x] Force restart engine (kills kernel process if stuck)
+  - [x] Cleanup orphaned kernels (kills all orphaned Jupyter processes)
 
 - [x] Kernel status indicator
   - [x] Real-time status display
   - [x] States: starting, idle, busy, error, restarting
   - [x] Visual feedback during execution
+
+- [x] Stuck kernel recovery
+  - [x] Force Restart button always available (highlighted when engine in error state)
+  - [x] Kills kernel process with SIGKILL if graceful shutdown fails
+  - [x] Backend endpoint to cleanup all orphaned Jupyter kernels
+  - [x] No need to restart entire app when kernel gets stuck
 
 ### Jupyter Keyboard Shortcuts
 
@@ -121,6 +129,12 @@
 ### File Operations
 
 - [x] Create new workbook
+  - [x] Create blank workbook
+  - [x] Generate with AI from description
+    - [x] Uses Claude CLI to generate notebook cells from user description
+    - [x] Automatically creates markdown and code cells with appropriate content
+    - [x] Fallback to blank workbook with error dialog if generation fails
+    - [x] Validates and parses AI response to ensure valid .ipynb structure
 - [x] Save workbook (manual and auto)
 - [x] Load workbook from disk
 - [x] Duplicate workbook
@@ -163,6 +177,17 @@
 - [x] Project venv integration
   - [x] Runs in isolated virtual environment
   - [x] Access to project packages
+
+### Workbook Labels
+
+- [x] User-friendly labels instead of filenames
+  - [x] Labels stored in notebook metadata under `metadata.label`
+  - [x] Displayed in sidebar, workbooks table view, and tab titles
+  - [x] Click-to-edit UI in WorkbookViewer header
+  - [x] Fallback to filename when no label is set
+  - [x] Automatically set on new workbook creation
+  - [x] Enter to save, Escape to cancel editing
+  - [x] Makes workbooks feel like actual tools with meaningful names
 
 ### UI/UX Polish
 

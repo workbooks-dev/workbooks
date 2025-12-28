@@ -185,6 +185,32 @@
 - [x] Search results show file count
 - [x] Path display in search results (shows folder location)
 
+## File View Modes (Dec 28, 2025)
+
+- [x] **All/Compact view toggle**: Added segmented control to switch between view modes
+  - **All Mode**: Shows every file in the project (default)
+  - **Compact Mode**: Shows only automation-relevant files
+    - ✅ Displays notebooks (.ipynb)
+    - ✅ Displays data files, downloads, and outputs
+    - ❌ Hides Python source files (.py, .pyc, .pyo, .pyd)
+    - ❌ Hides common config files (pyproject.toml, requirements.txt, package.json, etc.)
+    - ❌ Hides dev folders (.venv, node_modules, __pycache__, .git, .workbooks, etc.)
+  - Clean segmented control UI matching app style guide
+  - Active mode highlighted with blue background and shadow
+- [x] **View preference persistence**: User's choice saved to localStorage per project
+  - Automatically restores last selected mode when reopening project
+  - Preference stored as `workbooks_file_view_mode_{projectRoot}`
+- [x] **Consistent filtering**: View mode applies to all file contexts
+  - Root file listing
+  - Nested folders when expanded
+  - Search results
+  - Files automatically refresh when toggling modes
+- [x] **Smart folder filtering**: Compact mode hides dev/build folders but keeps data folders visible
+  - Pattern matching for common hidden folders (*.egg-info)
+  - Preserves expandable folder structure
+- **Location**: src/components/Sidebar.jsx:250-254, 386-432, 1015-1037
+- **Files Modified**: src/components/Sidebar.jsx
+
 ## Subfolder Support
 
 - [x] Tree view with expand/collapse for folders

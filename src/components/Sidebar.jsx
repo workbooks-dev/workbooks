@@ -40,8 +40,8 @@ function SidebarSection({ title, children, defaultExpanded = true, onHeaderClick
   );
 }
 
-// File tree item for Files section (filters out .ipynb)
-function FileTreeItem({ file, level = 0, onFileClick, onFileAction, activeFilePath, projectRoot, showPath = false, isRenaming, onRenameComplete, onRenameCancel, renamingFilePath }) {
+// File tree item for Files section
+function FileTreeItem({ file, level = 0, onFileClick, onFileAction, activeFilePath, projectRoot, showPath = false, isRenaming, onRenameComplete, onRenameCancel, renamingFilePath, viewModeFilter }) {
   const [isExpanded, setIsExpanded] = useState(false);
   const [children, setChildren] = useState([]);
   const [loading, setLoading] = useState(false);
@@ -98,8 +98,8 @@ function FileTreeItem({ file, level = 0, onFileClick, onFileAction, activeFilePa
           const fileList = await invoke("list_files", {
             directoryPath: file.path,
           });
-          // Filter out .ipynb files since they're shown in Workbooks section
-          const filteredFiles = fileList.filter(f => f.extension !== "ipynb");
+          // Apply view mode filter
+          const filteredFiles = viewModeFilter ? viewModeFilter(fileList) : fileList;
           setChildren(filteredFiles);
         } catch (err) {
           console.error("Failed to load folder contents:", err);
@@ -220,6 +220,7 @@ function FileTreeItem({ file, level = 0, onFileClick, onFileAction, activeFilePa
               onRenameComplete={onRenameComplete}
               onRenameCancel={onRenameCancel}
               renamingFilePath={renamingFilePath}
+              viewModeFilter={viewModeFilter}
             />
           ))}
         </div>
@@ -233,6 +234,7 @@ export function Sidebar({ projectRoot, projectName, onOpenFile, onFileDeleted, o
   const [workbooks, setWorkbooks] = useState([]);
   const [loading, setLoading] = useState(false);
   const [showNewWorkbookModal, setShowNewWorkbookModal] = useState(false);
+  const [isGeneratingWorkbook, setIsGeneratingWorkbook] = useState(false);
   const [showWorkbooksTable, setShowWorkbooksTable] = useState(false);
   const [renamingFile, setRenamingFile] = useState(null);
   const [recentWorkbooks, setRecentWorkbooks] = useState([]);
@@ -246,6 +248,11 @@ export function Sidebar({ projectRoot, projectName, onOpenFile, onFileDeleted, o
   const [fileInfo, setFileInfo] = useState(null);
   const [creatingInFolder, setCreatingInFolder] = useState(null);
   const [renamingFilePath, setRenamingFilePath] = useState(null);
+  const [fileViewMode, setFileViewMode] = useState(() => {
+    // Load preference from localStorage, default to 'all'
+    const saved = localStorage.getItem(`workbooks_file_view_mode_${projectRoot}`);
+    return saved || 'all';
+  });
 
   // Refs for file/folder creation inputs to ensure focus
   const fileInputRef = useRef(null);
@@ -310,6 +317,11 @@ export function Sidebar({ projectRoot, projectName, onOpenFile, onFileDeleted, o
     };
   }, [projectRoot]);
 
+  // Reload files when view mode changes
+  useEffect(() => {
+    loadProjectFiles();
+  }, [fileViewMode]);
+
   const loadProjectFiles = async () => {
     setLoading(true);
     try {
@@ -317,10 +329,10 @@ export function Sidebar({ projectRoot, projectName, onOpenFile, onFileDeleted, o
         directoryPath: projectRoot,
       });
 
-      // Include all non-.ipynb files in FILES section
-      const otherFiles = fileList.filter(f => f.extension !== "ipynb");
+      // Apply view mode filter (all or compact)
+      const filteredFiles = applyViewModeFilter(fileList);
 
-      setFiles(otherFiles);
+      setFiles(filteredFiles);
 
       // Load all notebooks from entire project (up to 2 levels deep)
       const allNotebooks = await getAllNotebooksRecursive(projectRoot, 2);
@@ -377,6 +389,54 @@ export function Sidebar({ projectRoot, projectName, onOpenFile, onFileDeleted, o
     );
   };
 
+  // Filter files based on view mode
+  const shouldShowInCompactMode = (file) => {
+    // Always show directories so they can be expanded
+    if (file.is_dir) {
+      // Hide common dev/build folders
+      const hiddenFolders = ['.venv', 'venv', '__pycache__', 'node_modules', '.git',
+                            '.workbooks', 'dist', 'build', '.pytest_cache', '.mypy_cache',
+                            'htmlcov', '.tox', '.eggs', '*.egg-info'];
+      return !hiddenFolders.some(pattern =>
+        pattern.includes('*')
+          ? file.name.match(new RegExp(pattern.replace('*', '.*')))
+          : file.name === pattern
+      );
+    }
+
+    // Show notebooks (automation files)
+    if (file.extension === 'ipynb') return true;
+
+    // Hide Python source files and common config files
+    const hiddenExtensions = ['py', 'pyc', 'pyo', 'pyd'];
+    const hiddenFiles = ['pyproject.toml', 'setup.py', 'setup.cfg', 'requirements.txt',
+                        'Pipfile', 'Pipfile.lock', 'poetry.lock', 'uv.lock',
+                        'package.json', 'package-lock.json', 'tsconfig.json',
+                        '.gitignore', '.env', '.env.local', '.DS_Store'];
+
+    if (hiddenExtensions.includes(file.extension)) return false;
+    if (hiddenFiles.includes(file.name)) return false;
+
+    // Show everything else (data files, downloads, etc.)
+    return true;
+  };
+
+  const applyViewModeFilter = (fileList) => {
+    if (fileViewMode === 'all') {
+      // Show all files (no filtering)
+      return fileList;
+    } else {
+      // Compact mode - filter to automation-relevant files
+      return fileList.filter(shouldShowInCompactMode);
+    }
+  };
+
+  const handleViewModeToggle = () => {
+    const newMode = fileViewMode === 'all' ? 'compact' : 'all';
+    setFileViewMode(newMode);
+    localStorage.setItem(`workbooks_file_view_mode_${projectRoot}`, newMode);
+  };
+
   // Recursively collect all files from a folder tree
   const getAllFilesRecursive = async (dirPath, maxDepth = Infinity, currentDepth = 0) => {
     try {
@@ -399,6 +459,18 @@ export function Sidebar({ projectRoot, projectName, onOpenFile, onFileDeleted, o
     }
   };
 
+  // Helper function to get workbook label from metadata
+  const getWorkbookLabel = async (workbookPath) => {
+    try {
+      const content = await invoke("read_workbook", { workbookPath });
+      const notebook = JSON.parse(content);
+      return notebook.metadata?.label || null;
+    } catch (err) {
+      console.error("Failed to read workbook metadata:", err);
+      return null;
+    }
+  };
+
   // Get all notebooks from the notebooks folder, recursively up to 2 levels deep
   const getAllNotebooksRecursive = async (dirPath, maxDepth = 2, currentDepth = 0, baseDir = null) => {
     try {
@@ -417,9 +489,13 @@ export function Sidebar({ projectRoot, projectName, onOpenFile, onFileDeleted, o
           const pathParts = relativePath.split('/');
           const displayPath = pathParts.length > 1 ? pathParts.slice(0, -1).join('/') : null;
 
+          // Load the label from metadata
+          const label = await getWorkbookLabel(file.path);
+
           allNotebooks.push({
             ...file,
-            displayPath // Store the relative directory path for display
+            displayPath, // Store the relative directory path for display
+            label // Store the label from metadata
           });
         }
 
@@ -449,8 +525,10 @@ export function Sidebar({ projectRoot, projectName, onOpenFile, onFileDeleted, o
       try {
         // Get all files recursively
         const allFiles = await getAllFilesRecursive(projectRoot);
+        // Apply view mode filter
+        const viewFilteredFiles = applyViewModeFilter(allFiles);
         // Filter files (not folders)
-        const filesOnly = allFiles.filter(f => !f.is_dir && f.extension !== "ipynb");
+        const filesOnly = viewFilteredFiles.filter(f => !f.is_dir);
         // Filter by search query
         const results = filterFiles(filesOnly, fileSearchQuery);
         setSearchResults(results);
@@ -465,7 +543,7 @@ export function Sidebar({ projectRoot, projectName, onOpenFile, onFileDeleted, o
     // Debounce search
     const timeoutId = setTimeout(performSearch, 300);
     return () => clearTimeout(timeoutId);
-  }, [fileSearchQuery, projectRoot]);
+  }, [fileSearchQuery, projectRoot, fileViewMode]);
 
   const handleFileClick = (file) => {
     if (file.extension === "ipynb") {
@@ -498,12 +576,151 @@ export function Sidebar({ projectRoot, projectName, onOpenFile, onFileDeleted, o
   };
 
   const handleGenerateWithAI = async (workbookName, description) => {
-    // TODO: Implement AI generation
-    // For now, just create a blank workbook with a comment about the description
-    console.log("Generate workbook with AI:", { workbookName, description });
+    try {
+      // Set loading state (modal will show spinner)
+      setIsGeneratingWorkbook(true);
 
-    // For now, create blank and close modal
-    await handleCreateBlankWorkbook(workbookName);
+      console.log("Generating workbook with AI:", { workbookName, description });
+
+      // Create the prompt for Claude to generate notebook cells
+      const prompt = `Generate a Jupyter notebook for the following automation task:
+
+"${description}"
+
+Generate a JSON array of notebook cells following this structure:
+- Each cell should be an object with "cell_type" (either "markdown" or "code")
+- Markdown cells have a "source" array of strings (each string is a line)
+- Code cells have a "source" array of strings and an empty "outputs" array
+- Start with a markdown cell explaining what the notebook does
+- Include code cells with appropriate Python code
+- Add markdown cells to explain each step
+- Make sure all Python code is practical and runnable
+
+Return ONLY the JSON array of cells, nothing else. Example format:
+[
+  {
+    "cell_type": "markdown",
+    "metadata": {},
+    "source": ["# Title\\n", "Description"]
+  },
+  {
+    "cell_type": "code",
+    "execution_count": null,
+    "metadata": {},
+    "outputs": [],
+    "source": ["# Python code here\\n", "print('Hello')"]
+  }
+]`;
+
+      // Call Claude CLI to generate the cells
+      const response = await invoke("claude_cli_chat", {
+        prompt,
+        projectRoot,
+        model: "sonnet", // Use sonnet for quick generation
+      });
+
+      let cells = [];
+
+      try {
+        // Parse the response to extract JSON
+        let jsonText = response.result.trim();
+
+        // Try to extract JSON from markdown code blocks if present
+        const codeBlockMatch = jsonText.match(/```(?:json)?\s*([\s\S]*?)```/);
+        if (codeBlockMatch) {
+          jsonText = codeBlockMatch[1].trim();
+        }
+
+        cells = JSON.parse(jsonText);
+
+        // Validate that it's an array
+        if (!Array.isArray(cells)) {
+          throw new Error("Response is not an array");
+        }
+      } catch (parseErr) {
+        console.error("Failed to parse AI response, using fallback:", parseErr);
+        // Fallback: create a simple notebook with the description
+        cells = [
+          {
+            "cell_type": "markdown",
+            "metadata": {},
+            "source": [`# ${workbookName}\n`, `\n`, `${description}`]
+          },
+          {
+            "cell_type": "code",
+            "execution_count": null,
+            "metadata": {},
+            "outputs": [],
+            "source": ["# Add your code here\n"]
+          }
+        ];
+      }
+
+      // Create the full notebook structure
+      const notebookContent = {
+        cells,
+        metadata: {
+          kernelspec: {
+            display_name: "Python 3",
+            language: "python",
+            name: "python3"
+          },
+          language_info: {
+            name: "python",
+            version: "3.11.0",
+            mimetype: "text/x-python",
+            codemirror_mode: {
+              name: "ipython",
+              version: 3
+            },
+            pygments_lexer: "ipython3",
+            nbconvert_exporter: "python",
+            file_extension: ".py"
+          }
+        },
+        nbformat: 4,
+        nbformat_minor: 5
+      };
+
+      // Determine the file path
+      const fileName = workbookName.endsWith(".ipynb") ? workbookName : `${workbookName}.ipynb`;
+      const workbookPath = `${projectRoot}/notebooks/${fileName}`;
+
+      // Write the notebook file directly
+      await invoke("save_file", {
+        filePath: workbookPath,
+        content: JSON.stringify(notebookContent, null, 2)
+      });
+
+      // Reload project files and open the new workbook
+      await loadProjectFiles();
+      onOpenFile?.(workbookPath, "workbook");
+      updateRecentWorkbook(workbookPath);
+
+      console.log("AI-generated workbook created successfully:", workbookPath);
+
+      // Success - close modal
+      setShowNewWorkbookModal(false);
+      setIsGeneratingWorkbook(false);
+    } catch (err) {
+      console.error("Failed to generate workbook with AI:", err);
+      setIsGeneratingWorkbook(false);
+
+      // Show error to user and fall back to blank workbook
+      const shouldCreateBlank = await ask(
+        `Failed to generate workbook with AI: ${err.message || err}\n\nWould you like to create a blank workbook instead?`,
+        {
+          title: "AI Generation Failed",
+          kind: "warning",
+        }
+      );
+
+      if (shouldCreateBlank) {
+        setShowNewWorkbookModal(false);
+        await handleCreateBlankWorkbook(workbookName);
+      }
+      // If user chose not to create blank, modal stays open so they can try again
+    }
   };
 
   const handleFileAction = async (action, file, extraData) => {
@@ -716,6 +933,8 @@ export function Sidebar({ projectRoot, projectName, onOpenFile, onFileDeleted, o
 
             {orderedWorkbooks.map((workbook) => {
               const isActive = activeFilePath === workbook.path;
+              // Use label if available, otherwise fall back to filename
+              const displayName = workbook.label || workbook.name.replace('.ipynb', '');
               return (
                 <div
                   key={workbook.path}
@@ -728,7 +947,7 @@ export function Sidebar({ projectRoot, projectName, onOpenFile, onFileDeleted, o
                 >
                   <div className="flex flex-col gap-0.5">
                     <span className="overflow-hidden text-ellipsis whitespace-nowrap text-xs">
-                      {workbook.name.replace('.ipynb', '')}
+                      {displayName}
                     </span>
                     {workbook.displayPath && (
                       <span className="text-xs text-gray-500 overflow-hidden text-ellipsis whitespace-nowrap">
@@ -793,6 +1012,29 @@ export function Sidebar({ projectRoot, projectName, onOpenFile, onFileDeleted, o
         {/* Files Section */}
         <SidebarSection title="Files" defaultExpanded={true}>
           <div className="px-2 pb-2">
+            {/* View mode toggle */}
+            <div className="flex gap-1 mb-2 bg-gray-100 rounded p-0.5">
+              <button
+                onClick={() => handleViewModeToggle()}
+                className={`flex-1 px-2 py-1 text-xs font-medium rounded transition-colors ${
+                  fileViewMode === 'all'
+                    ? 'bg-white text-blue-600 shadow-sm'
+                    : 'text-gray-600 hover:text-gray-900'
+                }`}
+              >
+                All
+              </button>
+              <button
+                onClick={() => handleViewModeToggle()}
+                className={`flex-1 px-2 py-1 text-xs font-medium rounded transition-colors ${
+                  fileViewMode === 'compact'
+                    ? 'bg-white text-blue-600 shadow-sm'
+                    : 'text-gray-600 hover:text-gray-900'
+                }`}
+              >
+                Compact
+              </button>
+            </div>
             <input
               type="text"
               placeholder="Search files..."
@@ -911,6 +1153,7 @@ export function Sidebar({ projectRoot, projectName, onOpenFile, onFileDeleted, o
                     onRenameComplete={handleInlineRenameComplete}
                     onRenameCancel={handleInlineRenameCancel}
                     renamingFilePath={renamingFilePath}
+                    viewModeFilter={applyViewModeFilter}
                   />
                 ))}
               </>
@@ -929,6 +1172,7 @@ export function Sidebar({ projectRoot, projectName, onOpenFile, onFileDeleted, o
                 onRenameComplete={handleInlineRenameComplete}
                 onRenameCancel={handleInlineRenameCancel}
                 renamingFilePath={renamingFilePath}
+                viewModeFilter={applyViewModeFilter}
               />
             ))}
           </div>
@@ -984,6 +1228,7 @@ export function Sidebar({ projectRoot, projectName, onOpenFile, onFileDeleted, o
         onClose={() => setShowNewWorkbookModal(false)}
         onCreateBlank={handleCreateBlankWorkbook}
         onGenerateWithAI={handleGenerateWithAI}
+        isGenerating={isGeneratingWorkbook}
       />
     </div>
   );

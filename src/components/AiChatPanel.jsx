@@ -105,18 +105,26 @@ You are helping build automations using Jupyter notebooks (.ipynb files) in the 
    - Use the Write tool to create a new .ipynb file in the project root
    - Start with a basic notebook structure with cells for the automation
 
-3. **Notebook best practices:**
+3. **Running notebooks to see output:**
+   - After creating or modifying a notebook, you can RUN it to test that it works
+   - Use the Bash tool to execute: \`workbooks run <notebook-file.ipynb>\`
+   - This will execute all cells and show you the output
+   - Based on the output, you can iterate and improve the notebook
+   - This is how you "sharpen" automations - test them and refine based on real results
+
+4. **Notebook best practices:**
    - Each automation should be in its own notebook
    - Use descriptive names like "quickbooks_sync.ipynb" or "data_processing.ipynb"
    - Include markdown cells explaining what the automation does
    - Use the workbooks state API to share data between notebooks if needed
 
-4. **Be proactive:**
+5. **Be proactive:**
    - Don't ask too many questions - make reasonable assumptions
+   - After creating a notebook, offer to run it to verify it works
    - If you see a notebook that looks relevant, read it and tell the user about it
    - Suggest improvements to existing automations when appropriate
 
-Remember: You have access to all files in this project via the Read, Write, Edit, Glob, and Grep tools. Use them to understand and build automations.`;
+Remember: You have access to all files in this project via the Read, Write, Edit, Glob, and Grep tools. Use them to understand and build automations. You can also execute notebooks with \`workbooks run\` to test them!`;
   };
 
   useEffect(() => {
@@ -130,58 +138,6 @@ Remember: You have access to all files in this project via the Read, Write, Edit
       inputRef.current.focus();
     }
   }, []);
-
-  /**
-   * Handle notebook modification by Claude - trigger approval flow
-   * @param {string} filePath - Path to the modified notebook
-   */
-  const handleNotebookModification = async (filePath) => {
-    try {
-      // Save the current version before modification (if it exists)
-      if (projectRoot) {
-        await invoke("save_notebook_version", {
-          projectRoot: projectRoot,
-          workbookPath: filePath,
-        });
-      }
-
-      // Get the previous version content
-      let oldNotebook = null;
-      try {
-        const previousContent = await invoke("get_previous_notebook_version", {
-          projectRoot: projectRoot,
-          workbookPath: filePath,
-        });
-        if (previousContent) {
-          oldNotebook = JSON.parse(previousContent);
-        }
-      } catch (err) {
-        console.log("No previous version found, treating as new notebook");
-        // If there's no previous version, create an empty notebook structure
-        oldNotebook = {
-          cells: [],
-          metadata: {},
-          nbformat: 4,
-          nbformat_minor: 5
-        };
-      }
-
-      // Read the new (current) notebook content
-      const newContent = await invoke("read_workbook", { workbookPath: filePath });
-      const newNotebook = JSON.parse(newContent);
-
-      // Trigger the approval flow
-      if (onRequestNotebookApproval) {
-        onRequestNotebookApproval(filePath, oldNotebook, newNotebook);
-      }
-    } catch (error) {
-      console.error("Failed to handle notebook modification:", error);
-      // On error, fall back to just opening the file
-      if (onOpenFile) {
-        onOpenFile(filePath, "workbook");
-      }
-    }
-  };
 
   const checkClaudeInstallation = async () => {
     try {
@@ -385,14 +341,41 @@ Return ONLY the title, nothing else. Examples:
       let progressEvents = [];
       let conversationFiles = new Set(filesUsed);
 
+      // Track pending notebook modifications (save version BEFORE Claude modifies)
+      const pendingNotebookModifications = new Map(); // filePath -> oldNotebookContent
+
+      // Track active tool executions to know when they complete
+      const activeToolExecutions = new Map(); // contentBlockIndex -> { toolName, toolInput }
+
       // Set up event listener for all Claude events
       const unlisten = await listen("claude-cli-event", (event) => {
         const payload = event.payload;
         const eventType = payload.type;
 
+        // Debug: Log all events to see what Claude CLI is emitting
+        console.log("Claude CLI event:", JSON.stringify(payload, null, 2));
+
         // Handle different event types
-        if (eventType === "content") {
-          // Main response content
+        if (eventType === "stream_event") {
+          // Claude CLI streaming events
+          const innerEvent = payload.event;
+          if (innerEvent && innerEvent.type === "content_block_delta") {
+            // Extract text delta from streaming content
+            const delta = innerEvent.delta;
+            if (delta && delta.text) {
+              streamedContent += delta.text;
+              setMessages((prev) => {
+                const newMessages = [...prev];
+                newMessages[assistantMessageIndex] = {
+                  ...newMessages[assistantMessageIndex],
+                  content: streamedContent,
+                };
+                return newMessages;
+              });
+            }
+          }
+        } else if (eventType === "content") {
+          // Fallback for simplified content events (backwards compatibility)
           const content = payload.content || "";
           streamedContent += content;
           setMessages((prev) => {
@@ -403,8 +386,172 @@ Return ONLY the title, nothing else. Examples:
             };
             return newMessages;
           });
+        } else if (eventType === "stream_event" && payload.event && payload.event.type === "content_block_start") {
+          // Tool use start event
+          const innerEvent = payload.event;
+          if (innerEvent.content_block && innerEvent.content_block.type === "tool_use") {
+            const toolBlock = innerEvent.content_block;
+            const toolName = toolBlock.name || "Unknown";
+            const toolInput = toolBlock.input || {};
+            const blockIndex = innerEvent.index;
+
+            // Track this tool execution
+            activeToolExecutions.set(blockIndex, { toolName, toolInput });
+
+            // Handle notebook modifications BEFORE Claude modifies
+            if (toolName === "Write" || toolName === "Edit" || toolName === "NotebookEdit") {
+              const filePath = toolInput.file_path || toolInput.notebook_path;
+              console.log("🔍 Detected notebook tool:", toolName, "for file:", filePath);
+
+              if (filePath && filePath.endsWith(".ipynb") && onRequestNotebookApproval) {
+                console.log("✅ Will track changes for notebook:", filePath);
+                // Save current state BEFORE Claude changes it
+                (async () => {
+                  try {
+                    const fileExists = await invoke("read_workbook", { workbookPath: filePath })
+                      .then(() => true)
+                      .catch(() => false);
+
+                    if (fileExists) {
+                      const currentContent = await invoke("read_workbook", { workbookPath: filePath });
+                      pendingNotebookModifications.set(filePath, currentContent);
+                      console.log("💾 Saved old version of notebook:", filePath);
+                    } else {
+                      pendingNotebookModifications.set(filePath, JSON.stringify({
+                        cells: [],
+                        metadata: {},
+                        nbformat: 4,
+                        nbformat_minor: 5
+                      }));
+                      console.log("📝 Notebook doesn't exist yet, will track as new file:", filePath);
+                    }
+                  } catch (error) {
+                    console.error("Failed to save notebook state before modification:", error);
+                  }
+                })();
+              } else {
+                console.log("⚠️ Not tracking - filePath:", filePath, "ends with .ipynb:", filePath?.endsWith(".ipynb"), "has approval callback:", !!onRequestNotebookApproval);
+              }
+            }
+
+            // Track files used in the conversation
+            if (toolInput.file_path) {
+              conversationFiles.add(toolInput.file_path);
+              setFilesUsed(new Set(conversationFiles));
+            }
+
+            // Show progress indicator
+            let progressMsg = "";
+            if (toolName === "Read") {
+              progressMsg = `📖 Reading ${toolInput.file_path || "file"}`;
+            } else if (toolName === "Edit") {
+              progressMsg = `✏️ Editing ${toolInput.file_path || "file"}`;
+            } else if (toolName === "Write") {
+              progressMsg = `📝 Writing ${toolInput.file_path || "file"}`;
+            } else if (toolName === "Bash") {
+              const cmd = toolInput.command || "";
+              const shortCmd = cmd.length > 40 ? cmd.slice(0, 40) + "..." : cmd;
+              progressMsg = `⚙️ Running: ${shortCmd}`;
+            } else if (toolName === "Glob") {
+              progressMsg = `🔍 Searching for ${toolInput.pattern || "files"}`;
+            } else if (toolName === "Grep") {
+              progressMsg = `🔎 Searching for "${toolInput.pattern || "pattern"}"`;
+            } else {
+              progressMsg = `🔧 ${toolName}`;
+            }
+
+            if (progressMsg) {
+              progressEvents.push(progressMsg);
+              setMessages((prev) => {
+                const newMessages = [...prev];
+                newMessages[assistantMessageIndex] = {
+                  ...newMessages[assistantMessageIndex],
+                  progress: [...progressEvents],
+                };
+                return newMessages;
+              });
+            }
+          }
+        } else if (eventType === "stream_event" && payload.event && payload.event.type === "content_block_stop") {
+          // Tool execution complete - trigger diff modal for notebook modifications
+          const innerEvent = payload.event;
+          const blockIndex = innerEvent.index;
+
+          const toolExecution = activeToolExecutions.get(blockIndex);
+          if (toolExecution) {
+            const { toolName, toolInput } = toolExecution;
+            console.log("🏁 Tool execution completed:", toolName, "at blockIndex:", blockIndex);
+
+            // Check if this was a notebook modification
+            if ((toolName === "Write" || toolName === "Edit" || toolName === "NotebookEdit") && (toolInput.file_path || toolInput.notebook_path)) {
+              const filePath = toolInput.file_path || toolInput.notebook_path;
+              console.log("📓 Notebook tool completed for:", filePath);
+
+              if (filePath.endsWith(".ipynb") && onRequestNotebookApproval) {
+                console.log("🚀 Triggering approval workflow for:", filePath);
+                // Notebook modification completed - show diff modal
+                (async () => {
+                  try {
+                    // Get the old version we saved before modification
+                    const oldContent = pendingNotebookModifications.get(filePath);
+                    if (!oldContent) {
+                      console.warn("⚠️ No old version found for", filePath, "- skipping diff");
+                      // Fall back to just opening the file
+                      if (onOpenFile) {
+                        onOpenFile(filePath, "workbook");
+                      }
+                      return;
+                    }
+
+                    console.log("📖 Reading new version of:", filePath);
+                    // Read the new (modified) version
+                    const newContent = await invoke("read_workbook", { workbookPath: filePath });
+
+                    // Parse both versions
+                    const oldNotebook = JSON.parse(oldContent);
+                    const newNotebook = JSON.parse(newContent);
+                    console.log("📊 Old notebook cells:", oldNotebook.cells?.length, "New notebook cells:", newNotebook.cells?.length);
+
+                    // Save the old version to version history for safety
+                    if (projectRoot) {
+                      await invoke("save_notebook_version", {
+                        projectRoot: projectRoot,
+                        workbookPath: filePath,
+                      });
+                      console.log("💾 Saved version to history");
+                    }
+
+                    // Trigger the approval flow
+                    console.log("🎯 Calling onRequestNotebookApproval callback");
+                    onRequestNotebookApproval(filePath, oldNotebook, newNotebook);
+
+                    // Clean up
+                    pendingNotebookModifications.delete(filePath);
+                    console.log("✅ Approval workflow triggered successfully");
+                  } catch (error) {
+                    console.error("Failed to handle notebook modification:", error);
+                    // On error, fall back to just opening the file
+                    if (onOpenFile) {
+                      onOpenFile(filePath, "workbook");
+                    }
+                    pendingNotebookModifications.delete(filePath);
+                  }
+                })();
+              } else if (onOpenFile) {
+                // Non-notebook file - auto-open as before
+                let fileType = "file";
+                if (filePath.endsWith(".py")) {
+                  fileType = "python";
+                }
+                onOpenFile(filePath, fileType);
+              }
+            }
+
+            // Clean up
+            activeToolExecutions.delete(blockIndex);
+          }
         } else if (eventType === "tool_use" || eventType === "tool_result") {
-          // Tool usage events (Read, Edit, Bash, etc.)
+          // Fallback for legacy/simplified tool events
           const toolName = payload.tool || payload.name || "Unknown";
           const toolInput = payload.input || {};
 
@@ -414,13 +561,87 @@ Return ONLY the title, nothing else. Examples:
             setFilesUsed(new Set(conversationFiles));
           }
 
-          // Handle notebook modifications with approval flow
+          // BEFORE Claude modifies a notebook, save the current version
+          if (eventType === "tool_use" && (toolName === "Write" || toolName === "Edit") && toolInput.file_path) {
+            const filePath = toolInput.file_path;
+
+            if (filePath.endsWith(".ipynb") && onRequestNotebookApproval) {
+              // This is a notebook modification - save current state BEFORE Claude changes it
+              (async () => {
+                try {
+                  // Check if file exists
+                  const fileExists = await invoke("read_workbook", { workbookPath: filePath })
+                    .then(() => true)
+                    .catch(() => false);
+
+                  if (fileExists) {
+                    // File exists - save current content as old version
+                    const currentContent = await invoke("read_workbook", { workbookPath: filePath });
+                    pendingNotebookModifications.set(filePath, currentContent);
+                  } else {
+                    // New file - use empty notebook as old version
+                    pendingNotebookModifications.set(filePath, JSON.stringify({
+                      cells: [],
+                      metadata: {},
+                      nbformat: 4,
+                      nbformat_minor: 5
+                    }));
+                  }
+                } catch (error) {
+                  console.error("Failed to save notebook state before modification:", error);
+                }
+              })();
+            }
+          }
+
+          // AFTER Claude modifies a notebook, show the diff
           if (eventType === "tool_result" && (toolName === "Write" || toolName === "Edit") && toolInput.file_path) {
             const filePath = toolInput.file_path;
 
             if (filePath.endsWith(".ipynb") && onRequestNotebookApproval) {
               // Notebook modification - trigger approval flow
-              handleNotebookModification(filePath);
+              (async () => {
+                try {
+                  // Get the old version we saved before modification
+                  const oldContent = pendingNotebookModifications.get(filePath);
+                  if (!oldContent) {
+                    console.warn("No old version found for", filePath, "- skipping diff");
+                    // Fall back to just opening the file
+                    if (onOpenFile) {
+                      onOpenFile(filePath, "workbook");
+                    }
+                    return;
+                  }
+
+                  // Read the new (modified) version
+                  const newContent = await invoke("read_workbook", { workbookPath: filePath });
+
+                  // Parse both versions
+                  const oldNotebook = JSON.parse(oldContent);
+                  const newNotebook = JSON.parse(newContent);
+
+                  // Save the old version to version history for safety
+                  if (projectRoot) {
+                    await invoke("save_notebook_version", {
+                      projectRoot: projectRoot,
+                      workbookPath: filePath,
+                    });
+                  }
+
+                  // Trigger the approval flow
+                  onRequestNotebookApproval(filePath, oldNotebook, newNotebook);
+
+                  // Clean up
+                  pendingNotebookModifications.delete(filePath);
+                } catch (error) {
+                  console.error("Failed to handle notebook modification:", error);
+                  // On error, fall back to just opening the file
+                  if (onOpenFile) {
+                    onOpenFile(filePath, "workbook");
+                  }
+                  pendingNotebookModifications.delete(filePath);
+                }
+              })();
             } else if (onOpenFile) {
               // Non-notebook file - auto-open as before
               let fileType = "file";
@@ -485,6 +706,42 @@ Return ONLY the title, nothing else. Examples:
 
       // Clean up listener
       unlisten();
+
+      // FALLBACK: Check for any pending notebook modifications that weren't triggered during streaming
+      // This handles cases where the event structure didn't match our expectations
+      console.log("Checking for pending notebook modifications:", pendingNotebookModifications.size);
+      if (pendingNotebookModifications.size > 0) {
+        console.log("Found pending modifications, triggering approval flow...");
+        for (const [filePath, oldContent] of pendingNotebookModifications.entries()) {
+          try {
+            // Read the new (modified) version
+            const newContent = await invoke("read_workbook", { workbookPath: filePath });
+
+            // Parse both versions
+            const oldNotebook = JSON.parse(oldContent);
+            const newNotebook = JSON.parse(newContent);
+
+            // Save the old version to version history for safety
+            if (projectRoot) {
+              await invoke("save_notebook_version", {
+                projectRoot: projectRoot,
+                workbookPath: filePath,
+              });
+            }
+
+            // Trigger the approval flow
+            onRequestNotebookApproval(filePath, oldNotebook, newNotebook);
+          } catch (error) {
+            console.error("Failed to handle notebook modification:", error);
+            // On error, fall back to just opening the file
+            if (onOpenFile) {
+              onOpenFile(filePath, "workbook");
+            }
+          }
+        }
+        // Clear the pending modifications
+        pendingNotebookModifications.clear();
+      }
 
       // Mark streaming as complete
       setMessages((prev) => {

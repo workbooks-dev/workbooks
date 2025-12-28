@@ -36,3 +36,17 @@
   - [x] Proper macOS menu structure (app menu must be first submenu)
   - [x] Menu event handling and emission to frontend
   - [x] Keyboard shortcuts for all major actions
+
+## Tab State Preservation
+
+- [x] Fixed tab switching state reset bug (2025-12-27)
+  - [x] Changed rendering strategy from conditional to hidden rendering
+  - [x] All tabs now render simultaneously but inactive ones use `display: none`
+  - [x] Components stay mounted when switching tabs
+  - [x] Preserves all state including:
+    - [x] Cell outputs in workbooks
+    - [x] Selected cell and edit mode
+    - [x] Scroll position
+    - [x] Jupyter kernel state
+  - [x] Uses absolute positioning with `absolute inset-0` for tab overlays
+  - [x] Keys based on `tab.path || tab.type` for stable component identity

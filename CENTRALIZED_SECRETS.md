@@ -23,7 +23,8 @@ my-project/
 │   ├── state/                 # ✅ Shareable - state blobs (can be synced)
 │   ├── runs/                  # ✅ Shareable - execution history
 │   └── config.toml            # ✅ Shareable - project settings
-├── notebooks/
+├── analysis.ipynb             # Workbooks anywhere in the project
+├── transform.ipynb
 └── pyproject.toml
 ```
 

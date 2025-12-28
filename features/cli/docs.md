@@ -99,15 +99,15 @@ The global config's `default_project` enables convenient CLI usage without expli
 **Examples:**
 ```bash
 # Works from anywhere if default project is set
-workbooks run notebooks/analysis.ipynb  # Uses default project
-workbooks status                        # Shows default project
+workbooks run analysis.ipynb  # Uses default project
+workbooks status              # Shows default project
 
 # Override with explicit flag
-workbooks run --project ~/other-project notebooks/test.ipynb
+workbooks run --project ~/other-project test.ipynb
 
 # Works if in a Workbooks project directory
 cd ~/Projects/my-pipeline
-workbooks run notebooks/test.ipynb  # Uses current directory project
+workbooks run test.ipynb  # Uses current directory project
 ```
 
 **Desktop App Behavior:**
@@ -234,7 +234,6 @@ cd my-pipeline
   my-pipeline/
   ├── .workbooks/
   │   └── config.toml
-  ├── notebooks/
   ├── pyproject.toml
   ├── uv.lock
   └── My Pipeline.workbooks  # Shortcut file
@@ -260,7 +259,7 @@ Run a notebook or entire pipeline.
 
 ```bash
 # Run specific notebook
-workbooks run notebooks/load_data.ipynb
+workbooks run load_data.ipynb
 
 # Run all notebooks (inferred dependency order)
 workbooks run --all
@@ -284,7 +283,7 @@ workbooks resume
 
 **Output:**
 ```
-Running: notebooks/load_data.ipynb
+Running: load_data.ipynb
 [1/5] Importing libraries... ✓
 [2/5] Loading data from S3... ✓ (2.3s)
 [3/5] Cleaning data... ✓ (0.8s)
@@ -427,7 +426,7 @@ View execution logs.
 workbooks logs
 
 # View logs for specific notebook
-workbooks logs notebooks/train_model.ipynb
+workbooks logs train_model.ipynb
 
 # View logs for specific run
 workbooks logs --run run_20250118_141230
@@ -454,7 +453,7 @@ Resume interrupted execution.
 workbooks resume
 
 # Resume specific notebook
-workbooks resume notebooks/train_model.ipynb
+workbooks resume train_model.ipynb
 
 # Resume specific run ID
 workbooks resume run_20250118_141230
@@ -472,7 +471,7 @@ Manage scheduled runs (future feature).
 
 ```bash
 # Schedule a notebook
-workbooks schedule add notebooks/daily_report.ipynb --cron "0 9 * * *"
+workbooks schedule add daily_report.ipynb --cron "0 9 * * *"
 
 # List schedules
 workbooks schedule list
@@ -496,7 +495,7 @@ workbooks open
 workbooks open /path/to/project
 
 # Open specific notebook in GUI
-workbooks open notebooks/analysis.ipynb
+workbooks open analysis.ipynb
 ```
 
 **Behavior:**

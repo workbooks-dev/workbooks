@@ -129,12 +129,22 @@ Supports rich Jupyter output types:
 **Create Workbook:**
 - Creates `.ipynb` in `/notebooks` folder
 - Initializes with single empty code cell
+- Sets label in metadata to the provided name
 - Opens in new tab automatically
+
+**Workbook Labels:**
+- Each workbook can have a user-friendly label instead of showing the filename
+- Label is stored in `notebook.metadata.label`
+- Displayed in sidebar, workbooks table view, and tab titles
+- Click the workbook title in WorkbookViewer to edit the label
+- Press Enter to save, Escape to cancel
+- Falls back to filename (without .ipynb) if no label is set
+- Makes workbooks feel like actual tools with meaningful names (e.g., "Daily Sales Report" vs "sales_report_v3")
 
 **Save Workbook:**
 - Validates notebook structure
 - Writes to disk via Tauri command
-- Preserves all cell outputs
+- Preserves all cell outputs and metadata (including labels)
 
 **Read Workbook:**
 - Loads from disk

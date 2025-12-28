@@ -5,11 +5,13 @@
 **All critical issues have been resolved!**
 
 - [x] **Notebook change visibility and approval** (COMPLETED - Dec 27, 2025)
-  - Implemented full diff modal showing cell-by-cell changes when AI modifies notebooks
-  - Approve/reject flow prevents unwanted changes from being saved
-  - Version history system stores previous notebook states
-  - Manual revert button in WorkbookViewer toolbar
-  - See: src/components/NotebookDiffModal.jsx, features/ai-assistant/done.md
+  - Implemented NotebookDiffModal component with cell-by-cell diff view
+  - Shows color-coded changes (green=added, blue=modified, red=deleted)
+  - Side-by-side before/after comparison for modified cells
+  - Approve/reject buttons with proper workflow
+  - Version history system already exists in Rust backend
+  - Works like Cursor/Windsurf/Antigravity with visual diffs
+  - See: src/components/NotebookDiffModal.jsx, App.jsx, features/ai-assistant/done.md
 
 ## High Priority
 

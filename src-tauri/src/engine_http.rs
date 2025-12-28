@@ -859,6 +859,75 @@ impl EngineServer {
         Ok(())
     }
 
+    /// Force restart a workbook's engine (kills kernel process, then restarts)
+    pub async fn force_restart_engine_http(port: u16, workbook_path: &str, project_root: &Path, venv_path: &Path) -> Result<()> {
+        let url = format!("http://127.0.0.1:{}/engine/force_restart", port);
+
+        // Prepare environment variables to inject into the kernel
+        let mut env_vars = std::collections::HashMap::new();
+        env_vars.insert(
+            "WORKBOOKS_PROJECT_FOLDER".to_string(),
+            project_root.to_string_lossy().to_string()
+        );
+
+        // Load and inject secrets from SecretsManager
+        match crate::secrets::SecretsManager::new(project_root) {
+            Ok(secrets_manager) => {
+                match secrets_manager.get_all_secrets_with_values() {
+                    Ok(secrets) => {
+                        for (key, value) in secrets {
+                            env_vars.insert(key, value);
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("ERROR (FORCE_RESTART): Failed to load secrets: {}", e);
+                    }
+                }
+            }
+            Err(e) => {
+                eprintln!("ERROR (FORCE_RESTART): Failed to initialize SecretsManager: {}", e);
+            }
+        }
+
+        let response = HTTP_CLIENT
+            .post(&url)
+            .json(&serde_json::json!({
+                "workbook_path": workbook_path,
+                "project_root": project_root.to_string_lossy(),
+                "venv_path": venv_path.to_string_lossy(),
+                "engine_name": "python3",
+                "env_vars": env_vars
+            }))
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            let error_text = response.text().await?;
+            anyhow::bail!("Failed to force restart engine: {}", error_text);
+        }
+
+        println!("Engine force restarted for workbook: {}", workbook_path);
+        Ok(())
+    }
+
+    /// Cleanup orphaned Jupyter kernels
+    pub async fn cleanup_orphaned_kernels_http(port: u16) -> Result<serde_json::Value> {
+        let url = format!("http://127.0.0.1:{}/cleanup/orphaned_kernels", port);
+
+        let response = HTTP_CLIENT
+            .post(&url)
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            let error_text = response.text().await?;
+            anyhow::bail!("Cleanup failed: {}", error_text);
+        }
+
+        let result: serde_json::Value = response.json().await?;
+        Ok(result)
+    }
+
     /// Shutdown the server
     pub fn shutdown(mut self) -> Result<()> {
         // println!("Shutting down engine server");

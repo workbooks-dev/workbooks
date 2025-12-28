@@ -6,6 +6,163 @@ This file tracks major features and improvements as they're completed.
 
 ### December 2025
 
+**Tab State Preservation - Fixed State Reset Bug (Dec 27, 2025)**
+- **Bug Fix**: Tab switching no longer clears workbook outputs and state
+  - **Root Cause**: Conditional rendering was unmounting/remounting components
+  - **Solution**: Changed to hidden rendering strategy
+    - All tabs now render simultaneously in the DOM
+    - Inactive tabs hidden with CSS (`display: none`)
+    - Components stay mounted when switching tabs
+  - **Preserved State**:
+    - Cell outputs and execution results
+    - Selected cell and edit mode
+    - Scroll position
+    - Jupyter kernel state
+  - **Implementation**:
+    - Use `absolute inset-0` positioning for tab overlays
+    - Toggle visibility with `block/hidden` CSS classes
+    - Key components by `tab.path || tab.type` for stable identity
+  - **Files Modified**: `src/App.jsx` (lines 1183-1226)
+
+**Files: All/Compact View Toggle (Dec 28, 2025)**
+- **Feature**: Added view mode toggle to Files section for cleaner workspace
+  - **Segmented Control**: Professional toggle between "All" and "Compact" modes
+    - Matches app style guide with blue highlights and clean design
+    - Always visible at top of Files section
+  - **All Mode (Default)**: Shows every file in the project
+    - Complete visibility of entire file structure
+    - No filtering applied
+  - **Compact Mode**: Shows only automation-relevant files
+    - ✅ Notebooks (.ipynb) - the automation scripts
+    - ✅ Data files (CSV, JSON, Parquet, etc.) - inputs and outputs
+    - ✅ Downloads and generated files
+    - ❌ Python source (.py, .pyc, .pyo, .pyd) - implementation details
+    - ❌ Config files (pyproject.toml, package.json, etc.) - project setup
+    - ❌ Dev folders (.venv, node_modules, __pycache__, .git, .workbooks, etc.)
+  - **Smart Filtering Logic**: Filters at all levels
+    - Root directory listing
+    - Nested folders when expanded
+    - Search results
+    - Consistent behavior throughout file tree
+  - **Persistent Preference**: Choice saved per project
+    - Stored in localStorage as `workbooks_file_view_mode_{projectRoot}`
+    - Automatically restored on project reopen
+  - **Real-time Updates**: Files refresh immediately when toggling
+- **Use Case**: Focus on automation workflows without clutter
+  - Compact mode ideal for working with data pipelines
+  - All mode available when full project access needed
+  - Reduces visual noise while maintaining access to everything
+- **Files Modified**: src/components/Sidebar.jsx
+- **Documentation**: features/files/done.md
+
+**AI Notebook Change Approval System (Dec 27, 2025)**
+- **Diff Modal with Visual Changes**: When Claude modifies a notebook, a beautiful diff modal shows all changes
+  - Cell-by-cell comparison with color coding (emerald=added, blue=modified, red=deleted)
+  - Side-by-side before/after view for modified cells
+  - Summary counts showing additions, modifications, deletions
+  - Works like Cursor/Windsurf/Antigravity change approval UX
+  - Location: `src/components/NotebookDiffModal.jsx`
+- **Approve/Reject Workflow**: Users have full control over AI changes
+  - "Approve & Apply" button saves changes and opens the notebook
+  - "Reject Changes" button reverts to previous version
+  - Closing the modal (X or click outside) defaults to rejection for safety
+  - No changes applied without explicit user approval
+- **Version History System**: Automatic snapshots enable safe experimentation
+  - Versions saved to `.workbooks/versions/{notebook_name}/{timestamp}.ipynb`
+  - Six Tauri commands for managing versions (save, list, get, revert, cleanup)
+  - Backend functions in `src-tauri/src/fs.rs:622-776`
+  - All commands already registered in `src-tauri/src/lib.rs`
+- **AI Chat Integration**: Seamless interception of notebook modifications
+  - Detects Write/Edit tool use on `.ipynb` files
+  - Saves current version before modification
+  - Loads both old and new content for comparison
+  - Triggers modal automatically after Claude finishes
+  - Location: `src/components/AiChatPanel.jsx:426-440`
+- **App-Level Coordination**: Central approval flow management
+  - Modal state and handlers in `src/App.jsx`
+  - Proper cleanup and error handling
+  - Integration with file opening system
+- **Problem Solved**: Users were uncomfortable with Claude making notebook changes blindly
+  - Previously, notebooks updated immediately with no visibility or control
+  - Now, every change is reviewed before being applied
+  - Version history provides safety net for experimentation
+  - Familiar UX from other AI coding tools builds confidence
+- **Files Modified**:
+  - `src/components/NotebookDiffModal.jsx` - New diff modal component
+  - `src/App.jsx` - Added modal state and approval handlers
+  - `src/components/AiChatPanel.jsx` - Already had integration hooks
+  - `src-tauri/src/fs.rs` - Version history functions (already existed)
+  - `features/ai-assistant/done.md` - Updated documentation
+  - `features/ai-assistant/todo.md` - Marked as complete
+
+**Force Restart and Stuck Kernel Recovery (Dec 27, 2025)**
+- **Force Restart Button**: New UI button to kill and restart stuck kernels without closing the app
+  - Always available (not disabled like normal Restart)
+  - Highlighted in red when engine is in error state or not ready
+  - Kills kernel process with SIGKILL, then starts fresh
+  - Clears all outputs and execution state after restart
+  - Location: `src/components/WorkbookViewer.jsx`
+- **Backend Force Restart Endpoint**: New `/engine/force_restart` endpoint in engine server
+  - Gets kernel PID and forcefully kills with SIGKILL
+  - Falls back to graceful shutdown if process already dead
+  - Waits 500ms before starting new kernel to let OS clean up
+  - Location: `src-tauri/engine_server.py:801-843`
+- **Orphaned Kernel Cleanup**: New `/cleanup/orphaned_kernels` endpoint
+  - Finds all ipykernel_launcher processes on the system
+  - Identifies which are managed by the engine server
+  - Kills all orphaned/unmanaged kernels with SIGKILL
+  - Returns count of killed processes and any errors
+  - Location: `src-tauri/engine_server.py:181-262`
+- **Problem Solved**: Users no longer need to close and restart the entire app when a kernel gets stuck
+  - Previously, stuck kernels (consuming high CPU, not responding to interrupt) required app restart
+  - Now, Force Restart button provides instant recovery
+  - Cleanup endpoint can be called to kill all orphaned kernels from previous sessions
+- **Files Modified**:
+  - `src-tauri/engine_server.py` - Added force_restart and cleanup endpoints
+  - `src-tauri/src/engine_http.rs` - Added HTTP client functions
+  - `src-tauri/src/lib.rs` - Added Tauri commands and registered them
+  - `src/components/WorkbookViewer.jsx` - Added forceRestartEngine function and UI button
+
+**Workbook Labels for User-Friendly Names (Dec 27, 2025)**
+- **Custom labels instead of filenames**: Workbooks now display meaningful names throughout the UI
+  - Labels stored in notebook metadata (`metadata.label`)
+  - Automatically set from user input when creating new workbooks
+  - Displayed in sidebar, workbooks table view, and tab titles
+  - Fallback to filename (without .ipynb) when no label is set
+  - Makes workbooks feel like actual tools (e.g., "Daily Sales Report" vs "sales_report_v3")
+- **Click-to-edit UI**: Edit labels directly in the WorkbookViewer
+  - Click the workbook title to enter edit mode
+  - Enter to save, Escape to cancel
+  - Changes marked as unsaved and persisted on next save
+  - Inline editing with visual feedback
+- **Backend support**: Rust workbook creation sets initial label
+  - New workbooks get label from user input
+  - Label preserved through save/load cycle
+  - Compatible with existing notebooks (label is optional)
+- **Files**:
+  - `src-tauri/src/fs.rs` - Label added to notebook metadata on creation
+  - `src/components/Sidebar.jsx` - Load and display labels in sidebar
+  - `src/components/WorkbooksTableView.jsx` - Display labels in table view
+  - `src/components/WorkbookViewer.jsx` - Editable label UI
+  - `src/App.jsx` - Load labels for tab titles
+
+**AI-Generated Workbook Creation (Dec 27, 2025)**
+- **Fixed "Generate with AI" feature**: Implemented previously non-functional AI workbook generation
+  - Uses Claude CLI to generate notebook cells from user description
+  - Smart JSON parsing with fallback to extract cells from markdown code blocks
+  - Generates complete .ipynb structure with proper metadata
+  - Error handling with user-friendly fallback to blank workbook creation
+  - Automatically opens generated workbook after creation
+  - Location: `src/components/Sidebar.jsx:517-663`
+- **Modal UX improvements**:
+  - Added loading spinner in "Generate with AI" button during generation
+  - Modal stays open and shows progress instead of dismissing immediately
+  - All buttons disabled during generation to prevent accidental actions
+  - Fixed keyboard focus issue: typing in modal no longer triggers notebook shortcuts
+  - Implemented event propagation stopping to keep focus within modal
+  - Escape key disabled during generation
+  - Location: `src/components/NewWorkbookModal.jsx`
+
 **Resizable and Collapsible Panels (Dec 27, 2025)**
 - **ResizablePanel Component**: New reusable component for creating resizable panels
   - Drag handles with visual feedback (blue highlight on hover/drag)

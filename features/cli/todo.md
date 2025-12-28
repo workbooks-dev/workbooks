@@ -98,7 +98,7 @@ The CLI serves three primary purposes:
 ### `workbooks init`
 - [ ] Implement `init` subcommand
   - [ ] Accept project name and options (--path, --template)
-  - [ ] Create directory structure (.workbooks/, notebooks/)
+  - [ ] Create directory structure (.workbooks/)
   - [ ] Generate config.toml with defaults
   - [ ] Create pyproject.toml and uv.lock
   - [ ] Initialize UV virtual environment

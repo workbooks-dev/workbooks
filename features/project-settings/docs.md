@@ -276,9 +276,8 @@ Both the app and CLI read/write this config, enabling seamless integration.
 **ZIP structure:**
 ```
 my-project.zip
-├── notebooks/
-│   ├── notebook1.ipynb
-│   └── notebook2.ipynb
+├── notebook1.ipynb
+├── notebook2.ipynb
 ├── data/
 │   └── data.csv
 ├── pyproject.toml

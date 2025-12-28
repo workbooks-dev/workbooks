@@ -316,7 +316,7 @@ function UnifiedDiffCell({ oldCell, newCell, type, cellIndex, onAccept, onReject
   );
 }
 
-function WorkbookCell({ cell, index, workbookPath, onUpdate, onDelete, onExecute, onMoveUp, onMoveDown, onClearOutput, isSelected, isEditMode, isRunning, executionElapsed, onSelect, onEnterEditMode, onInsertBelow, autosaveEnabled, swappingCells }) {
+const WorkbookCell = forwardRef(function WorkbookCell({ cell, index, workbookPath, onUpdate, onDelete, onExecute, onMoveUp, onMoveDown, onClearOutput, isSelected, isEditMode, isRunning, executionElapsed, onSelect, onEnterEditMode, onInsertBelow, autosaveEnabled, swappingCells }, ref) {
   // Initialize content from cell source ONCE on mount - don't sync after that
   const [content, setContent] = useState(getCellSourceAsString(cell.source));
   const editorRef = useRef(null);
@@ -380,6 +380,7 @@ function WorkbookCell({ cell, index, workbookPath, onUpdate, onDelete, onExecute
   if (cell.cell_type === "markdown") {
     return (
       <div
+        ref={ref}
         className={`${STYLES.cell.markdownContainer} ${
           isSelected ? STYLES.cell.markdownSelected : STYLES.cell.markdownUnselected
         }`}
@@ -576,6 +577,7 @@ function WorkbookCell({ cell, index, workbookPath, onUpdate, onDelete, onExecute
 
     return (
       <div
+        ref={ref}
         className={`${STYLES.cell.codeContainer} ${
           isSelected ? STYLES.cell.codeSelected : STYLES.cell.codeUnselected
         }`}
@@ -801,7 +803,7 @@ function WorkbookCell({ cell, index, workbookPath, onUpdate, onDelete, onExecute
   }
 
   return null;
-}
+});
 
 function CellOutput({ output }) {
   const [expanded, setExpanded] = useState(false);
@@ -1058,7 +1060,10 @@ export const WorkbookViewer = forwardRef(function WorkbookViewer({ workbookPath,
   const [cellsWithSecrets, setCellsWithSecrets] = useState([]);
   const [hasSecretsInOutputs, setHasSecretsInOutputs] = useState(false);
   const contentScrollRef = useRef(null); // Ref for scroll container
+  const cellRefs = useRef({}); // Map of cell index to DOM element refs
   const [swappingCells, setSwappingCells] = useState(null); // Track cells being swapped { from, to }
+  const [isEditingLabel, setIsEditingLabel] = useState(false);
+  const [labelInputValue, setLabelInputValue] = useState("");
 
   // AI diff state
   const [pendingChanges, setPendingChanges] = useState(null);
@@ -1068,7 +1073,11 @@ export const WorkbookViewer = forwardRef(function WorkbookViewer({ workbookPath,
   // Expose handleAiChanges function to parent component via ref
   useImperativeHandle(ref, () => ({
     handleAiChanges: (oldNotebook, newNotebook) => {
+      console.log("🎨 WorkbookViewer.handleAiChanges called (via ref)");
+      console.log("   Old cells:", oldNotebook?.cells?.length, "New cells:", newNotebook?.cells?.length);
+
       const cellDiffs = computeNotebookDiff(oldNotebook, newNotebook);
+      console.log("   Computed", cellDiffs.length, "cell diffs:", cellDiffs.map(d => d.type));
 
       setPendingChanges({
         originalNotebook: oldNotebook,
@@ -1076,6 +1085,8 @@ export const WorkbookViewer = forwardRef(function WorkbookViewer({ workbookPath,
         cellDiffs: cellDiffs,
         decisions: {}, // Track which cells have been accepted/rejected
       });
+
+      console.log("✅ pendingChanges state updated, diff view should appear");
     }
   }));
 
@@ -1112,6 +1123,20 @@ export const WorkbookViewer = forwardRef(function WorkbookViewer({ workbookPath,
     window.addEventListener("workbooks:save-all", handleSaveAll);
     return () => window.removeEventListener("workbooks:save-all", handleSaveAll);
   }, [hasUnsavedChanges]);
+
+  // Scroll selected cell into view when selection changes
+  useEffect(() => {
+    const cellElement = cellRefs.current[selectedCell];
+    if (cellElement && contentScrollRef.current) {
+      // Use scrollIntoView with block: 'nearest' to avoid unnecessary scrolling
+      // when the cell is already visible
+      cellElement.scrollIntoView({
+        behavior: 'smooth',
+        block: 'nearest',
+        inline: 'nearest'
+      });
+    }
+  }, [selectedCell]);
 
   // Scan for secrets whenever notebook changes
   useEffect(() => {
@@ -1302,6 +1327,36 @@ export const WorkbookViewer = forwardRef(function WorkbookViewer({ workbookPath,
       engineStartedRef.current = false;
       setEngineReady(false);
       setError(`Failed to restart engine: ${err}. Try using 'Reconnect Engine'.`);
+    }
+  };
+
+  const forceRestartEngine = async () => {
+    try {
+      setEngineStatus('restarting');
+      setError(null);
+
+      // Force restart kills the kernel process, then restarts
+      await invoke("force_restart_engine", {
+        workbookPath: workbookPath,
+        projectPath: projectRoot,
+      });
+
+      // Clear execution timer when restarting
+      setRunningCellId(null);
+      setCellExecutionStartTime(null);
+      setCellExecutionElapsed(0);
+      engineStartedRef.current = true;
+      setEngineReady(true);
+      setEngineStatus('idle');
+
+      // Clear all outputs after restart
+      clearAllOutputs();
+    } catch (err) {
+      console.error("Failed to force restart engine:", err);
+      setEngineStatus('error');
+      engineStartedRef.current = false;
+      setEngineReady(false);
+      setError(`Failed to force restart engine: ${err}. Try closing and reopening the workbook.`);
     }
   };
 
@@ -1519,7 +1574,11 @@ export const WorkbookViewer = forwardRef(function WorkbookViewer({ workbookPath,
    * This will be called from App.jsx via prop
    */
   const handleAiChanges = (oldNotebook, newNotebook) => {
+    console.log("🎨 WorkbookViewer.handleAiChanges called");
+    console.log("   Old cells:", oldNotebook?.cells?.length, "New cells:", newNotebook?.cells?.length);
+
     const cellDiffs = computeNotebookDiff(oldNotebook, newNotebook);
+    console.log("   Computed", cellDiffs.length, "cell diffs");
 
     setPendingChanges({
       originalNotebook: oldNotebook,
@@ -1527,6 +1586,8 @@ export const WorkbookViewer = forwardRef(function WorkbookViewer({ workbookPath,
       cellDiffs: cellDiffs,
       decisions: {}, // Track which cells have been accepted/rejected
     });
+
+    console.log("✅ pendingChanges state updated, diff view should appear");
   };
 
   /**
@@ -2304,7 +2365,47 @@ export const WorkbookViewer = forwardRef(function WorkbookViewer({ workbookPath,
   };
 
   const getWorkbookName = () => {
-    return workbookPath.split("/").pop();
+    // Use label from metadata if available, otherwise use filename
+    const label = notebook?.metadata?.label;
+    if (label) {
+      return label;
+    }
+    return workbookPath.split("/").pop().replace('.ipynb', '');
+  };
+
+  const handleLabelClick = () => {
+    setLabelInputValue(getWorkbookName());
+    setIsEditingLabel(true);
+  };
+
+  const handleLabelBlur = () => {
+    setIsEditingLabel(false);
+  };
+
+  const handleLabelKeyDown = (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      saveLabelAndExit();
+    } else if (e.key === 'Escape') {
+      e.preventDefault();
+      setIsEditingLabel(false);
+    }
+  };
+
+  const saveLabelAndExit = async () => {
+    const newLabel = labelInputValue.trim();
+    if (newLabel && newLabel !== notebook?.metadata?.label) {
+      // Update notebook metadata
+      setNotebook((prev) => ({
+        ...prev,
+        metadata: {
+          ...prev.metadata,
+          label: newLabel
+        }
+      }));
+      setHasUnsavedChanges(true);
+    }
+    setIsEditingLabel(false);
   };
 
   // Unused for now - may be needed for explicit close handling in the future
@@ -2364,10 +2465,29 @@ export const WorkbookViewer = forwardRef(function WorkbookViewer({ workbookPath,
     <div className={STYLES.viewer.container}>
       <div className={STYLES.viewer.header}>
         <div className={STYLES.viewer.headerTop}>
-          <h2 className={STYLES.viewer.title}>
-            {getWorkbookName()}
-            {hasUnsavedChanges && <span className={STYLES.viewer.unsavedDot}>•</span>}
-          </h2>
+          <div className="flex items-center gap-2">
+            {isEditingLabel ? (
+              <input
+                type="text"
+                value={labelInputValue}
+                onChange={(e) => setLabelInputValue(e.target.value)}
+                onBlur={handleLabelBlur}
+                onKeyDown={handleLabelKeyDown}
+                className="text-sm font-semibold text-gray-900 px-2 py-1 border border-blue-500 rounded focus:outline-none focus:ring-1 focus:ring-blue-500"
+                autoFocus
+                onFocus={(e) => e.target.select()}
+              />
+            ) : (
+              <h2
+                className={`${STYLES.viewer.title} cursor-pointer hover:bg-gray-100 px-2 py-1 rounded transition-colors`}
+                onClick={handleLabelClick}
+                title="Click to edit label"
+              >
+                {getWorkbookName()}
+                {hasUnsavedChanges && <span className={STYLES.viewer.unsavedDot}>•</span>}
+              </h2>
+            )}
+          </div>
           <div className={STYLES.viewer.headerControls}>
             <span className={`${STYLES.viewer.statusBadge} ${
               engineStatus === 'starting' ? STYLES.viewer.statusStarting :
@@ -2441,9 +2561,16 @@ export const WorkbookViewer = forwardRef(function WorkbookViewer({ workbookPath,
               onClick={restartEngine}
               disabled={!isEngineReady}
               className={STYLES.viewer.button}
-              title="Restart kernel"
+              title="Restart kernel (graceful shutdown)"
             >
               🔄 Restart
+            </button>
+            <button
+              onClick={forceRestartEngine}
+              className={`${STYLES.viewer.button} ${engineStatus === 'error' || !isEngineReady ? 'bg-red-50 hover:bg-red-100 border-red-400' : ''}`}
+              title="Force restart kernel (kills process, use if stuck)"
+            >
+              ⚡ Force Restart
             </button>
             <button
               onClick={revertToPreviousVersion}
@@ -2539,6 +2666,7 @@ export const WorkbookViewer = forwardRef(function WorkbookViewer({ workbookPath,
         {!pendingChanges && notebook.cells.map((cell, index) => (
           <WorkbookCell
             key={cell.metadata?.cell_id || index}
+            ref={(el) => { cellRefs.current[index] = el; }}
             cell={cell}
             index={index}
             workbookPath={workbookPath}
