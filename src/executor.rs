@@ -12,7 +12,6 @@ use crate::parser::{CodeBlock, DirConfig, ExecConfig, Frontmatter};
 pub struct BlockResult {
     pub block_index: usize,
     pub language: String,
-    pub code: String,
     pub stdout: String,
     pub stderr: String,
     pub exit_code: i32,
@@ -247,7 +246,6 @@ impl Session {
                     return BlockResult {
                         block_index: index,
                         language: block.language.clone(),
-                        code: block.code.clone(),
                         stdout: String::new(),
                         stderr: e,
                         exit_code: 127,
@@ -278,7 +276,6 @@ impl Session {
         BlockResult {
             block_index: index,
             language: block.language.clone(),
-            code: block.code.clone(),
             stdout,
             stderr,
             exit_code,
@@ -571,37 +568,44 @@ pub fn execute_block_oneshot(
                 drop(stdin);
             }
 
-            let stdout_handle = child.stdout.take();
-            let stderr_handle = child.stderr.take();
-
-            let mut stdout_buf = String::new();
-            let mut stderr_buf = String::new();
-
-            if let Some(out) = stdout_handle {
-                let reader = BufReader::new(out);
-                for line in reader.lines() {
-                    if let Ok(line) = line {
-                        if !ctx.quiet {
+            // Read stdout and stderr concurrently to avoid deadlock when
+            // the child fills the OS pipe buffer on one stream.
+            let quiet = ctx.quiet;
+            let stdout_thread = child.stdout.take().map(|out| {
+                thread::spawn(move || {
+                    let reader = BufReader::new(out);
+                    let mut buf = String::new();
+                    for line in reader.lines().flatten() {
+                        if !quiet {
                             println!("{}", line);
                         }
-                        stdout_buf.push_str(&line);
-                        stdout_buf.push('\n');
+                        buf.push_str(&line);
+                        buf.push('\n');
                     }
-                }
-            }
-
-            if let Some(err) = stderr_handle {
-                let reader = BufReader::new(err);
-                for line in reader.lines() {
-                    if let Ok(line) = line {
-                        if !ctx.quiet {
+                    buf
+                })
+            });
+            let stderr_thread = child.stderr.take().map(|err| {
+                thread::spawn(move || {
+                    let reader = BufReader::new(err);
+                    let mut buf = String::new();
+                    for line in reader.lines().flatten() {
+                        if !quiet {
                             eprintln!("{}", line);
                         }
-                        stderr_buf.push_str(&line);
-                        stderr_buf.push('\n');
+                        buf.push_str(&line);
+                        buf.push('\n');
                     }
-                }
-            }
+                    buf
+                })
+            });
+
+            let stdout_buf = stdout_thread
+                .map(|t| t.join().unwrap_or_default())
+                .unwrap_or_default();
+            let stderr_buf = stderr_thread
+                .map(|t| t.join().unwrap_or_default())
+                .unwrap_or_default();
 
             let status = child.wait();
             let exit_code = status.map(|s| s.code().unwrap_or(-1)).unwrap_or(-1);
@@ -609,7 +613,6 @@ pub fn execute_block_oneshot(
             BlockResult {
                 block_index: index,
                 language: block.language.clone(),
-                code: block.code.clone(),
                 stdout: stdout_buf.trim_end().to_string(),
                 stderr: stderr_buf.trim_end().to_string(),
                 exit_code,
@@ -619,7 +622,6 @@ pub fn execute_block_oneshot(
         Err(e) => BlockResult {
             block_index: index,
             language: block.language.clone(),
-            code: block.code.clone(),
             stdout: String::new(),
             stderr: format!("Failed to spawn {}: {}", program, e),
             exit_code: 127,
@@ -686,11 +688,16 @@ fn resolve_runtime(
             vec!["-e".to_string(), code.to_string()],
             String::new(),
         ),
-        "go" => (
-            "go".to_string(),
-            vec!["run".to_string(), "-".to_string()],
-            code.to_string(),
-        ),
+        "go" => {
+            // go run requires a filename, not stdin
+            let tmp = std::env::temp_dir().join("wb_block.go");
+            let _ = std::fs::write(&tmp, code);
+            (
+                "go".to_string(),
+                vec!["run".to_string(), tmp.to_string_lossy().to_string()],
+                String::new(),
+            )
+        }
         _other => {
             if let Some(ref default) = ctx.default_runtime {
                 resolve_runtime(
