@@ -1,3 +1,0 @@
-"""Workbooks Engine - Jupyter kernel management and AI agent server."""
-
-__version__ = "0.0.1"

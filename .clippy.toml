@@ -1,5 +1,0 @@
-# Clippy configuration for stricter Rust linting
-# Helps catch unused code and code quality issues
-
-# Warn on common issues
-cognitive-complexity-threshold = 30
