@@ -93,10 +93,10 @@ main() {
 
             if command -v git > /dev/null 2>&1; then
                 git clone --depth 1 "https://github.com/${REPO}.git" "$TMPDIR/workbooks" 2>/dev/null
-                cd "$TMPDIR/workbooks/cli"
+                cd "$TMPDIR/workbooks"
                 cargo build --release 2>&1 | tail -1
 
-                BUILT_BINARY="$TMPDIR/workbooks/cli/target/release/wb"
+                BUILT_BINARY="$TMPDIR/workbooks/target/release/wb"
                 if [ -f "$BUILT_BINARY" ]; then
                     install_binary "$BUILT_BINARY"
                     success

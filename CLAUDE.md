@@ -73,7 +73,7 @@ print("runs in python")
 wb run file.md                        # Run and show output
 wb run file.md -o results.md          # Save results as markdown
 wb run file.md --bail                 # Stop on first failure
-wb run file.md --quiet                # Suppress terminal output
+wb run file.md -v                     # Show block output in terminal
 wb run file.md --secrets doppler      # Override secret provider
 wb run file.md -C /path/to/dir        # Set working directory
 wb inspect file.md                    # Show structure without running

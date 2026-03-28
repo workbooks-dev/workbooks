@@ -6,7 +6,6 @@ pub struct Frontmatter {
     pub title: Option<String>,
     pub runtime: Option<String>,
     pub venv: Option<String>,
-    pub shell: Option<String>,
     pub env: Option<HashMap<String, String>>,
     pub secrets: Option<SecretsConfig>,
     pub setup: Option<SetupConfig>,
@@ -111,7 +110,6 @@ pub enum Section {
 pub struct Workbook {
     pub frontmatter: Frontmatter,
     pub sections: Vec<Section>,
-    pub source: String,
 }
 
 impl Workbook {
@@ -131,7 +129,6 @@ pub fn parse(input: &str) -> Workbook {
     Workbook {
         frontmatter,
         sections,
-        source: input.to_string(),
     }
 }
 

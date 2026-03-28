@@ -2,10 +2,8 @@
 title: Deploy Check
 runtime: bash
 secrets:
-  - provider: env
-    keys: [DEPLOY_HOST]
-  - provider: dotenv
-    command: .env
+  provider: env
+  keys: [DEPLOY_HOST]
 ---
 
 # Deploy Check

@@ -150,6 +150,7 @@ fn dispatch(cli: Cli) {
             cli.verbose,
             cli.bail,
             &cli.order,
+            cli.no_setup,
         );
     } else if cli.inspect {
         inspect_workbook(path);
@@ -165,6 +166,7 @@ fn dispatch(cli: Cli) {
             cli.dir,
             cli.verbose,
             cli.bail,
+            cli.no_setup,
         );
     }
 }
@@ -213,6 +215,7 @@ fn run_folder(
     verbose: bool,
     bail: bool,
     order: &str,
+    no_setup: bool,
 ) {
     let files = collect_workbooks(dir, order);
 
@@ -240,6 +243,7 @@ fn run_folder(
             secrets_cmd.clone(),
             working_dir.clone(),
             verbose,
+            no_setup,
         );
 
         let status = if summary.failed == 0 { "ok" } else { "FAIL" };
@@ -313,6 +317,7 @@ fn run_single_collect(
     secrets_cmd: Option<String>,
     dir: Option<String>,
     verbose: bool,
+    no_setup: bool,
 ) -> output::RunSummary {
     let content = match std::fs::read_to_string(file) {
         Ok(c) => c,
@@ -326,7 +331,6 @@ fn run_single_collect(
                 results: vec![executor::BlockResult {
                     block_index: 0,
                     language: "error".to_string(),
-                    code: String::new(),
                     stdout: String::new(),
                     stderr: format!("read error: {}", e),
                     exit_code: 1,
@@ -355,6 +359,29 @@ fn run_single_collect(
     if let Some(ref config) = secrets_config {
         if let Ok(env) = secrets::resolve_secrets(config) {
             ctx.env.extend(env);
+        }
+    }
+
+    // Run setup commands
+    if !no_setup {
+        if let Some(ref setup) = workbook.frontmatter.setup {
+            if let Err(e) = run_setup(setup, &ctx.working_dir) {
+                return output::RunSummary {
+                    source_file: file.to_string(),
+                    total_blocks: block_count,
+                    passed: 0,
+                    failed: 1,
+                    total_duration: std::time::Duration::ZERO,
+                    results: vec![executor::BlockResult {
+                        block_index: 0,
+                        language: "setup".to_string(),
+                        stdout: String::new(),
+                        stderr: e,
+                        exit_code: 1,
+                        duration: std::time::Duration::ZERO,
+                    }],
+                };
+            }
         }
     }
 
@@ -397,6 +424,7 @@ fn run_single(
     dir: Option<String>,
     verbose: bool,
     bail: bool,
+    no_setup: bool,
 ) {
     let content = match std::fs::read_to_string(file) {
         Ok(c) => c,
@@ -434,6 +462,16 @@ fn run_single(
             Ok(env) => ctx.env.extend(env),
             Err(e) => {
                 eprintln!("error: secrets: {}", e);
+                std::process::exit(1);
+            }
+        }
+    }
+
+    // Run setup commands
+    if !no_setup {
+        if let Some(ref setup) = workbook.frontmatter.setup {
+            if let Err(e) = run_setup(setup, &ctx.working_dir) {
+                eprintln!("error: {}", e);
                 std::process::exit(1);
             }
         }
@@ -594,6 +632,36 @@ fn default_program(lang: &str) -> &str {
         "go" => "go",
         _ => "bash",
     }
+}
+
+fn run_setup(setup: &parser::SetupConfig, base_dir: &str) -> Result<(), String> {
+    let work_dir = setup
+        .dir()
+        .map(|d| {
+            if Path::new(d).is_absolute() {
+                d.to_string()
+            } else {
+                Path::new(base_dir).join(d).to_string_lossy().to_string()
+            }
+        })
+        .unwrap_or_else(|| base_dir.to_string());
+
+    for cmd in setup.commands() {
+        let status = std::process::Command::new("sh")
+            .args(["-c", cmd])
+            .current_dir(&work_dir)
+            .status()
+            .map_err(|e| format!("setup '{}': {}", cmd, e))?;
+
+        if !status.success() {
+            return Err(format!(
+                "setup '{}' failed (exit {})",
+                cmd,
+                status.code().unwrap_or(-1)
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn build_secrets_config(
