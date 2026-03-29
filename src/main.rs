@@ -1,3 +1,5 @@
+mod callback;
+mod checkpoint;
 mod executor;
 mod output;
 mod parser;
@@ -67,6 +69,18 @@ struct Cli {
     /// Sort order for folder runs: a-z (default), z-a
     #[arg(long, default_value = "a-z")]
     order: String,
+
+    /// Enable checkpointing with an ID (resumes if checkpoint exists)
+    #[arg(long)]
+    checkpoint: Option<String>,
+
+    /// Callback URL to POST events to (step.complete, checkpoint.failed, run.complete)
+    #[arg(long)]
+    callback: Option<String>,
+
+    /// HMAC-SHA256 secret for signing callback payloads (X-WB-Signature header)
+    #[arg(long = "callback-secret")]
+    callback_secret: Option<String>,
 }
 
 fn main() {
@@ -167,6 +181,9 @@ fn dispatch(cli: Cli) {
             cli.verbose,
             cli.bail,
             cli.no_setup,
+            cli.checkpoint,
+            cli.callback,
+            cli.callback_secret,
         );
     }
 }
@@ -425,6 +442,9 @@ fn run_single(
     verbose: bool,
     bail: bool,
     no_setup: bool,
+    checkpoint_id: Option<String>,
+    callback_url: Option<String>,
+    callback_secret: Option<String>,
 ) {
     let content = match std::fs::read_to_string(file) {
         Ok(c) => c,
@@ -477,28 +497,123 @@ fn run_single(
         }
     }
 
+    // Load checkpoint if resuming
+    let (skip_until, mut results, mut ckpt) = if let Some(ref id) = checkpoint_id {
+        match checkpoint::load(id) {
+            Ok(Some(mut c))
+                if c.status != checkpoint::CheckpointStatus::Complete
+                    && c.workbook == file
+                    && c.total_blocks == block_count =>
+            {
+                let skip = c.next_block;
+                eprintln!(
+                    "wb: resuming '{}' — skipping {} completed blocks",
+                    id, skip
+                );
+                let prior = c.block_results();
+                c.status = checkpoint::CheckpointStatus::InProgress;
+                (skip, prior, Some(c))
+            }
+            Ok(_) => (
+                0,
+                Vec::new(),
+                Some(checkpoint::Checkpoint::new(file, block_count)),
+            ),
+            Err(e) => {
+                eprintln!("warning: {}", e);
+                (
+                    0,
+                    Vec::new(),
+                    Some(checkpoint::Checkpoint::new(file, block_count)),
+                )
+            }
+        }
+    } else {
+        (0, Vec::new(), None)
+    };
+
+    let cb = callback_url.map(|url| callback::CallbackConfig {
+        url,
+        secret: callback_secret,
+    });
+
     let start = Instant::now();
-    let mut results = Vec::new();
     let mut block_idx = 0;
     let mut session = executor::Session::new(ctx);
 
     for section in &workbook.sections {
         if let parser::Section::Code(block) = section {
+            if block_idx < skip_until {
+                block_idx += 1;
+                continue;
+            }
+
             let result = session.execute_block(block, block_idx);
             let success = result.success();
 
-            results.push(result);
-            block_idx += 1;
+            // Callback: step complete (fires for every executed block)
+            if let Some(ref cb) = cb {
+                cb.step_complete(
+                    &result,
+                    block_idx + 1,
+                    block_count,
+                    file,
+                    checkpoint_id.as_deref(),
+                );
+            }
 
             if bail && !success {
+                // Callback: checkpoint failed (when checkpointing is active)
+                if let (Some(ref cb), Some(ref ckpt_id)) = (&cb, &checkpoint_id) {
+                    cb.checkpoint_failed(&result, block_idx, block_count, file, ckpt_id);
+                }
+
+                // Don't checkpoint the failed block — re-run it on resume
+                if let Some(ref mut c) = ckpt {
+                    c.mark_failed();
+                    let _ = checkpoint::save(checkpoint_id.as_ref().unwrap(), c);
+                }
+                results.push(result);
+                block_idx += 1;
                 break;
             }
+
+            // Checkpoint after each successful block (or any block without bail)
+            if let Some(ref mut c) = ckpt {
+                c.add_result(&result);
+                if let Err(e) = checkpoint::save(checkpoint_id.as_ref().unwrap(), c) {
+                    eprintln!("warning: checkpoint: {}", e);
+                }
+            }
+
+            results.push(result);
+            block_idx += 1;
+        }
+    }
+
+    // Mark complete if all blocks ran
+    if let Some(ref mut c) = ckpt {
+        if c.status == checkpoint::CheckpointStatus::InProgress {
+            c.mark_complete();
+            let _ = checkpoint::save(checkpoint_id.as_ref().unwrap(), c);
         }
     }
 
     let total_duration = start.elapsed();
     let passed = results.iter().filter(|r| r.success()).count();
     let failed = results.iter().filter(|r| !r.success()).count();
+
+    // Callback: run complete
+    if let Some(ref cb) = cb {
+        cb.run_complete(
+            passed,
+            failed,
+            block_count,
+            total_duration.as_millis() as u64,
+            file,
+            checkpoint_id.as_deref(),
+        );
+    }
 
     let summary = output::RunSummary {
         source_file: file.to_string(),

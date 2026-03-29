@@ -26,6 +26,9 @@ wb run file.md -o results.md     # Save as annotated markdown with results
 wb run file.md --bail            # Stop on first failure
 wb run file.md --verbose         # Show block output in terminal
 wb run file.md -C /path/to/dir   # Set working directory
+wb run file.md --checkpoint id   # Save/resume execution with checkpoint ID
+wb run file.md --callback <url>  # POST events to webhook URL
+wb run file.md --callback-secret key  # HMAC-SHA256 signing for callbacks
 wb run folder/                   # Run all .md files in a folder
 wb inspect file.md               # Show structure without running
 ```
@@ -172,6 +175,75 @@ Non-executable fences (yaml, json, toml, sql, etc.) are treated as documentation
 
 Produces an annotated copy of the original workbook with results inlined after each code block.
 
+## Checkpointing
+
+Resume workbook runs from where they stopped. Use `--checkpoint <id>` to save execution progress and resume on retry. This is essential for agent workflows where external failures (API down, missing credentials, rate limits) may interrupt a run.
+
+```bash
+# First run — block 3 fails because API is down
+wb run deploy.md --bail --checkpoint deploy-1
+
+# Fix the issue (wait for API, rotate key, etc.), then resume
+wb run deploy.md --bail --checkpoint deploy-1
+# Skips blocks 1-2, re-runs block 3
+```
+
+### Behavior
+
+- Progress saved to `~/.wb/checkpoints/<id>.json` after each block
+- Existing checkpoint with matching workbook/block count → resume from where it stopped
+- With `--bail`: the failed block is re-run on resume (not skipped)
+- Without `--bail`: all blocks run; checkpoint only helps if process was killed mid-run
+- Completed checkpoint → starts fresh (IDs are reusable)
+- Workbook changed (different block count) → starts fresh
+
+### When to use checkpoints
+
+- **Long-running workbooks** with many sequential blocks
+- **Deploy workflows** where external services may be flaky
+- **Agent-driven runs** where blockers need human intervention before retry
+- Pair with `--bail` for the "fix and retry" pattern
+
+## Callbacks
+
+HTTP POST notifications for agent orchestration. Use `--callback <url>` to receive events as blocks execute.
+
+```bash
+wb run deploy.md --bail --checkpoint deploy-1 \
+  --callback https://hooks.example.com/wb \
+  --callback-secret my-hmac-key
+```
+
+### Events
+
+| Event | When | Key payload fields |
+|-------|------|--------------------|
+| `step.complete` | After each block executes | `block.index`, `block.exit_code`, `progress.completed` |
+| `checkpoint.failed` | Bail triggered with checkpoint active | `failed_block.index`, `failed_block.stderr`, `checkpoint_id` |
+| `run.complete` | Entire run finished | `status` (pass/fail), `blocks.passed`, `blocks.failed`, `duration_ms` |
+
+### Headers
+
+- `Content-Type: application/json`
+- `X-WB-Event: <event name>`
+- `X-WB-Signature: sha256=<hmac-sha256-hex>` (when `--callback-secret` provided)
+
+### Signature verification
+
+The signature is HMAC-SHA256 of the raw JSON body using the secret as key. Verify in your webhook handler:
+
+```python
+import hmac, hashlib
+expected = hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
+assert signature == f"sha256={expected}"
+```
+
+### When to use callbacks
+
+- **Agent orchestration** — notify a controller when a step fails so it can intervene
+- **CI/CD pipelines** — post results to Slack, PagerDuty, or a dashboard
+- **Monitoring** — track workbook execution across a fleet of machines
+
 ## Authoring Workbooks
 
 When creating workbooks for the user:
@@ -230,8 +302,10 @@ When running workbooks on behalf of the user:
 1. Use `--json` when you need to parse results programmatically
 2. Use `--verbose` when the user wants to see block output in real time
 3. Use `--bail` for workbooks where blocks are dependent (deploy checks, setup scripts)
-4. Check the exit code: `wb` exits 0 on all-pass, 1 on any failure
-5. For folder runs, `wb run folder/ --json` returns a batch report with per-workbook summaries
+4. Use `--checkpoint <id>` with `--bail` for workflows that may hit external blockers — this lets you retry from the failed block after fixing the issue
+5. Use `--callback <url>` to get notified of step completions and failures — combine with `--checkpoint` for full agent orchestration
+6. Check the exit code: `wb` exits 0 on all-pass, 1 on any failure
+7. For folder runs, `wb run folder/ --json` returns a batch report with per-workbook summaries
 
 ## Install
 

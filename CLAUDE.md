@@ -27,6 +27,8 @@ workbooks/
 │   ├── main.rs        # CLI entrypoint (wb run, wb inspect)
 │   ├── parser.rs      # Markdown frontmatter + code block extraction
 │   ├── executor.rs    # Multi-runtime subprocess execution
+│   ├── checkpoint.rs  # Save/resume execution state
+│   ├── callback.rs    # HTTP webhook notifications with HMAC signing
 │   ├── secrets.rs     # Secret providers (doppler, yard, env, dotenv, prompt)
 │   └── output.rs      # Results markdown formatter
 └── examples/
@@ -76,8 +78,49 @@ wb run file.md --bail                 # Stop on first failure
 wb run file.md -v                     # Show block output in terminal
 wb run file.md --secrets doppler      # Override secret provider
 wb run file.md -C /path/to/dir        # Set working directory
+wb run file.md --checkpoint my-run    # Save/resume execution state
+wb run file.md --callback <url>       # POST events to webhook
 wb inspect file.md                    # Show structure without running
 ```
+
+## Checkpointing
+
+Resume workbook runs from where they stopped. Designed for agent workflows where blocks may fail due to external issues (API down, missing input, rate limits).
+
+```bash
+wb run deploy.md --bail --checkpoint deploy-1
+# Block 3 fails — fix the issue (rotate API key, wait for service, etc.)
+wb run deploy.md --bail --checkpoint deploy-1
+# Resumes from block 3, skips already-completed blocks
+```
+
+- `--checkpoint <id>` saves progress after each block to `~/.wb/checkpoints/<id>.json`
+- If a checkpoint exists for that ID (in_progress/failed), the run resumes from where it stopped
+- With `--bail`, the failed block is re-run on resume (not skipped)
+- Completed checkpoints start fresh on re-run (IDs are reusable)
+- If the workbook file or block count changed, starts fresh
+
+## Callbacks
+
+HTTP POST notifications for step completions, checkpoint failures, and run completions. Designed for agent orchestration — an agent can listen for `checkpoint.failed` to know when human intervention is needed.
+
+```bash
+wb run deploy.md --bail --checkpoint deploy-1 \
+  --callback https://hooks.example.com/wb \
+  --callback-secret my-hmac-key
+```
+
+Three events:
+- **`step.complete`** — after each block executes (pass or fail)
+- **`checkpoint.failed`** — bail triggered on failure with checkpointing active
+- **`run.complete`** — entire run finished
+
+Headers sent:
+- `Content-Type: application/json`
+- `X-WB-Event: <event>`
+- `X-WB-Signature: sha256=<hmac-sha256-hex>` (when `--callback-secret` is set)
+
+Payloads include `checkpoint_id`, `workbook`, `progress`, and `timestamp`. The `checkpoint.failed` event includes `failed_block.stderr` for diagnostics.
 
 ## Secret Providers
 
