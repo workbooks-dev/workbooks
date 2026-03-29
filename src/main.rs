@@ -81,6 +81,14 @@ struct Cli {
     /// HMAC-SHA256 secret for signing callback payloads (X-WB-Signature header)
     #[arg(long = "callback-secret")]
     callback_secret: Option<String>,
+
+    /// Set a variable (KEY=VALUE), overrides frontmatter vars
+    #[arg(short = 'e', long = "set", value_name = "KEY=VALUE")]
+    set_vars: Vec<String>,
+
+    /// Mark variable keys as secret (values redacted from output)
+    #[arg(long)]
+    redact: Vec<String>,
 }
 
 fn main() {
@@ -113,6 +121,14 @@ fn main() {
                 new_args.push("--inspect".to_string());
                 let cli = Cli::parse_from(new_args);
                 dispatch(cli);
+                return;
+            }
+            "transform" => {
+                if args.len() < 3 {
+                    eprintln!("usage: wb transform <file.md>");
+                    std::process::exit(1);
+                }
+                transform_workbook(&args[2]);
                 return;
             }
             _ => {}
@@ -149,6 +165,12 @@ fn dispatch(cli: Cli) {
     let output_format = format_flag.or(file_format);
     let stdout_output = format_flag.is_some() && cli.output.is_none();
 
+    let cli_vars: std::collections::HashMap<String, String> = cli
+        .set_vars
+        .iter()
+        .filter_map(|s| s.split_once('=').map(|(k, v)| (k.to_string(), v.to_string())))
+        .collect();
+
     let p = Path::new(path);
 
     if p.is_dir() {
@@ -165,6 +187,8 @@ fn dispatch(cli: Cli) {
             cli.bail,
             &cli.order,
             cli.no_setup,
+            cli_vars,
+            cli.redact,
         );
     } else if cli.inspect {
         inspect_workbook(path);
@@ -184,6 +208,8 @@ fn dispatch(cli: Cli) {
             cli.checkpoint,
             cli.callback,
             cli.callback_secret,
+            cli_vars,
+            cli.redact,
         );
     }
 }
@@ -233,6 +259,8 @@ fn run_folder(
     bail: bool,
     order: &str,
     no_setup: bool,
+    cli_vars: std::collections::HashMap<String, String>,
+    cli_redact: Vec<String>,
 ) {
     let files = collect_workbooks(dir, order);
 
@@ -261,6 +289,8 @@ fn run_folder(
             working_dir.clone(),
             verbose,
             no_setup,
+            cli_vars.clone(),
+            cli_redact.clone(),
         );
 
         let status = if summary.failed == 0 { "ok" } else { "FAIL" };
@@ -335,6 +365,8 @@ fn run_single_collect(
     dir: Option<String>,
     verbose: bool,
     no_setup: bool,
+    cli_vars: std::collections::HashMap<String, String>,
+    cli_redact: Vec<String>,
 ) -> output::RunSummary {
     let content = match std::fs::read_to_string(file) {
         Ok(c) => c,
@@ -378,6 +410,22 @@ fn run_single_collect(
             ctx.env.extend(env);
         }
     }
+
+    // Merge vars: frontmatter defaults + CLI overrides
+    let mut vars = workbook.frontmatter.vars.clone().unwrap_or_default();
+    vars.extend(cli_vars);
+    ctx.env.extend(vars.clone());
+    ctx.vars = vars;
+
+    // Build redact values from keys
+    let mut redact_keys = workbook.frontmatter.redact.clone().unwrap_or_default();
+    redact_keys.extend(cli_redact);
+    ctx.redact_values = redact_keys
+        .iter()
+        .filter_map(|k| ctx.env.get(k))
+        .filter(|v| !v.is_empty())
+        .cloned()
+        .collect();
 
     // Run setup commands
     if !no_setup {
@@ -445,6 +493,8 @@ fn run_single(
     checkpoint_id: Option<String>,
     callback_url: Option<String>,
     callback_secret: Option<String>,
+    cli_vars: std::collections::HashMap<String, String>,
+    cli_redact: Vec<String>,
 ) {
     let content = match std::fs::read_to_string(file) {
         Ok(c) => c,
@@ -486,6 +536,22 @@ fn run_single(
             }
         }
     }
+
+    // Merge vars: frontmatter defaults + CLI overrides
+    let mut vars = workbook.frontmatter.vars.clone().unwrap_or_default();
+    vars.extend(cli_vars);
+    ctx.env.extend(vars.clone());
+    ctx.vars = vars;
+
+    // Build redact values from keys
+    let mut redact_keys = workbook.frontmatter.redact.clone().unwrap_or_default();
+    redact_keys.extend(cli_redact);
+    ctx.redact_values = redact_keys
+        .iter()
+        .filter_map(|k| ctx.env.get(k))
+        .filter(|v| !v.is_empty())
+        .cloned()
+        .collect();
 
     // Run setup commands
     if !no_setup {
@@ -666,6 +732,12 @@ fn inspect_workbook(file: &str) {
     if let Some(ref venv) = workbook.frontmatter.venv {
         println!("venv: {}", venv);
     }
+    if let Some(ref vars) = workbook.frontmatter.vars {
+        println!("vars: {}", vars.keys().cloned().collect::<Vec<_>>().join(", "));
+    }
+    if let Some(ref redact) = workbook.frontmatter.redact {
+        println!("redact: {}", redact.join(", "));
+    }
     if workbook.frontmatter.secrets.is_some() {
         println!("secrets: configured");
     }
@@ -794,4 +866,79 @@ fn build_secrets_config(
         }));
     }
     frontmatter_secrets.clone()
+}
+
+fn transform_workbook(file: &str) {
+    let content = match std::fs::read_to_string(file) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("error: {}: {}", file, e);
+            std::process::exit(1);
+        }
+    };
+
+    let workbook = parser::parse(&content);
+    let existing_vars = workbook.frontmatter.vars.clone().unwrap_or_default();
+
+    // Scan code blocks for {{key}} patterns
+    let mut referenced = std::collections::BTreeSet::new();
+    for section in &workbook.sections {
+        if let parser::Section::Code(block) = section {
+            let mut rest = block.code.as_str();
+            while let Some(start) = rest.find("{{") {
+                if let Some(end) = rest[start + 2..].find("}}") {
+                    let key = rest[start + 2..start + 2 + end].trim();
+                    if !key.is_empty()
+                        && key
+                            .chars()
+                            .all(|c| c.is_alphanumeric() || c == '_' || c == '-')
+                    {
+                        referenced.insert(key.to_string());
+                    }
+                    rest = &rest[start + 2 + end + 2..];
+                } else {
+                    break;
+                }
+            }
+        }
+    }
+
+    if referenced.is_empty() {
+        eprintln!("no {{{{variables}}}} found in code blocks");
+        std::process::exit(0);
+    }
+
+    let missing: Vec<&String> = referenced
+        .iter()
+        .filter(|k| !existing_vars.contains_key(k.as_str()))
+        .collect();
+
+    let unused: Vec<String> = existing_vars
+        .keys()
+        .filter(|k| !referenced.contains(*k))
+        .cloned()
+        .collect();
+
+    println!("vars:");
+    for key in &referenced {
+        match existing_vars.get(key.as_str()) {
+            Some(val) if !val.is_empty() => println!("  {}: {}", key, val),
+            _ => println!("  {}: \"\"", key),
+        }
+    }
+
+    if !missing.is_empty() {
+        eprintln!(
+            "\nundefined: {}",
+            missing
+                .iter()
+                .map(|k| k.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
+
+    if !unused.is_empty() {
+        eprintln!("\nunused: {}", unused.join(", "));
+    }
 }

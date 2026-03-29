@@ -32,6 +32,8 @@ pub struct ExecutionContext {
     pub exec_config: Option<ExecConfig>,
     pub dir_config: Option<DirConfig>,
     pub quiet: bool,
+    pub vars: HashMap<String, String>,
+    pub redact_values: Vec<String>,
 }
 
 impl ExecutionContext {
@@ -55,8 +57,34 @@ impl ExecutionContext {
             exec_config: frontmatter.exec.clone(),
             dir_config: frontmatter.working_dir.clone(),
             quiet: false,
+            vars: frontmatter.vars.clone().unwrap_or_default(),
+            redact_values: Vec::new(),
         }
     }
+}
+
+pub fn substitute_vars(code: &str, vars: &HashMap<String, String>) -> String {
+    if vars.is_empty() {
+        return code.to_string();
+    }
+    let mut result = code.to_string();
+    for (key, value) in vars {
+        result = result.replace(&format!("{{{{{}}}}}", key), value);
+    }
+    result
+}
+
+pub fn redact_output(text: &str, values: &[String]) -> String {
+    if values.is_empty() {
+        return text.to_string();
+    }
+    let mut result = text.to_string();
+    for val in values {
+        if !val.is_empty() {
+            result = result.replace(val, "***");
+        }
+    }
+    result
 }
 
 /// Resolve exec for a given normalized language.
@@ -257,9 +285,10 @@ impl Session {
 
         // Send code and collect output (scoped to release process borrow)
         let quiet = self.ctx.quiet;
+        let code = substitute_vars(&block.code, &self.ctx.vars);
         let (ok, stdout, stderr, exit_code) = {
             let process = self.processes.get_mut(&lang).unwrap();
-            match send_code(process, &lang, &block.code) {
+            match send_code(process, &lang, &code) {
                 Ok(()) => {
                     let (stdout, stderr, exit_code) = collect_output(process, quiet);
                     (true, stdout, stderr, exit_code)
@@ -276,8 +305,8 @@ impl Session {
         BlockResult {
             block_index: index,
             language: block.language.clone(),
-            stdout,
-            stderr,
+            stdout: redact_output(&stdout, &self.ctx.redact_values),
+            stderr: redact_output(&stderr, &self.ctx.redact_values),
             exit_code,
             duration: start.elapsed(),
         }
@@ -520,7 +549,8 @@ pub fn execute_block_oneshot(
 ) -> BlockResult {
     let start = Instant::now();
 
-    let (program, args, code) = resolve_runtime(&block.language, &block.code, ctx);
+    let substituted = substitute_vars(&block.code, &ctx.vars);
+    let (program, args, code) = resolve_runtime(&block.language, &substituted, ctx);
 
     let lang = normalize_language(&block.language, &ctx.default_runtime);
     let exec = resolve_exec(&ctx.exec_config, &lang);
@@ -613,8 +643,8 @@ pub fn execute_block_oneshot(
             BlockResult {
                 block_index: index,
                 language: block.language.clone(),
-                stdout: stdout_buf.trim_end().to_string(),
-                stderr: stderr_buf.trim_end().to_string(),
+                stdout: redact_output(stdout_buf.trim_end(), &ctx.redact_values),
+                stderr: redact_output(stderr_buf.trim_end(), &ctx.redact_values),
                 exit_code,
                 duration: start.elapsed(),
             }
@@ -711,6 +741,8 @@ fn resolve_runtime(
                         exec_config: ctx.exec_config.clone(),
                         dir_config: ctx.dir_config.clone(),
                         quiet: ctx.quiet,
+                        vars: ctx.vars.clone(),
+                        redact_values: ctx.redact_values.clone(),
                     },
                 )
             } else {
@@ -722,4 +754,54 @@ fn resolve_runtime(
 
 fn is_python_language(lang: &str) -> bool {
     matches!(lang.to_lowercase().as_str(), "python" | "python3" | "py")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_substitute_vars_basic() {
+        let mut vars = HashMap::new();
+        vars.insert("cluster".to_string(), "prod".to_string());
+        vars.insert("region".to_string(), "us-east-1".to_string());
+        assert_eq!(
+            substitute_vars("echo {{cluster}} in {{region}}", &vars),
+            "echo prod in us-east-1"
+        );
+    }
+
+    #[test]
+    fn test_substitute_vars_empty() {
+        let vars = HashMap::new();
+        assert_eq!(substitute_vars("echo {{cluster}}", &vars), "echo {{cluster}}");
+    }
+
+    #[test]
+    fn test_substitute_vars_repeated() {
+        let mut vars = HashMap::new();
+        vars.insert("x".to_string(), "42".to_string());
+        assert_eq!(substitute_vars("{{x}} and {{x}}", &vars), "42 and 42");
+    }
+
+    #[test]
+    fn test_redact_output_basic() {
+        let values = vec!["secret123".to_string(), "password456".to_string()];
+        assert_eq!(
+            redact_output("token: secret123, pass: password456", &values),
+            "token: ***, pass: ***"
+        );
+    }
+
+    #[test]
+    fn test_redact_output_empty() {
+        let values: Vec<String> = vec![];
+        assert_eq!(redact_output("token: secret123", &values), "token: secret123");
+    }
+
+    #[test]
+    fn test_redact_skips_empty_values() {
+        let values = vec!["".to_string(), "real".to_string()];
+        assert_eq!(redact_output("real value", &values), "*** value");
+    }
 }

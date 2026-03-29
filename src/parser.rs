@@ -7,6 +7,8 @@ pub struct Frontmatter {
     pub runtime: Option<String>,
     pub venv: Option<String>,
     pub env: Option<HashMap<String, String>>,
+    pub vars: Option<HashMap<String, String>>,
+    pub redact: Option<Vec<String>>,
     pub secrets: Option<SecretsConfig>,
     pub setup: Option<SetupConfig>,
     pub exec: Option<ExecConfig>,
