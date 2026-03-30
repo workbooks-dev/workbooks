@@ -505,7 +505,7 @@ fn collect_until_sentinel(
                 }
                 if !quiet {
                     if is_stderr {
-                        eprintln!("{}", line);
+                        crate::output::print_stderr_dim(&line);
                     } else {
                         println!("{}", line);
                     }
@@ -623,7 +623,7 @@ pub fn execute_block_oneshot(
                     let mut buf = String::new();
                     for line in reader.lines().flatten() {
                         if !quiet {
-                            eprintln!("{}", line);
+                            crate::output::print_stderr_dim(&line);
                         }
                         buf.push_str(&line);
                         buf.push('\n');

@@ -297,15 +297,19 @@ fn run_folder(
             cli_redact.clone(),
         );
 
-        let status = if summary.failed == 0 { "ok" } else { "FAIL" };
-        eprintln!(
+        let line = format!(
             "  {} {} ({}/{} blocks, {:.1}s)",
-            status,
+            if summary.failed == 0 { "✓" } else { "✗" },
             filename,
             summary.passed,
             summary.total_blocks,
             summary.total_duration.as_secs_f64()
         );
+        if summary.failed == 0 {
+            eprintln!("{}", output::style_ok(&line));
+        } else {
+            eprintln!("{}", output::style_fail(&line));
+        }
 
         if summary.failed > 0 {
             total_failed += 1;
@@ -326,16 +330,22 @@ fn run_folder(
     eprintln!();
     if total_failed == 0 {
         eprintln!(
-            "ok — {} workbooks in {:.1}s",
-            passed_workbooks,
-            total_duration.as_secs_f64()
+            "{}",
+            output::style_ok(&format!(
+                "✓ {} workbooks in {:.1}s",
+                passed_workbooks,
+                total_duration.as_secs_f64()
+            ))
         );
     } else {
         eprintln!(
-            "FAIL — {} passed, {} failed in {:.1}s",
-            passed_workbooks,
-            total_failed,
-            total_duration.as_secs_f64()
+            "{}",
+            output::style_fail(&format!(
+                "✗ {} passed, {} failed in {:.1}s",
+                passed_workbooks,
+                total_failed,
+                total_duration.as_secs_f64()
+            ))
         );
     }
 
@@ -611,25 +621,51 @@ fn run_single(
     let mut block_idx = 0;
     let mut session = executor::Session::new(ctx);
 
+    if !quiet {
+        let title = workbook.frontmatter.title.as_deref().unwrap_or(file);
+        eprintln!("{}", output::style_bold(title));
+    }
+
+    let mut last_heading: Option<String> = None;
+
     for section in &workbook.sections {
+        if let parser::Section::Text(text) = section {
+            for line in text.lines() {
+                let trimmed = line.trim();
+                if trimmed.starts_with("## ") {
+                    last_heading = Some(trimmed.trim_start_matches('#').trim().to_string());
+                }
+            }
+        }
+
         if let parser::Section::Code(block) = section {
             if block_idx < skip_until {
                 block_idx += 1;
                 continue;
             }
 
+            if !quiet {
+                let label = last_heading.take().unwrap_or_else(|| block.language.clone());
+                output::print_block_header(&label);
+            }
+
             let result = session.execute_block(block, block_idx);
             let success = result.success();
 
             // Per-block progress
-            eprintln!(
-                "[{}/{}] {} {} ({:.1}s)",
+            let status_line = format!(
+                "{} [{}/{}] {} ({:.1}s)",
+                if success { "✓" } else { "✗" },
                 block_idx + 1,
                 block_count,
                 block.language,
-                if success { "ok" } else { "FAIL" },
                 result.duration.as_secs_f64()
             );
+            if success {
+                eprintln!("{}", output::style_ok(&status_line));
+            } else {
+                eprintln!("{}", output::style_fail(&status_line));
+            }
 
             // Callback: step complete (fires for every executed block)
             if let Some(ref cb) = cb {

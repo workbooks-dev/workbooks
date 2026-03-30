@@ -1,3 +1,4 @@
+use std::io::IsTerminal;
 use std::time::Duration;
 
 use chrono::Utc;
@@ -5,6 +6,61 @@ use serde::Serialize;
 
 use crate::executor::BlockResult;
 use crate::parser::{Section, Workbook};
+
+// ─── Terminal colors ──────────────────────────────────────────────────
+
+fn use_color() -> bool {
+    std::env::var_os("NO_COLOR").is_none() && std::io::stderr().is_terminal()
+}
+
+pub fn style_ok(text: &str) -> String {
+    if use_color() {
+        format!("\x1b[32m{}\x1b[0m", text)
+    } else {
+        text.to_string()
+    }
+}
+
+pub fn style_fail(text: &str) -> String {
+    if use_color() {
+        format!("\x1b[1;31m{}\x1b[0m", text)
+    } else {
+        text.to_string()
+    }
+}
+
+pub fn style_dim(text: &str) -> String {
+    if use_color() {
+        format!("\x1b[2m{}\x1b[0m", text)
+    } else {
+        text.to_string()
+    }
+}
+
+pub fn style_bold(text: &str) -> String {
+    if use_color() {
+        format!("\x1b[1m{}\x1b[0m", text)
+    } else {
+        text.to_string()
+    }
+}
+
+/// Print a block's stderr line with dim styling
+pub fn print_stderr_dim(line: &str) {
+    if use_color() {
+        eprintln!("\x1b[2m{}\x1b[0m", line);
+    } else {
+        eprintln!("{}", line);
+    }
+}
+
+/// Print a dim separator rule before a block, with heading or language label
+pub fn print_block_header(label: &str) {
+    let prefix = format!("── {} ", label);
+    let pad = 60_usize.saturating_sub(prefix.chars().count());
+    let rule = format!("{}{}", prefix, "─".repeat(pad));
+    eprintln!("{}", style_dim(&rule));
+}
 
 pub struct RunSummary {
     pub source_file: String,
@@ -381,18 +437,25 @@ fn format_batch_markdown(summaries: &[RunSummary], dir: &str, total_duration: Du
 
 /// One-line terminal summary to stderr
 pub fn print_summary(summary: &RunSummary) {
+    eprintln!();
     if summary.failed == 0 {
         eprintln!(
-            "ok — {} blocks in {:.1}s",
-            summary.passed,
-            summary.total_duration.as_secs_f64()
+            "{}",
+            style_ok(&format!(
+                "✓ {} blocks in {:.1}s",
+                summary.passed,
+                summary.total_duration.as_secs_f64()
+            ))
         );
     } else {
         eprintln!(
-            "FAIL — {} passed, {} failed in {:.1}s",
-            summary.passed,
-            summary.failed,
-            summary.total_duration.as_secs_f64()
+            "{}",
+            style_fail(&format!(
+                "✗ {} passed, {} failed in {:.1}s",
+                summary.passed,
+                summary.failed,
+                summary.total_duration.as_secs_f64()
+            ))
         );
     }
 }
