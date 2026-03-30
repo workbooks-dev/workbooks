@@ -50,8 +50,12 @@ struct Cli {
     #[arg(short = 'C', long)]
     dir: Option<String>,
 
-    /// Show block output in terminal
+    /// Suppress block output in terminal
     #[arg(short, long)]
+    quiet: bool,
+
+    /// Show block output in terminal (default; kept for backward compatibility)
+    #[arg(short, long, hide = true)]
     verbose: bool,
 
     /// Stop on first failure
@@ -183,7 +187,7 @@ fn dispatch(cli: Cli) {
             cli.project,
             cli.secrets_cmd,
             cli.dir,
-            cli.verbose,
+            cli.quiet,
             cli.bail,
             &cli.order,
             cli.no_setup,
@@ -202,7 +206,7 @@ fn dispatch(cli: Cli) {
             cli.project.clone(),
             cli.secrets_cmd.clone(),
             cli.dir,
-            cli.verbose,
+            cli.quiet,
             cli.bail,
             cli.no_setup,
             cli.checkpoint,
@@ -255,7 +259,7 @@ fn run_folder(
     project: Option<String>,
     secrets_cmd: Option<String>,
     working_dir: Option<String>,
-    verbose: bool,
+    quiet: bool,
     bail: bool,
     order: &str,
     no_setup: bool,
@@ -287,7 +291,7 @@ fn run_folder(
             project.clone(),
             secrets_cmd.clone(),
             working_dir.clone(),
-            verbose,
+            quiet,
             no_setup,
             cli_vars.clone(),
             cli_redact.clone(),
@@ -363,7 +367,7 @@ fn run_single_collect(
     project: Option<String>,
     secrets_cmd: Option<String>,
     dir: Option<String>,
-    verbose: bool,
+    quiet: bool,
     no_setup: bool,
     cli_vars: std::collections::HashMap<String, String>,
     cli_redact: Vec<String>,
@@ -396,7 +400,7 @@ fn run_single_collect(
     if let Some(ref d) = dir {
         ctx.working_dir = d.clone();
     }
-    ctx.quiet = !verbose;
+    ctx.quiet = quiet;
 
     let secrets_config = build_secrets_config(
         &workbook.frontmatter.secrets,
@@ -487,7 +491,7 @@ fn run_single(
     project: Option<String>,
     secrets_cmd: Option<String>,
     dir: Option<String>,
-    verbose: bool,
+    quiet: bool,
     bail: bool,
     no_setup: bool,
     checkpoint_id: Option<String>,
@@ -518,7 +522,7 @@ fn run_single(
         ctx.working_dir = d.clone();
     }
 
-    ctx.quiet = !verbose;
+    ctx.quiet = quiet;
 
     let secrets_config = build_secrets_config(
         &workbook.frontmatter.secrets,
@@ -616,6 +620,16 @@ fn run_single(
 
             let result = session.execute_block(block, block_idx);
             let success = result.success();
+
+            // Per-block progress
+            eprintln!(
+                "[{}/{}] {} {} ({:.1}s)",
+                block_idx + 1,
+                block_count,
+                block.language,
+                if success { "ok" } else { "FAIL" },
+                result.duration.as_secs_f64()
+            );
 
             // Callback: step complete (fires for every executed block)
             if let Some(ref cb) = cb {

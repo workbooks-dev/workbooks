@@ -445,8 +445,10 @@ fn send_code(
 ) -> Result<(), std::io::Error> {
     match lang {
         "bash" | "sh" | "zsh" => {
-            // Write user code, then capture exit code and emit sentinel
+            // Run user code in a subshell so `exit` doesn't kill the session
+            writeln!(process.stdin, "(")?;
             writeln!(process.stdin, "{}", code)?;
+            writeln!(process.stdin, ")")?;
             writeln!(process.stdin, "__wb_rc=$?")?;
             writeln!(process.stdin, "echo")?;
             writeln!(
