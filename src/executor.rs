@@ -445,10 +445,12 @@ fn send_code(
 ) -> Result<(), std::io::Error> {
     match lang {
         "bash" | "sh" | "zsh" => {
-            // Run user code in a subshell so `exit` doesn't kill the session
-            writeln!(process.stdin, "(")?;
+            // Run user code in a brace group (current shell) so that
+            // `export`, `cd`, function defs, etc. persist across blocks.
+            // Tradeoff: `exit` or `set -e` in user code will end the session.
+            writeln!(process.stdin, "{{")?;
             writeln!(process.stdin, "{}", code)?;
-            writeln!(process.stdin, ")")?;
+            writeln!(process.stdin, "}}")?;
             writeln!(process.stdin, "__wb_rc=$?")?;
             writeln!(process.stdin, "echo")?;
             writeln!(
@@ -805,5 +807,63 @@ mod tests {
     fn test_redact_skips_empty_values() {
         let values = vec!["".to_string(), "real".to_string()];
         assert_eq!(redact_output("real value", &values), "*** value");
+    }
+
+    fn bash_ctx() -> ExecutionContext {
+        ExecutionContext {
+            env: HashMap::new(),
+            working_dir: ".".to_string(),
+            venv: None,
+            default_runtime: Some("bash".to_string()),
+            exec_config: None,
+            dir_config: None,
+            quiet: true,
+            vars: HashMap::new(),
+            redact_values: Vec::new(),
+        }
+    }
+
+    fn code_block(code: &str) -> CodeBlock {
+        CodeBlock {
+            language: "bash".to_string(),
+            code: code.to_string(),
+            line_number: 0,
+        }
+    }
+
+    #[test]
+    fn test_bash_session_persists_exports() {
+        // Regression: exports in one bash block must be visible in the next.
+        // Previously blocks ran in a subshell `(...)`, which isolated env.
+        let mut session = Session::new(bash_ctx());
+        let r1 = session.execute_block(&code_block("export WB_TEST_VAR=persisted"), 0);
+        assert_eq!(r1.exit_code, 0);
+        let r2 = session.execute_block(&code_block("echo \"$WB_TEST_VAR\""), 1);
+        assert_eq!(r2.exit_code, 0);
+        assert_eq!(r2.stdout.trim(), "persisted");
+    }
+
+    #[test]
+    fn test_bash_session_persists_cd() {
+        // Regression: `cd` in one block must persist to the next.
+        let mut session = Session::new(bash_ctx());
+        let r1 = session.execute_block(&code_block("cd /tmp"), 0);
+        assert_eq!(r1.exit_code, 0);
+        let r2 = session.execute_block(&code_block("pwd"), 1);
+        assert_eq!(r2.exit_code, 0);
+        // macOS symlinks /tmp -> /private/tmp; accept either
+        let pwd = r2.stdout.trim();
+        assert!(pwd == "/tmp" || pwd == "/private/tmp", "got: {}", pwd);
+    }
+
+    #[test]
+    fn test_bash_session_survives_nonzero_exit() {
+        // A failing command should not kill the persistent session.
+        let mut session = Session::new(bash_ctx());
+        let r1 = session.execute_block(&code_block("false"), 0);
+        assert_eq!(r1.exit_code, 1);
+        let r2 = session.execute_block(&code_block("echo alive"), 1);
+        assert_eq!(r2.exit_code, 0);
+        assert_eq!(r2.stdout.trim(), "alive");
     }
 }
