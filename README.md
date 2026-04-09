@@ -223,7 +223,9 @@ The [`examples/`](examples/) directory has workbooks you can run immediately:
 - [`health-check.md`](examples/health-check.md) — system health checks
 - [`data-pipeline.md`](examples/data-pipeline.md) — data processing pipeline
 - [`multi-runtime.md`](examples/multi-runtime.md) — bash, python, node, ruby in one file
-- [`secrets-demo.md`](examples/secrets-demo.md) — secret provider usage
+- [`secrets-demo.md`](examples/secrets-demo.md) — secret provider usage (bash)
+- [`secrets-python-demo.md`](examples/secrets-python-demo.md) — reading secrets from Python with `os.environ`, HMAC signing, fail-fast validation
+- [`secrets-nodejs-demo.md`](examples/secrets-nodejs-demo.md) — reading secrets from Node with `process.env`, HMAC signing, fail-fast validation
 - [`deploy-check.md`](examples/deploy-check.md) — deployment verification
 
 ```bash
