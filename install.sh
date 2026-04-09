@@ -5,7 +5,9 @@ set -e
 
 REPO="workbooks-dev/workbooks"
 BINARY="wb"
-INSTALL_DIR="/usr/local/bin"
+# Install to ~/.local/bin by default (no sudo required).
+# Override with WB_INSTALL_DIR=/usr/local/bin sh install.sh
+INSTALL_DIR="${WB_INSTALL_DIR:-$HOME/.local/bin}"
 
 # Colors (if terminal supports them)
 if [ -t 1 ]; then
@@ -128,33 +130,27 @@ install_binary() {
     SRC="$1"
     chmod +x "$SRC"
 
-    # Try to install to /usr/local/bin, fall back to ~/.local/bin
-    if [ -w "$INSTALL_DIR" ]; then
-        mv "$SRC" "${INSTALL_DIR}/${BINARY}"
-        info "Installed to ${INSTALL_DIR}/${BINARY}"
-    elif command -v sudo > /dev/null 2>&1; then
-        info "Need sudo to install to ${INSTALL_DIR}"
-        sudo mv "$SRC" "${INSTALL_DIR}/${BINARY}"
-        sudo chmod +x "${INSTALL_DIR}/${BINARY}"
-        info "Installed to ${INSTALL_DIR}/${BINARY}"
-    else
-        # Fall back to ~/.local/bin
-        LOCAL_BIN="$HOME/.local/bin"
-        mkdir -p "$LOCAL_BIN"
-        mv "$SRC" "${LOCAL_BIN}/${BINARY}"
-        info "Installed to ${LOCAL_BIN}/${BINARY}"
+    # Create target directory if it doesn't exist
+    mkdir -p "$INSTALL_DIR" 2>/dev/null || error "Cannot create ${INSTALL_DIR}. Set WB_INSTALL_DIR to a writable directory."
 
-        # Check if it's in PATH
-        case ":$PATH:" in
-            *":${LOCAL_BIN}:"*) ;;
-            *)
-                printf "\n"
-                info "Add this to your shell profile:"
-                printf "  export PATH=\"\$HOME/.local/bin:\$PATH\"\n"
-                printf "\n"
-                ;;
-        esac
+    if [ ! -w "$INSTALL_DIR" ]; then
+        error "${INSTALL_DIR} is not writable by current user. Set WB_INSTALL_DIR to a writable directory (e.g. WB_INSTALL_DIR=\$HOME/.local/bin)."
     fi
+
+    mv "$SRC" "${INSTALL_DIR}/${BINARY}"
+    chmod +x "${INSTALL_DIR}/${BINARY}"
+    info "Installed to ${INSTALL_DIR}/${BINARY}"
+
+    # Check if install dir is in PATH
+    case ":$PATH:" in
+        *":${INSTALL_DIR}:"*) ;;
+        *)
+            printf "\n"
+            info "${INSTALL_DIR} is not in your PATH. Add this to your shell profile:"
+            printf "  export PATH=\"%s:\$PATH\"\n" "${INSTALL_DIR}"
+            printf "\n"
+            ;;
+    esac
 }
 
 success() {

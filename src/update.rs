@@ -86,21 +86,17 @@ pub fn cmd_update(check_only: bool) {
             eprintln!("updated to v{}", latest_clean);
         }
         Err(e) => {
-            // Try with sudo
-            eprintln!("need elevated permissions: {}", e);
-            let status = Command::new("sudo")
-                .args(["mv", &tmp.to_string_lossy(), &current_exe.to_string_lossy()])
-                .status();
-            match status {
-                Ok(s) if s.success() => {
-                    eprintln!("updated to v{}", latest_clean);
-                }
-                _ => {
-                    eprintln!("error: could not replace binary");
-                    eprintln!("downloaded to: {}", tmp.display());
-                    std::process::exit(1);
-                }
-            }
+            eprintln!("error: could not replace binary: {}", e);
+            eprintln!();
+            eprintln!(
+                "wb is installed at {} but is not writable by the current user.",
+                current_exe.display()
+            );
+            eprintln!("downloaded update is at: {}", tmp.display());
+            eprintln!();
+            eprintln!("to fix, reinstall to a user-writable location, e.g.:");
+            eprintln!("  WB_INSTALL_DIR=$HOME/.local/bin curl -fsSL https://get.workbooks.dev | sh");
+            std::process::exit(1);
         }
     }
 }
