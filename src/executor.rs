@@ -254,6 +254,70 @@ impl Session {
         }
     }
 
+    pub fn set_quiet(&mut self, quiet: bool) {
+        self.ctx.quiet = quiet;
+    }
+
+    pub fn set_env(&mut self, key: String, value: String) {
+        self.ctx.env.insert(key, value);
+    }
+
+    pub fn remove_env(&mut self, key: &str) {
+        self.ctx.env.remove(key);
+    }
+
+    /// Inject a small code snippet into all running persistent sessions to unset an env var.
+    /// This ensures the already-spawned processes reflect the removal.
+    pub fn unset_env_in_sessions(&mut self, key: &str) {
+        let shells = ["bash", "sh", "zsh"];
+        for lang in &shells {
+            if self.processes.contains_key(*lang) {
+                let block = CodeBlock {
+                    language: lang.to_string(),
+                    code: format!("unset {}", key),
+                    line_number: 0,
+                };
+                let saved_quiet = self.ctx.quiet;
+                self.ctx.quiet = true;
+                self.execute_block(&block, 0);
+                self.ctx.quiet = saved_quiet;
+            }
+        }
+        if self.processes.contains_key("python") {
+            let block = CodeBlock {
+                language: "python".to_string(),
+                code: format!("import os; os.environ.pop('{}', None)", key),
+                line_number: 0,
+            };
+            let saved_quiet = self.ctx.quiet;
+            self.ctx.quiet = true;
+            self.execute_block(&block, 0);
+            self.ctx.quiet = saved_quiet;
+        }
+        if self.processes.contains_key("node") {
+            let block = CodeBlock {
+                language: "node".to_string(),
+                code: format!("delete process.env['{}']", key),
+                line_number: 0,
+            };
+            let saved_quiet = self.ctx.quiet;
+            self.ctx.quiet = true;
+            self.execute_block(&block, 0);
+            self.ctx.quiet = saved_quiet;
+        }
+        if self.processes.contains_key("ruby") {
+            let block = CodeBlock {
+                language: "ruby".to_string(),
+                code: format!("ENV.delete('{}')", key),
+                line_number: 0,
+            };
+            let saved_quiet = self.ctx.quiet;
+            self.ctx.quiet = true;
+            self.execute_block(&block, 0);
+            self.ctx.quiet = saved_quiet;
+        }
+    }
+
     pub fn execute_block(&mut self, block: &CodeBlock, index: usize) -> BlockResult {
         let start = Instant::now();
         let lang = normalize_language(&block.language, &self.ctx.default_runtime);

@@ -21,6 +21,8 @@ impl CallbackConfig {
         total: usize,
         workbook: &str,
         checkpoint_id: Option<&str>,
+        heading: Option<&str>,
+        line_number: usize,
     ) {
         let payload = json!({
             "event": "step.complete",
@@ -29,6 +31,8 @@ impl CallbackConfig {
             "block": {
                 "index": result.block_index,
                 "language": &result.language,
+                "heading": heading,
+                "line_number": line_number,
                 "exit_code": result.exit_code,
                 "duration_ms": result.duration.as_millis() as u64,
             },
@@ -49,6 +53,8 @@ impl CallbackConfig {
         total: usize,
         workbook: &str,
         checkpoint_id: &str,
+        heading: Option<&str>,
+        line_number: usize,
     ) {
         let payload = json!({
             "event": "checkpoint.failed",
@@ -57,6 +63,8 @@ impl CallbackConfig {
             "failed_block": {
                 "index": result.block_index,
                 "language": &result.language,
+                "heading": heading,
+                "line_number": line_number,
                 "exit_code": result.exit_code,
                 "stderr": &result.stderr,
             },

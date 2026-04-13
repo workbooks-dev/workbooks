@@ -54,12 +54,20 @@ pub fn print_stderr_dim(line: &str) {
     }
 }
 
-/// Print a dim separator rule before a block, with heading or language label
-pub fn print_block_header(label: &str) {
+/// Print a dim separator rule before a block, with heading, language, and line number
+pub fn print_block_header(heading: Option<&str>, language: &str, line_number: usize, code_preview: Option<&str>) {
+    let label = match heading {
+        Some(h) => format!("{} ({}, L{})", h, language, line_number),
+        None => format!("{} (L{})", language, line_number),
+    };
     let prefix = format!("── {} ", label);
     let pad = 60_usize.saturating_sub(prefix.chars().count());
     let rule = format!("{}{}", prefix, "─".repeat(pad));
     eprintln!("{}", style_dim(&rule));
+    if let Some(preview) = code_preview {
+        let truncated: String = preview.chars().take(72).collect();
+        eprintln!("{}", style_dim(&format!("  {}", truncated)));
+    }
 }
 
 pub struct RunSummary {
@@ -113,6 +121,9 @@ struct JsonBlocksSummary {
 struct JsonBlockResult {
     index: usize,
     language: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    heading: Option<String>,
+    line_number: usize,
     status: String,
     exit_code: i32,
     duration_ms: u64,
@@ -139,17 +150,44 @@ fn build_json_output(workbook: &Workbook, summary: &RunSummary) -> JsonOutput {
         .unwrap_or(&summary.source_file)
         .to_string();
 
+    // Build heading + line_number map from workbook sections
+    let mut block_meta: Vec<(Option<String>, usize)> = Vec::new();
+    let mut last_heading: Option<String> = None;
+    for section in &workbook.sections {
+        match section {
+            Section::Text(text) => {
+                for line in text.lines() {
+                    let trimmed = line.trim();
+                    if trimmed.starts_with("## ") {
+                        last_heading = Some(trimmed.trim_start_matches('#').trim().to_string());
+                    }
+                }
+            }
+            Section::Code(block) => {
+                block_meta.push((last_heading.take(), block.line_number));
+            }
+        }
+    }
+
     let results: Vec<JsonBlockResult> = summary
         .results
         .iter()
-        .map(|r| JsonBlockResult {
-            index: r.block_index,
-            language: r.language.clone(),
-            status: if r.success() { "pass".into() } else { "fail".into() },
-            exit_code: r.exit_code,
-            duration_ms: r.duration.as_millis() as u64,
-            stdout: r.stdout.clone(),
-            stderr: r.stderr.clone(),
+        .map(|r| {
+            let (heading, line_number) = block_meta
+                .get(r.block_index)
+                .cloned()
+                .unwrap_or((None, 0));
+            JsonBlockResult {
+                index: r.block_index,
+                language: r.language.clone(),
+                heading,
+                line_number,
+                status: if r.success() { "pass".into() } else { "fail".into() },
+                exit_code: r.exit_code,
+                duration_ms: r.duration.as_millis() as u64,
+                stdout: r.stdout.clone(),
+                stderr: r.stderr.clone(),
+            }
         })
         .collect();
 
@@ -219,8 +257,10 @@ fn format_markdown(workbook: &Workbook, summary: &RunSummary) -> String {
                     let result = &summary.results[result_idx];
                     let status_marker = if result.success() { "pass" } else { "FAIL" };
                     out.push_str(&format!(
-                        "**[{}]** _{:.1}s_\n",
+                        "**[{}]** block {} L{} _{:.1}s_\n",
                         status_marker,
+                        result_idx + 1,
+                        block.line_number,
                         result.duration.as_secs_f64()
                     ));
 
@@ -318,6 +358,8 @@ fn build_batch_output(summaries: &[RunSummary], dir: &str, total_duration: Durat
                 .map(|r| JsonBlockResult {
                     index: r.block_index,
                     language: r.language.clone(),
+                    heading: None,
+                    line_number: 0,
                     status: "fail".into(),
                     exit_code: r.exit_code,
                     duration_ms: r.duration.as_millis() as u64,

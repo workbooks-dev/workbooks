@@ -3,6 +3,7 @@ use std::time::Duration;
 
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::executor::BlockResult;
 
@@ -34,6 +35,12 @@ pub struct SavedResult {
     pub stderr: String,
     pub exit_code: i32,
     pub duration_ms: u64,
+    #[serde(default)]
+    pub line_number: usize,
+    #[serde(default)]
+    pub heading: Option<String>,
+    #[serde(default)]
+    pub code_hash: Option<String>,
 }
 
 impl Checkpoint {
@@ -51,7 +58,7 @@ impl Checkpoint {
         }
     }
 
-    pub fn add_result(&mut self, result: &BlockResult) {
+    pub fn add_result(&mut self, result: &BlockResult, line_number: usize, heading: Option<&str>, code: &str) {
         self.results.push(SavedResult {
             block_index: result.block_index,
             language: result.language.clone(),
@@ -59,6 +66,9 @@ impl Checkpoint {
             stderr: result.stderr.clone(),
             exit_code: result.exit_code,
             duration_ms: result.duration.as_millis() as u64,
+            line_number,
+            heading: heading.map(|s| s.to_string()),
+            code_hash: Some(hash_code(code)),
         });
         self.next_block = result.block_index + 1;
         self.updated_at = Utc::now().to_rfc3339();
@@ -88,6 +98,12 @@ impl Checkpoint {
             })
             .collect()
     }
+}
+
+pub fn hash_code(code: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(code.as_bytes());
+    format!("{:x}", hasher.finalize())
 }
 
 fn checkpoint_dir() -> PathBuf {

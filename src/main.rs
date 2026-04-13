@@ -578,21 +578,21 @@ fn run_single(
     }
 
     // Load checkpoint if resuming
-    let (skip_until, mut results, mut ckpt) = if let Some(ref id) = checkpoint_id {
+    let (replay_until, mut results, mut ckpt) = if let Some(ref id) = checkpoint_id {
         match checkpoint::load(id) {
             Ok(Some(mut c))
                 if c.status != checkpoint::CheckpointStatus::Complete
                     && c.workbook == file
                     && c.total_blocks == block_count =>
             {
-                let skip = c.next_block;
+                let replay = c.next_block;
                 eprintln!(
-                    "wb: resuming '{}' — skipping {} completed blocks",
-                    id, skip
+                    "wb: resuming '{}' — replaying {} completed blocks to rebuild state",
+                    id, replay
                 );
                 let prior = c.block_results();
                 c.status = checkpoint::CheckpointStatus::InProgress;
-                (skip, prior, Some(c))
+                (replay, prior, Some(c))
             }
             Ok(_) => (
                 0,
@@ -628,6 +628,36 @@ fn run_single(
 
     let mut last_heading: Option<String> = None;
 
+    // Check for stale code hashes before replay
+    if replay_until > 0 {
+        if let Some(ref c) = ckpt {
+            let mut stale_warned = false;
+            let mut check_idx = 0;
+            for section in &workbook.sections {
+                if let parser::Section::Code(block) = section {
+                    if check_idx >= replay_until {
+                        break;
+                    }
+                    if let Some(saved) = c.results.get(check_idx) {
+                        if let Some(ref saved_hash) = saved.code_hash {
+                            let current_hash = checkpoint::hash_code(&block.code);
+                            if *saved_hash != current_hash {
+                                if !stale_warned {
+                                    eprintln!("{}", output::style_fail("warning: block source changed since last checkpoint:"));
+                                    stale_warned = true;
+                                }
+                                eprintln!("  block {} [{}] L{}", check_idx + 1, block.language, block.line_number);
+                            }
+                        }
+                    }
+                    check_idx += 1;
+                }
+            }
+        }
+    }
+
+    let mut replay_cleaned = replay_until == 0;
+
     for section in &workbook.sections {
         if let parser::Section::Text(text) = section {
             for line in text.lines() {
@@ -639,14 +669,51 @@ fn run_single(
         }
 
         if let parser::Section::Code(block) = section {
-            if block_idx < skip_until {
+            // Replay completed blocks to rebuild session state
+            if block_idx < replay_until {
+                let replay_line = format!(
+                    "  ↻ replaying [{}/{}] {} (L{})",
+                    block_idx + 1,
+                    block_count,
+                    block.language,
+                    block.line_number
+                );
+                eprintln!("{}", output::style_dim(&replay_line));
+
+                // Execute with quiet=true and WB_REPLAY=1
+                session.set_quiet(true);
+                session.set_env("WB_REPLAY".to_string(), "1".to_string());
+                let replay_result = session.execute_block(block, block_idx);
+                session.set_quiet(quiet);
+
+                if !replay_result.success() {
+                    eprintln!(
+                        "{}",
+                        output::style_fail(&format!(
+                            "  warning: replay block {} failed (exit {})",
+                            block_idx + 1,
+                            replay_result.exit_code
+                        ))
+                    );
+                }
+
+                last_heading = None;
                 block_idx += 1;
                 continue;
             }
 
+            // Clean up WB_REPLAY from running sessions after replay completes
+            if !replay_cleaned {
+                session.remove_env("WB_REPLAY");
+                session.unset_env_in_sessions("WB_REPLAY");
+                replay_cleaned = true;
+            }
+
+            let block_heading = last_heading.take();
+
             if !quiet {
-                let label = last_heading.take().unwrap_or_else(|| block.language.clone());
-                output::print_block_header(&label);
+                let preview = block.code.lines().next();
+                output::print_block_header(block_heading.as_deref(), &block.language, block.line_number, preview);
             }
 
             let result = session.execute_block(block, block_idx);
@@ -675,13 +742,15 @@ fn run_single(
                     block_count,
                     file,
                     checkpoint_id.as_deref(),
+                    block_heading.as_deref(),
+                    block.line_number,
                 );
             }
 
             if bail && !success {
                 // Callback: checkpoint failed (when checkpointing is active)
                 if let (Some(ref cb), Some(ref ckpt_id)) = (&cb, &checkpoint_id) {
-                    cb.checkpoint_failed(&result, block_idx, block_count, file, ckpt_id);
+                    cb.checkpoint_failed(&result, block_idx, block_count, file, ckpt_id, block_heading.as_deref(), block.line_number);
                 }
 
                 // Don't checkpoint the failed block — re-run it on resume
@@ -696,7 +765,7 @@ fn run_single(
 
             // Checkpoint after each successful block (or any block without bail)
             if let Some(ref mut c) = ckpt {
-                c.add_result(&result);
+                c.add_result(&result, block.line_number, block_heading.as_deref(), &block.code);
                 if let Err(e) = checkpoint::save(checkpoint_id.as_ref().unwrap(), c) {
                     eprintln!("warning: checkpoint: {}", e);
                 }
