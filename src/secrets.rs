@@ -122,9 +122,13 @@ fn resolve_dotenv(provider: &SecretProvider) -> Result<HashMap<String, String>, 
         .as_deref()
         .unwrap_or(".env");
 
+    load_env_file(path)
+}
+
+/// Read a .env-style file from disk and parse it into a map of env vars.
+pub fn load_env_file(path: &str) -> Result<HashMap<String, String>, String> {
     let contents = std::fs::read_to_string(path)
         .map_err(|e| format!("Failed to read {}: {}", path, e))?;
-
     Ok(parse_env_lines(&contents))
 }
 

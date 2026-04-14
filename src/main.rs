@@ -90,6 +90,10 @@ struct Cli {
     #[arg(short = 'e', long = "set", value_name = "KEY=VALUE")]
     set_vars: Vec<String>,
 
+    /// Load environment variables from a .env-style file (repeatable)
+    #[arg(long = "env-file", value_name = "PATH")]
+    env_files: Vec<String>,
+
     /// Mark variable keys as secret (values redacted from output)
     #[arg(long)]
     redact: Vec<String>,
@@ -193,6 +197,7 @@ fn dispatch(cli: Cli) {
             cli.no_setup,
             cli_vars,
             cli.redact,
+            cli.env_files,
         );
     } else if cli.inspect {
         inspect_workbook(path);
@@ -214,6 +219,7 @@ fn dispatch(cli: Cli) {
             cli.callback_secret,
             cli_vars,
             cli.redact,
+            cli.env_files,
         );
     }
 }
@@ -265,6 +271,7 @@ fn run_folder(
     no_setup: bool,
     cli_vars: std::collections::HashMap<String, String>,
     cli_redact: Vec<String>,
+    env_files: Vec<String>,
 ) {
     let files = collect_workbooks(dir, order);
 
@@ -295,6 +302,7 @@ fn run_folder(
             no_setup,
             cli_vars.clone(),
             cli_redact.clone(),
+            env_files.clone(),
         );
 
         let line = format!(
@@ -381,6 +389,7 @@ fn run_single_collect(
     no_setup: bool,
     cli_vars: std::collections::HashMap<String, String>,
     cli_redact: Vec<String>,
+    env_files: Vec<String>,
 ) -> output::RunSummary {
     let content = match std::fs::read_to_string(file) {
         Ok(c) => c,
@@ -422,6 +431,30 @@ fn run_single_collect(
     if let Some(ref config) = secrets_config {
         if let Ok(env) = secrets::resolve_secrets(config) {
             ctx.env.extend(env);
+        }
+    }
+
+    // Load --env-file files (later files override earlier)
+    for path in &env_files {
+        match secrets::load_env_file(path) {
+            Ok(env) => ctx.env.extend(env),
+            Err(e) => {
+                return output::RunSummary {
+                    source_file: file.to_string(),
+                    total_blocks: block_count,
+                    passed: 0,
+                    failed: 1,
+                    total_duration: std::time::Duration::ZERO,
+                    results: vec![executor::BlockResult {
+                        block_index: 0,
+                        language: "env-file".to_string(),
+                        stdout: String::new(),
+                        stderr: e,
+                        exit_code: 1,
+                        duration: std::time::Duration::ZERO,
+                    }],
+                };
+            }
         }
     }
 
@@ -509,6 +542,7 @@ fn run_single(
     callback_secret: Option<String>,
     cli_vars: std::collections::HashMap<String, String>,
     cli_redact: Vec<String>,
+    env_files: Vec<String>,
 ) {
     let content = match std::fs::read_to_string(file) {
         Ok(c) => c,
@@ -546,6 +580,17 @@ fn run_single(
             Ok(env) => ctx.env.extend(env),
             Err(e) => {
                 eprintln!("error: secrets: {}", e);
+                std::process::exit(1);
+            }
+        }
+    }
+
+    // Load --env-file files (later files override earlier)
+    for path in &env_files {
+        match secrets::load_env_file(path) {
+            Ok(env) => ctx.env.extend(env),
+            Err(e) => {
+                eprintln!("error: env-file: {}", e);
                 std::process::exit(1);
             }
         }
