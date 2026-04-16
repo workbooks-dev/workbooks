@@ -935,10 +935,15 @@ fn run_single(
         }
     }
 
-    let cb = callback_url.map(|url| callback::CallbackConfig {
+    // Resolve callback config: CLI/env flags take priority, then env-file values
+    let resolved_callback_url = callback_url.or_else(|| ctx.env.get("WB_CALLBACK_URL").cloned());
+    let resolved_callback_secret = callback_secret.or_else(|| ctx.env.get("WB_CALLBACK_SECRET").cloned());
+    let resolved_callback_key = callback_key.or_else(|| ctx.env.get("WB_CALLBACK_KEY").cloned());
+
+    let cb = resolved_callback_url.map(|url| callback::CallbackConfig {
         url,
-        secret: callback_secret,
-        stream_key: callback_key.unwrap_or_else(|| "wb:events".to_string()),
+        secret: resolved_callback_secret,
+        stream_key: resolved_callback_key.unwrap_or_else(|| "wb:events".to_string()),
     });
 
     let start = Instant::now();
