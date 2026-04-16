@@ -100,6 +100,10 @@ struct Cli {
     #[arg(long = "env-file", value_name = "PATH")]
     env_files: Vec<String>,
 
+    /// Resolve --env-file paths relative to the workbook file, not CWD
+    #[arg(long = "env-file-relative")]
+    env_file_relative: bool,
+
     /// Mark variable keys as secret (values redacted from output)
     #[arg(long)]
     redact: Vec<String>,
@@ -224,6 +228,7 @@ fn dispatch(cli: Cli) {
             cli_vars,
             cli.redact,
             cli.env_files,
+            cli.env_file_relative,
         );
     } else if cli.inspect {
         inspect_workbook(path);
@@ -247,6 +252,7 @@ fn dispatch(cli: Cli) {
             cli_vars,
             cli.redact,
             cli.env_files,
+            cli.env_file_relative,
         );
     }
 }
@@ -299,6 +305,7 @@ fn run_folder(
     cli_vars: std::collections::HashMap<String, String>,
     cli_redact: Vec<String>,
     env_files: Vec<String>,
+    env_file_relative: bool,
 ) {
     let files = collect_workbooks(dir, order);
 
@@ -330,6 +337,7 @@ fn run_folder(
             cli_vars.clone(),
             cli_redact.clone(),
             env_files.clone(),
+            env_file_relative,
         );
 
         let line = format!(
@@ -417,6 +425,7 @@ fn run_single_collect(
     cli_vars: std::collections::HashMap<String, String>,
     cli_redact: Vec<String>,
     env_files: Vec<String>,
+    env_file_relative: bool,
 ) -> output::RunSummary {
     let content = match std::fs::read_to_string(file) {
         Ok(c) => c,
@@ -586,7 +595,12 @@ fn run_single_collect(
 
     // Load --env-file files (later files override earlier)
     for path in &env_files {
-        match secrets::load_env_file(path) {
+        let resolved = if env_file_relative {
+            resolve_env_file_path(path, &ctx.working_dir)
+        } else {
+            path.to_string()
+        };
+        match secrets::load_env_file(&resolved) {
             Ok(env) => ctx.env.extend(env),
             Err(e) => {
                 return output::RunSummary {
@@ -711,6 +725,7 @@ fn run_single(
     cli_vars: std::collections::HashMap<String, String>,
     cli_redact: Vec<String>,
     env_files: Vec<String>,
+    env_file_relative: bool,
 ) {
     let content = match std::fs::read_to_string(file) {
         Ok(c) => c,
@@ -857,7 +872,12 @@ fn run_single(
 
     // Load --env-file files (later files override earlier)
     for path in &env_files {
-        match secrets::load_env_file(path) {
+        let resolved = if env_file_relative {
+            resolve_env_file_path(path, &ctx.working_dir)
+        } else {
+            path.to_string()
+        };
+        match secrets::load_env_file(&resolved) {
             Ok(env) => ctx.env.extend(env),
             Err(e) => {
                 eprintln!("error: env-file: {}", e);
@@ -1450,6 +1470,17 @@ fn pause_for_signal(
     std::process::exit(EXIT_PAUSED);
 }
 
+/// Resolve an env-file path relative to the workbook's directory.
+/// Absolute paths are returned as-is.
+fn resolve_env_file_path(path: &str, workbook_dir: &str) -> String {
+    if Path::new(path).is_absolute() {
+        path.to_string()
+    } else {
+        let resolved = Path::new(workbook_dir).join(path);
+        resolved.to_string_lossy().to_string()
+    }
+}
+
 fn run_setup(setup: &parser::SetupConfig, base_dir: &str) -> Result<(), String> {
     let work_dir = setup
         .dir()
@@ -1784,6 +1815,9 @@ struct ResumeCli {
     #[arg(long = "env-file", value_name = "PATH")]
     env_files: Vec<String>,
 
+    #[arg(long = "env-file-relative")]
+    env_file_relative: bool,
+
     #[arg(long)]
     redact: Vec<String>,
 
@@ -2055,6 +2089,7 @@ fn cmd_resume(args: &[String]) {
         cli_vars,
         cli.redact,
         cli.env_files,
+        cli.env_file_relative,
     );
 }
 
