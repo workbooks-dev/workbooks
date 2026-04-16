@@ -80,13 +80,17 @@ struct Cli {
     #[arg(long)]
     checkpoint: Option<String>,
 
-    /// Callback URL to POST events to (step.complete, checkpoint.failed, run.complete)
-    #[arg(long)]
+    /// Callback URL to POST events to, or redis:// / rediss:// for Redis streams
+    #[arg(long, env = "WB_CALLBACK_URL")]
     callback: Option<String>,
 
-    /// HMAC-SHA256 secret for signing callback payloads (X-WB-Signature header)
-    #[arg(long = "callback-secret")]
+    /// HMAC-SHA256 secret for signing HTTP callback payloads (X-WB-Signature header)
+    #[arg(long = "callback-secret", env = "WB_CALLBACK_SECRET")]
     callback_secret: Option<String>,
+
+    /// Redis stream key for redis:// callbacks (default: wb:events)
+    #[arg(long = "callback-key", env = "WB_CALLBACK_KEY")]
+    callback_key: Option<String>,
 
     /// Set a variable (KEY=VALUE), overrides frontmatter vars
     #[arg(short = 'e', long = "set", value_name = "KEY=VALUE")]
@@ -239,6 +243,7 @@ fn dispatch(cli: Cli) {
             cli.checkpoint,
             cli.callback,
             cli.callback_secret,
+            cli.callback_key,
             cli_vars,
             cli.redact,
             cli.env_files,
@@ -702,6 +707,7 @@ fn run_single(
     checkpoint_id: Option<String>,
     callback_url: Option<String>,
     callback_secret: Option<String>,
+    callback_key: Option<String>,
     cli_vars: std::collections::HashMap<String, String>,
     cli_redact: Vec<String>,
     env_files: Vec<String>,
@@ -796,6 +802,10 @@ fn run_single(
             if let Some(ref secret) = callback_secret {
                 extra_args.push("--callback-secret".to_string());
                 extra_args.push(secret.clone());
+            }
+            if let Some(ref key) = callback_key {
+                extra_args.push("--callback-key".to_string());
+                extra_args.push(key.clone());
             }
             if let Some(ref fmt_path) = output_path {
                 extra_args.push("-o".to_string());
@@ -928,6 +938,7 @@ fn run_single(
     let cb = callback_url.map(|url| callback::CallbackConfig {
         url,
         secret: callback_secret,
+        stream_key: callback_key.unwrap_or_else(|| "wb:events".to_string()),
     });
 
     let start = Instant::now();
@@ -1755,10 +1766,12 @@ struct ResumeCli {
     #[arg(long)]
     no_setup: bool,
 
-    #[arg(long)]
+    #[arg(long, env = "WB_CALLBACK_URL")]
     callback: Option<String>,
-    #[arg(long = "callback-secret")]
+    #[arg(long = "callback-secret", env = "WB_CALLBACK_SECRET")]
     callback_secret: Option<String>,
+    #[arg(long = "callback-key", env = "WB_CALLBACK_KEY")]
+    callback_key: Option<String>,
 
     #[arg(short = 'e', long = "set", value_name = "KEY=VALUE")]
     set_vars: Vec<String>,
@@ -2033,6 +2046,7 @@ fn cmd_resume(args: &[String]) {
         Some(id.clone()),
         cli.callback,
         cli.callback_secret,
+        cli.callback_key,
         cli_vars,
         cli.redact,
         cli.env_files,

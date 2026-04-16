@@ -10,9 +10,14 @@ use crate::executor::BlockResult;
 pub struct CallbackConfig {
     pub url: String,
     pub secret: Option<String>,
+    pub stream_key: String,
 }
 
 impl CallbackConfig {
+    fn is_redis(&self) -> bool {
+        self.url.starts_with("redis://") || self.url.starts_with("rediss://")
+    }
+
     /// Fired after each block finishes executing (pass or fail)
     pub fn step_complete(
         &self,
@@ -127,6 +132,14 @@ impl CallbackConfig {
     }
 
     fn send(&self, event: &str, payload: &str) {
+        if self.is_redis() {
+            self.send_redis(event, payload);
+        } else {
+            self.send_http(event, payload);
+        }
+    }
+
+    fn send_http(&self, event: &str, payload: &str) {
         let event_header = format!("X-WB-Event: {}", event);
         let sig_header;
 
@@ -172,6 +185,44 @@ impl CallbackConfig {
             }
         }
     }
+
+    /// XADD to a Redis stream using the redis crate.
+    /// Works with any Redis: Upstash (rediss://), self-hosted, ElastiCache, etc.
+    fn send_redis(&self, event: &str, payload: &str) {
+        // Install rustls crypto provider for TLS (rediss://) connections.
+        // Safe to call multiple times — returns Err if already installed.
+        let _ = rustls::crypto::ring::default_provider().install_default();
+
+        let client = match redis::Client::open(self.url.as_str()) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("warning: redis callback: {}", e);
+                return;
+            }
+        };
+
+        let mut conn = match client.get_connection_with_timeout(std::time::Duration::from_secs(5))
+        {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("warning: redis callback connect: {}", e);
+                return;
+            }
+        };
+
+        let result: Result<String, redis::RedisError> = redis::cmd("XADD")
+            .arg(&self.stream_key)
+            .arg("*")
+            .arg("event")
+            .arg(event)
+            .arg("data")
+            .arg(payload)
+            .query(&mut conn);
+
+        if let Err(e) = result {
+            eprintln!("warning: redis callback XADD: {}", e);
+        }
+    }
 }
 
 fn sign(payload: &[u8], secret: &[u8]) -> String {
@@ -182,4 +233,43 @@ fn sign(payload: &[u8], secret: &[u8]) -> String {
         .iter()
         .map(|b| format!("{:02x}", b))
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn is_redis_detection() {
+        let http_cb = CallbackConfig {
+            url: "https://hooks.example.com/wb".to_string(),
+            secret: None,
+            stream_key: "wb:events".to_string(),
+        };
+        assert!(!http_cb.is_redis());
+
+        let redis_cb = CallbackConfig {
+            url: "rediss://default:tok@my.upstash.io:6379".to_string(),
+            secret: None,
+            stream_key: "wb:events".to_string(),
+        };
+        assert!(redis_cb.is_redis());
+
+        let redis_plain = CallbackConfig {
+            url: "redis://default:tok@localhost:6379".to_string(),
+            secret: None,
+            stream_key: "wb:events".to_string(),
+        };
+        assert!(redis_plain.is_redis());
+    }
+
+    #[test]
+    fn http_callback_not_redis() {
+        let cb = CallbackConfig {
+            url: "http://localhost:8080/hooks".to_string(),
+            secret: Some("mysecret".to_string()),
+            stream_key: "wb:events".to_string(),
+        };
+        assert!(!cb.is_redis());
+    }
 }
