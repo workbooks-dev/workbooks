@@ -77,6 +77,29 @@ impl CallbackConfig {
         self.send("checkpoint.failed", &payload.to_string());
     }
 
+    /// Fired when a `wait` block pauses the workbook for an external signal
+    pub fn workbook_paused(
+        &self,
+        workbook: &str,
+        checkpoint_id: &str,
+        kind: Option<&str>,
+        bind: Option<&[String]>,
+        timeout_at: Option<&str>,
+    ) {
+        let payload = json!({
+            "event": "workbook.paused",
+            "checkpoint_id": checkpoint_id,
+            "workbook": workbook,
+            "wait": {
+                "kind": kind,
+                "bind": bind,
+                "timeout_at": timeout_at,
+            },
+            "timestamp": Utc::now().to_rfc3339(),
+        });
+        self.send("workbook.paused", &payload.to_string());
+    }
+
     /// Fired when the entire run finishes (all blocks executed)
     pub fn run_complete(
         &self,

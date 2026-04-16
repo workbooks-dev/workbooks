@@ -28,6 +28,7 @@ workbooks/
 │   ├── parser.rs      # Markdown frontmatter + code block extraction
 │   ├── executor.rs    # Multi-runtime subprocess execution
 │   ├── checkpoint.rs  # Save/resume execution state
+│   ├── pending.rs     # Pending-signal descriptors for paused workbooks (`wait`)
 │   ├── callback.rs    # HTTP webhook notifications with HMAC signing
 │   ├── secrets.rs     # Secret providers (doppler, yard, env, dotenv, prompt)
 │   └── output.rs      # Results markdown formatter
@@ -81,7 +82,42 @@ wb run file.md -C /path/to/dir        # Set working directory
 wb run file.md --checkpoint my-run    # Save/resume execution state
 wb run file.md --callback <url>       # POST events to webhook
 wb inspect file.md                    # Show structure without running
+wb pending                            # List paused workbooks (experimental)
+wb resume <id> --signal <file>        # Resume a paused workbook with a signal payload
+wb cancel <id>                        # Drop a paused workbook without resuming
 ```
+
+## Pausing on external signals (experimental)
+
+Behind `WB_EXPERIMENTAL_WAIT=1`, workbooks can pause on a `wait` fence until an
+external resolver (an agent, webhook handler, cron job, or a human) delivers the
+awaited payload:
+
+```markdown
+```wait
+kind: email
+match:
+  from: auth@example.com
+bind: otp_code
+timeout: 5m
+on_timeout: abort
+```
+```
+
+When `wb` hits a `wait` block it writes a checkpoint + a pending-signal
+descriptor next to it, then exits with code **42** ("paused, not failed"). The
+process is gone — nothing stays in memory.
+
+`wb` is protocol-agnostic: `kind` and `match` are opaque metadata that external
+resolvers interpret. To resume, deliver the bound value:
+
+```bash
+wb resume my-run --value 123456                      # single-bind shortcut
+wb resume my-run --signal payload.json               # JSON payload
+echo '{"otp_code": "..."}' | wb resume my-run --signal -   # stdin (agent-style)
+```
+
+See `examples/wait-demo.md` for an end-to-end example.
 
 ## Checkpointing
 

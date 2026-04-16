@@ -1,4 +1,4 @@
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 #[derive(Debug, Deserialize, Default, Clone)]
@@ -102,10 +102,48 @@ pub struct CodeBlock {
     pub line_number: usize,
 }
 
+#[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(untagged)]
+pub enum BindSpec {
+    /// Single variable name: `bind: otp_code`
+    Single(String),
+    /// Multiple variable names: `bind: [otp_code, sender]`
+    Multiple(Vec<String>),
+}
+
+impl BindSpec {
+    #[allow(dead_code)]
+    pub fn names(&self) -> Vec<&str> {
+        match self {
+            BindSpec::Single(s) => vec![s.as_str()],
+            BindSpec::Multiple(v) => v.iter().map(|s| s.as_str()).collect(),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+pub struct WaitSpec {
+    #[serde(default)]
+    pub kind: Option<String>,
+    #[serde(default, rename = "match")]
+    pub match_: Option<serde_yaml::Value>,
+    #[serde(default)]
+    pub bind: Option<BindSpec>,
+    #[serde(default)]
+    pub timeout: Option<String>,
+    #[serde(default)]
+    pub on_timeout: Option<String>,
+    #[serde(skip, default)]
+    pub line_number: usize,
+    #[serde(skip, default)]
+    pub section_index: usize,
+}
+
 #[derive(Debug)]
 pub enum Section {
     Text(String),
     Code(CodeBlock),
+    Wait(WaitSpec),
 }
 
 #[derive(Debug)]
@@ -173,6 +211,33 @@ fn extract_sections(body: &str) -> Vec<Section> {
             // Opening fence with language
             let language = line[3..].trim().to_string();
 
+            // Wait fence: parse YAML body into a WaitSpec
+            if language.eq_ignore_ascii_case("wait") {
+                if !current_text.is_empty() {
+                    sections.push(Section::Text(current_text.clone()));
+                    current_text.clear();
+                }
+                let mut body_lines = Vec::new();
+                for (_ln, body_line) in lines.by_ref() {
+                    if body_line.trim() == "```" {
+                        break;
+                    }
+                    body_lines.push(body_line);
+                }
+                let yaml = body_lines.join("\n");
+                let mut spec: WaitSpec = match serde_yaml::from_str(&yaml) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        eprintln!("wb: wait block parse error at L{}: {}", line_num + 1, e);
+                        WaitSpec::default()
+                    }
+                };
+                spec.line_number = line_num + 1;
+                spec.section_index = sections.len();
+                sections.push(Section::Wait(spec));
+                continue;
+            }
+
             // Skip non-executable blocks (like yaml examples, json, etc that are just docs)
             // We execute: python, bash, sh, zsh, node, javascript, js, ruby, rb, perl, r
             if !is_executable_language(&language) {
@@ -221,6 +286,31 @@ fn extract_sections(body: &str) -> Vec<Section> {
     }
 
     sections
+}
+
+/// Parse durations like "30s", "5m", "2h", "1d" into seconds.
+/// Bare integers are treated as seconds.
+pub fn parse_duration_secs(s: &str) -> Result<u64, String> {
+    let trimmed = s.trim();
+    if trimmed.is_empty() {
+        return Err("empty duration".to_string());
+    }
+    let (num_part, unit) = match trimmed.chars().last() {
+        Some(c) if c.is_ascii_alphabetic() => (&trimmed[..trimmed.len() - 1], c),
+        _ => (trimmed, 's'),
+    };
+    let n: u64 = num_part
+        .trim()
+        .parse()
+        .map_err(|_| format!("invalid duration '{}'", s))?;
+    let mult = match unit.to_ascii_lowercase() {
+        's' => 1,
+        'm' => 60,
+        'h' => 60 * 60,
+        'd' => 60 * 60 * 24,
+        _ => return Err(format!("unknown duration unit '{}'", unit)),
+    };
+    Ok(n * mult)
 }
 
 fn is_executable_language(lang: &str) -> bool {
@@ -340,6 +430,78 @@ echo "hello"
         let setup = wb.frontmatter.setup.unwrap();
         assert_eq!(setup.commands(), vec!["uv sync", "npm install"]);
         assert_eq!(setup.dir(), Some("../../"));
+    }
+
+    #[test]
+    fn test_parse_wait_block() {
+        let input = r#"# Runbook
+
+Enter creds then wait for OTP:
+
+```bash
+./login start
+```
+
+```wait
+kind: email
+match:
+  from: auth@example.com
+  subject_contains: "verification code"
+timeout: 5m
+bind: otp_code
+on_timeout: abort
+```
+
+```bash
+echo "$otp_code" | ./login --otp
+```
+"#;
+        let wb = parse(input);
+        assert_eq!(wb.code_block_count(), 2);
+        let waits: Vec<&WaitSpec> = wb
+            .sections
+            .iter()
+            .filter_map(|s| if let Section::Wait(w) = s { Some(w) } else { None })
+            .collect();
+        assert_eq!(waits.len(), 1);
+        let w = waits[0];
+        assert_eq!(w.kind.as_deref(), Some("email"));
+        assert_eq!(w.timeout.as_deref(), Some("5m"));
+        assert_eq!(w.on_timeout.as_deref(), Some("abort"));
+        match &w.bind {
+            Some(BindSpec::Single(n)) => assert_eq!(n, "otp_code"),
+            _ => panic!("expected Single bind"),
+        }
+    }
+
+    #[test]
+    fn test_parse_wait_multi_bind() {
+        let input = r#"```wait
+kind: manual
+bind: [code, sender]
+```
+"#;
+        let wb = parse(input);
+        let w = wb
+            .sections
+            .iter()
+            .find_map(|s| if let Section::Wait(w) = s { Some(w) } else { None })
+            .unwrap();
+        match &w.bind {
+            Some(BindSpec::Multiple(v)) => assert_eq!(v, &vec!["code".to_string(), "sender".to_string()]),
+            _ => panic!("expected Multiple bind"),
+        }
+    }
+
+    #[test]
+    fn test_parse_duration() {
+        assert_eq!(parse_duration_secs("30s").unwrap(), 30);
+        assert_eq!(parse_duration_secs("5m").unwrap(), 300);
+        assert_eq!(parse_duration_secs("2h").unwrap(), 7200);
+        assert_eq!(parse_duration_secs("1d").unwrap(), 86400);
+        assert_eq!(parse_duration_secs("45").unwrap(), 45);
+        assert!(parse_duration_secs("x").is_err());
+        assert!(parse_duration_secs("").is_err());
     }
 
     #[test]

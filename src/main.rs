@@ -3,6 +3,7 @@ mod checkpoint;
 mod executor;
 mod output;
 mod parser;
+mod pending;
 mod secrets;
 mod update;
 
@@ -137,6 +138,22 @@ fn main() {
                     std::process::exit(1);
                 }
                 transform_workbook(&args[2]);
+                return;
+            }
+            "pending" => {
+                cmd_pending(&args[2..]);
+                return;
+            }
+            "cancel" => {
+                if args.len() < 3 {
+                    eprintln!("usage: wb cancel <checkpoint-id>");
+                    std::process::exit(1);
+                }
+                cmd_cancel(&args[2]);
+                return;
+            }
+            "resume" => {
+                cmd_resume(&args[2..]);
                 return;
             }
             _ => {}
@@ -503,10 +520,27 @@ fn run_single_collect(
     let mut session = executor::Session::new(ctx);
 
     for section in &workbook.sections {
-        if let parser::Section::Code(block) = section {
-            let result = session.execute_block(block, block_idx);
-            results.push(result);
-            block_idx += 1;
+        match section {
+            parser::Section::Code(block) => {
+                let result = session.execute_block(block, block_idx);
+                results.push(result);
+                block_idx += 1;
+            }
+            parser::Section::Wait(spec) => {
+                results.push(executor::BlockResult {
+                    block_index: block_idx,
+                    language: "wait".to_string(),
+                    stdout: String::new(),
+                    stderr: format!(
+                        "wait blocks require --checkpoint (folder runs do not support pause); L{}",
+                        spec.line_number
+                    ),
+                    exit_code: 1,
+                    duration: std::time::Duration::ZERO,
+                });
+                break;
+            }
+            parser::Section::Text(_) => {}
         }
     }
 
@@ -657,6 +691,14 @@ fn run_single(
         (0, Vec::new(), None)
     };
 
+    // Merge signal-bound vars from the checkpoint into ctx before spawning sessions.
+    if let Some(ref c) = ckpt {
+        if !c.bound_vars.is_empty() {
+            ctx.vars.extend(c.bound_vars.clone());
+            ctx.env.extend(c.bound_vars.clone());
+        }
+    }
+
     let cb = callback_url.map(|url| callback::CallbackConfig {
         url,
         secret: callback_secret,
@@ -703,7 +745,7 @@ fn run_single(
 
     let mut replay_cleaned = replay_until == 0;
 
-    for section in &workbook.sections {
+    for (section_idx, section) in workbook.sections.iter().enumerate() {
         if let parser::Section::Text(text) = section {
             for line in text.lines() {
                 let trimmed = line.trim();
@@ -711,6 +753,48 @@ fn run_single(
                     last_heading = Some(trimmed.trim_start_matches('#').trim().to_string());
                 }
             }
+        }
+
+        if let parser::Section::Wait(spec) = section {
+            // Skip waits already satisfied by a prior resume.
+            let already_done = ckpt
+                .as_ref()
+                .map(|c| c.waits_completed.contains(&section_idx))
+                .unwrap_or(false);
+            if already_done {
+                if !quiet {
+                    let bind_label = spec
+                        .bind
+                        .as_ref()
+                        .map(|b| match b {
+                            parser::BindSpec::Single(s) => s.clone(),
+                            parser::BindSpec::Multiple(v) => v.join(","),
+                        })
+                        .unwrap_or_else(|| "-".to_string());
+                    eprintln!(
+                        "{}",
+                        output::style_dim(&format!(
+                            "  ↻ wait satisfied (L{}, bind={})",
+                            spec.line_number, bind_label
+                        ))
+                    );
+                }
+                continue;
+            }
+
+            pause_for_signal(
+                spec,
+                section_idx,
+                &checkpoint_id,
+                ckpt.as_mut(),
+                file,
+                block_idx,
+                block_count,
+                start.elapsed(),
+                &results,
+                cb.as_ref(),
+            );
+            // Unreachable — pause_for_signal exits.
         }
 
         if let parser::Section::Code(block) = section {
@@ -804,7 +888,6 @@ fn run_single(
                     let _ = checkpoint::save(checkpoint_id.as_ref().unwrap(), c);
                 }
                 results.push(result);
-                block_idx += 1;
                 break;
             }
 
@@ -949,6 +1032,30 @@ fn inspect_workbook(file: &str) {
                 .take(50)
                 .collect();
             println!("  {}. [{}] L{} -> {} — {}", idx, block.language, block.line_number, resolved, preview);
+        } else if let parser::Section::Wait(spec) = section {
+            let mut parts = Vec::new();
+            if let Some(ref k) = spec.kind {
+                parts.push(format!("kind={}", k));
+            }
+            if let Some(ref b) = spec.bind {
+                let bind_str = match b {
+                    parser::BindSpec::Single(s) => s.clone(),
+                    parser::BindSpec::Multiple(v) => format!("[{}]", v.join(", ")),
+                };
+                parts.push(format!("bind={}", bind_str));
+            }
+            if let Some(ref t) = spec.timeout {
+                parts.push(format!("timeout={}", t));
+            }
+            if let Some(ref ot) = spec.on_timeout {
+                parts.push(format!("on_timeout={}", ot));
+            }
+            let detail = if parts.is_empty() {
+                String::new()
+            } else {
+                format!(" {}", parts.join(" "))
+            };
+            println!("  \u{23f8} wait{} (L{})", detail, spec.line_number);
         }
     }
 
@@ -983,6 +1090,104 @@ fn default_program(lang: &str) -> &str {
         "go" => "go",
         _ => "bash",
     }
+}
+
+const EXIT_PAUSED: i32 = 42;
+
+#[allow(clippy::too_many_arguments)]
+fn pause_for_signal(
+    spec: &parser::WaitSpec,
+    section_idx: usize,
+    checkpoint_id: &Option<String>,
+    ckpt: Option<&mut checkpoint::Checkpoint>,
+    file: &str,
+    block_idx: usize,
+    _block_count: usize,
+    _elapsed: std::time::Duration,
+    _results: &[executor::BlockResult],
+    cb: Option<&callback::CallbackConfig>,
+) -> ! {
+    if std::env::var("WB_EXPERIMENTAL_WAIT").ok().as_deref() != Some("1") {
+        eprintln!(
+            "error: `wait` blocks are experimental. Set WB_EXPERIMENTAL_WAIT=1 to enable. (L{})",
+            spec.line_number
+        );
+        std::process::exit(1);
+    }
+
+    let id = match checkpoint_id.as_deref() {
+        Some(id) => id,
+        None => {
+            eprintln!(
+                "error: `wait` blocks require --checkpoint <id> to pause and resume. (L{})",
+                spec.line_number
+            );
+            std::process::exit(1);
+        }
+    };
+
+    // Save checkpoint in Paused state. bound_vars and waits_completed persist.
+    if let Some(c) = ckpt {
+        c.next_block = block_idx;
+        c.mark_paused();
+        if let Err(e) = checkpoint::save(id, c) {
+            eprintln!("warning: checkpoint: {}", e);
+        }
+    }
+
+    // Write pending-signal descriptor next to the checkpoint.
+    let mut spec_with_idx = spec.clone();
+    spec_with_idx.section_index = section_idx;
+    let desc = pending::build(id, file, block_idx, &spec_with_idx);
+    if let Err(e) = pending::save(id, &desc) {
+        eprintln!("warning: pending descriptor: {}", e);
+    }
+
+    let bind_label = spec
+        .bind
+        .as_ref()
+        .map(|b| match b {
+            parser::BindSpec::Single(s) => s.clone(),
+            parser::BindSpec::Multiple(v) => v.join(","),
+        })
+        .unwrap_or_else(|| "-".to_string());
+
+    eprintln!(
+        "{}",
+        output::style_bold(&format!(
+            "⏸  paused at L{} — kind={} bind={} (checkpoint: {})",
+            spec.line_number,
+            spec.kind.as_deref().unwrap_or("-"),
+            bind_label,
+            id,
+        ))
+    );
+    let desc_path = pending::descriptor_path(id);
+    eprintln!("   pending: {}", desc_path.display());
+    if let Some(ref to) = desc.timeout_at {
+        eprintln!("   timeout_at: {}", to);
+    }
+    eprintln!(
+        "   resume:  wb resume {} --signal <payload.json>",
+        id
+    );
+
+    // Fire workbook.paused callback so agents know we're waiting.
+    if let Some(cb) = cb {
+        let bind_names: Option<Vec<String>> = spec.bind.as_ref().map(|b| match b {
+            parser::BindSpec::Single(s) => vec![s.clone()],
+            parser::BindSpec::Multiple(v) => v.clone(),
+        });
+        cb.workbook_paused(
+            file,
+            id,
+            spec.kind.as_deref(),
+            bind_names.as_deref(),
+            desc.timeout_at.as_deref(),
+        );
+    }
+
+    std::process::exit(EXIT_PAUSED);
 }
 
 fn run_setup(setup: &parser::SetupConfig, base_dir: &str) -> Result<(), String> {
@@ -1104,5 +1309,1138 @@ fn transform_workbook(file: &str) {
 
     if !unused.is_empty() {
         eprintln!("\nunused: {}", unused.join(", "));
+    }
+}
+
+// ─── wait/pending/resume commands ─────────────────────────────────────
+
+fn cmd_pending(args: &[String]) {
+    let json_out = args.iter().any(|a| a == "--format=json" || a == "--json")
+        || args.windows(2).any(|w| w[0] == "--format" && w[1] == "json");
+
+    let descriptors = pending::list_all();
+
+    if json_out {
+        let entries: Vec<serde_json::Value> = descriptors.iter().map(|(id, d)| {
+            let mut val = serde_json::to_value(d).unwrap_or(serde_json::Value::Null);
+            if let serde_json::Value::Object(ref mut map) = val {
+                map.insert("id".to_string(), serde_json::Value::String(id.clone()));
+            }
+            val
+        }).collect();
+        match serde_json::to_string_pretty(&entries) {
+            Ok(s) => println!("{}", s),
+            Err(e) => {
+                eprintln!("error: {}", e);
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+
+    if descriptors.is_empty() {
+        eprintln!("no pending workbooks");
+        return;
+    }
+    for (id, desc) in &descriptors {
+        println!("{}", pending::summarize(id, desc));
+    }
+}
+
+fn cmd_cancel(id: &str) {
+    let had_desc = pending::descriptor_path(id).exists();
+    let had_ckpt = checkpoint::checkpoint_path(id).exists();
+    if !had_desc && !had_ckpt {
+        eprintln!("no checkpoint or pending descriptor for '{}'", id);
+        std::process::exit(1);
+    }
+    if let Err(e) = pending::delete(id) {
+        eprintln!("warning: {}", e);
+    }
+    if let Err(e) = checkpoint::delete(id) {
+        eprintln!("warning: {}", e);
+    }
+    eprintln!("cancelled '{}'", id);
+}
+
+#[derive(Parser)]
+#[command(name = "wb resume", about = "Resume a paused workbook with a signal payload")]
+struct ResumeCli {
+    /// Checkpoint id to resume
+    id: String,
+
+    /// Signal payload JSON file (use `-` for stdin)
+    #[arg(long)]
+    signal: Option<String>,
+
+    /// Provide a single value for the bound var directly (shorthand for simple waits)
+    #[arg(long)]
+    value: Option<String>,
+
+    /// Secret provider override
+    #[arg(long)]
+    secrets: Option<String>,
+    #[arg(long)]
+    project: Option<String>,
+    #[arg(long = "secrets-cmd")]
+    secrets_cmd: Option<String>,
+
+    #[arg(short = 'C', long)]
+    dir: Option<String>,
+    #[arg(short, long)]
+    quiet: bool,
+    #[arg(long)]
+    bail: bool,
+    #[arg(long)]
+    no_setup: bool,
+
+    #[arg(long)]
+    callback: Option<String>,
+    #[arg(long = "callback-secret")]
+    callback_secret: Option<String>,
+
+    #[arg(short = 'e', long = "set", value_name = "KEY=VALUE")]
+    set_vars: Vec<String>,
+
+    #[arg(long = "env-file", value_name = "PATH")]
+    env_files: Vec<String>,
+
+    #[arg(long)]
+    redact: Vec<String>,
+
+    /// Output file
+    #[arg(short, long)]
+    output: Option<String>,
+    #[arg(long, group = "format")]
+    json: bool,
+    #[arg(long, group = "format")]
+    yaml: bool,
+    #[arg(long, group = "format")]
+    md: bool,
+}
+
+fn cmd_resume(args: &[String]) {
+    let mut parse_args = vec!["wb-resume".to_string()];
+    parse_args.extend_from_slice(args);
+    let cli = ResumeCli::parse_from(parse_args);
+
+    if std::env::var("WB_EXPERIMENTAL_WAIT").ok().as_deref() != Some("1") {
+        eprintln!(
+            "error: `wb resume` is experimental. Set WB_EXPERIMENTAL_WAIT=1 to enable."
+        );
+        std::process::exit(1);
+    }
+
+    let id = &cli.id;
+
+    // Load the paused checkpoint.
+    let mut ckpt = match checkpoint::load(id) {
+        Ok(Some(c)) => c,
+        Ok(None) => {
+            eprintln!("error: no checkpoint '{}'", id);
+            std::process::exit(1);
+        }
+        Err(e) => {
+            eprintln!("error: {}", e);
+            std::process::exit(1);
+        }
+    };
+
+    if ckpt.status != checkpoint::CheckpointStatus::Paused
+        && ckpt.status != checkpoint::CheckpointStatus::InProgress
+        && ckpt.status != checkpoint::CheckpointStatus::Failed
+    {
+        eprintln!(
+            "error: checkpoint '{}' is not paused (status: {:?})",
+            id, ckpt.status
+        );
+        std::process::exit(1);
+    }
+
+    let desc = match pending::load(id) {
+        Ok(Some(d)) => d,
+        Ok(None) => {
+            eprintln!("error: no pending descriptor for '{}'", id);
+            std::process::exit(1);
+        }
+        Err(e) => {
+            eprintln!("error: {}", e);
+            std::process::exit(1);
+        }
+    };
+
+    let expired = pending::is_expired(&desc);
+    let on_timeout = desc.on_timeout.as_deref().unwrap_or("abort");
+
+    // Determine payload values for bound names.
+    let bind_names: Vec<String> = desc
+        .bind
+        .as_ref()
+        .map(|b| match b {
+            parser::BindSpec::Single(s) => vec![s.clone()],
+            parser::BindSpec::Multiple(v) => v.clone(),
+        })
+        .unwrap_or_default();
+
+    let mut new_vars: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+
+    if expired && on_timeout == "abort" {
+        eprintln!("error: wait expired and on_timeout=abort");
+        ckpt.mark_failed();
+        let _ = checkpoint::save(id, &ckpt);
+        let _ = pending::delete(id);
+        std::process::exit(1);
+    }
+
+    if expired && on_timeout == "skip" {
+        for name in &bind_names {
+            new_vars.insert(name.clone(), String::new());
+        }
+        eprintln!("wb: wait expired — binding empty values and skipping");
+    } else if expired && on_timeout == "prompt" {
+        use std::io::IsTerminal;
+        if !std::io::stdin().is_terminal() {
+            eprintln!(
+                "error: wait expired and on_timeout=prompt, but no terminal is attached.\n\
+                 Resolve by running `wb resume` interactively, or change on_timeout to abort/skip."
+            );
+            ckpt.mark_failed();
+            let _ = checkpoint::save(id, &ckpt);
+            let _ = pending::delete(id);
+            std::process::exit(1);
+        }
+        let kind_str = desc.kind.as_deref().unwrap_or("-");
+        let bind_str = desc
+            .bind
+            .as_ref()
+            .map(|b| match b {
+                parser::BindSpec::Single(s) => s.clone(),
+                parser::BindSpec::Multiple(v) => v.join(", "),
+            })
+            .unwrap_or_else(|| "-".to_string());
+        let timeout_str = desc.timeout_at.as_deref().unwrap_or("unknown");
+        eprintln!("wb: wait expired");
+        eprintln!("  kind:       {}", kind_str);
+        eprintln!("  bind:       {}", bind_str);
+        eprintln!("  timeout_at: {}", timeout_str);
+        eprint!("  [r]etry / [s]kip / [a]bort? ");
+        let mut answer = String::new();
+        if let Err(e) = std::io::stdin().read_line(&mut answer) {
+            eprintln!("error: read stdin: {}", e);
+            std::process::exit(1);
+        }
+        match answer.trim().to_lowercase().as_str() {
+            "r" | "retry" => {
+                eprintln!(
+                    "wb: retry selected — run `wb resume {}` again once the signal is ready.",
+                    id
+                );
+                std::process::exit(0);
+            }
+            "s" | "skip" => {
+                for name in &bind_names {
+                    new_vars.insert(name.clone(), String::new());
+                }
+                eprintln!("wb: skipping — binding empty values");
+            }
+            _ => {
+                // "a", "abort", or anything unrecognised defaults to abort.
+                eprintln!("error: wait expired — aborting");
+                ckpt.mark_failed();
+                let _ = checkpoint::save(id, &ckpt);
+                let _ = pending::delete(id);
+                std::process::exit(1);
+            }
+        }
+    } else if expired {
+        // Unknown on_timeout value — default to abort.
+        eprintln!(
+            "error: wait expired and on_timeout='{}' is not recognised — aborting",
+            on_timeout
+        );
+        ckpt.mark_failed();
+        let _ = checkpoint::save(id, &ckpt);
+        let _ = pending::delete(id);
+        std::process::exit(1);
+    } else {
+        // Collect values from --value, --signal file/stdin, or --set.
+        if let Some(ref v) = cli.value {
+            if bind_names.len() == 1 {
+                new_vars.insert(bind_names[0].clone(), v.clone());
+            } else if bind_names.is_empty() {
+                eprintln!("warning: --value provided but wait has no `bind` — ignoring");
+            } else {
+                eprintln!(
+                    "error: --value only works for a single bind; this wait binds {:?}",
+                    bind_names
+                );
+                std::process::exit(1);
+            }
+        }
+
+        if let Some(ref path) = cli.signal {
+            let raw = if path == "-" {
+                use std::io::Read;
+                let mut buf = String::new();
+                if let Err(e) = std::io::stdin().read_to_string(&mut buf) {
+                    eprintln!("error: read stdin: {}", e);
+                    std::process::exit(1);
+                }
+                buf
+            } else {
+                match std::fs::read_to_string(path) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        eprintln!("error: read {}: {}", path, e);
+                        std::process::exit(1);
+                    }
+                }
+            };
+            let val: serde_json::Value = match serde_json::from_str(&raw) {
+                Ok(v) => v,
+                Err(e) => {
+                    eprintln!("error: parse signal JSON: {}", e);
+                    std::process::exit(1);
+                }
+            };
+            merge_signal_into_vars(&val, &bind_names, &mut new_vars);
+        }
+
+        // --set key=val forwarding (optional extra vars).
+        for pair in &cli.set_vars {
+            if let Some((k, v)) = pair.split_once('=') {
+                new_vars.insert(k.to_string(), v.to_string());
+            }
+        }
+
+        // Verify required binds are satisfied.
+        for name in &bind_names {
+            if !new_vars.contains_key(name) {
+                eprintln!(
+                    "error: signal payload missing required bind '{}'. Provide via --signal <file> (JSON with key '{}') or --value <v>",
+                    name, name
+                );
+                std::process::exit(1);
+            }
+        }
+    }
+
+    // Apply bindings and mark the wait satisfied.
+    ckpt.bound_vars.extend(new_vars);
+    ckpt.complete_wait(desc.section_index);
+    ckpt.mark_in_progress();
+    if let Err(e) = checkpoint::save(id, &ckpt) {
+        eprintln!("error: save checkpoint: {}", e);
+        std::process::exit(1);
+    }
+    let _ = pending::delete(id);
+
+    // Re-enter the normal run flow using the original workbook path.
+    let workbook_file = ckpt.workbook.clone();
+
+    let format_flag = if cli.json {
+        Some(OutputFormat::Json)
+    } else if cli.yaml {
+        Some(OutputFormat::Yaml)
+    } else if cli.md {
+        Some(OutputFormat::Markdown)
+    } else {
+        None
+    };
+    let file_format = cli.output.as_deref().and_then(OutputFormat::from_path);
+    let output_format = format_flag.or(file_format);
+    let stdout_output = format_flag.is_some() && cli.output.is_none();
+
+    let cli_vars: std::collections::HashMap<String, String> = cli
+        .set_vars
+        .iter()
+        .filter_map(|s| s.split_once('=').map(|(k, v)| (k.to_string(), v.to_string())))
+        .collect();
+
+    run_single(
+        &workbook_file,
+        cli.output,
+        output_format,
+        stdout_output,
+        cli.secrets,
+        cli.project,
+        cli.secrets_cmd,
+        cli.dir,
+        cli.quiet,
+        cli.bail,
+        cli.no_setup,
+        Some(id.clone()),
+        cli.callback,
+        cli.callback_secret,
+        cli_vars,
+        cli.redact,
+        cli.env_files,
+    );
+}
+
+/// Populate `out` with values from a signal JSON payload, keyed by bind names.
+/// Rules (kept simple):
+///  - If payload is an object, each bind name is pulled from its top-level key.
+///    Also: any other top-level scalar keys are added as extra vars.
+///  - If payload is a scalar and there's exactly one bind, it binds to that.
+fn merge_signal_into_vars(
+    val: &serde_json::Value,
+    bind_names: &[String],
+    out: &mut std::collections::HashMap<String, String>,
+) {
+    match val {
+        serde_json::Value::Object(map) => {
+            for (k, v) in map {
+                if let Some(s) = json_scalar_to_string(v) {
+                    out.insert(k.clone(), s);
+                }
+            }
+            // Binds not satisfied by top-level keys will error in the caller.
+            let _ = bind_names;
+        }
+        other => {
+            if bind_names.len() == 1 {
+                if let Some(s) = json_scalar_to_string(other) {
+                    out.insert(bind_names[0].clone(), s);
+                }
+            }
+        }
+    }
+}
+
+fn json_scalar_to_string(v: &serde_json::Value) -> Option<String> {
+    match v {
+        serde_json::Value::String(s) => Some(s.clone()),
+        serde_json::Value::Number(n) => Some(n.to_string()),
+        serde_json::Value::Bool(b) => Some(b.to_string()),
+        serde_json::Value::Null => Some(String::new()),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    // ─── merge_signal_into_vars ──────────────────────────────────────
+
+    #[test]
+    fn merge_signal_object_binds_matching_keys() {
+        let val: serde_json::Value =
+            serde_json::json!({"otp_code": "123456", "extra": "hello"});
+        let bind_names = vec!["otp_code".to_string()];
+        let mut out = HashMap::new();
+        merge_signal_into_vars(&val, &bind_names, &mut out);
+        assert_eq!(out.get("otp_code").unwrap(), "123456");
+        assert_eq!(out.get("extra").unwrap(), "hello");
+    }
+
+    #[test]
+    fn merge_signal_object_multi_bind() {
+        let val: serde_json::Value =
+            serde_json::json!({"code": "abc", "sender": "alice@test.com"});
+        let bind_names = vec!["code".to_string(), "sender".to_string()];
+        let mut out = HashMap::new();
+        merge_signal_into_vars(&val, &bind_names, &mut out);
+        assert_eq!(out.get("code").unwrap(), "abc");
+        assert_eq!(out.get("sender").unwrap(), "alice@test.com");
+    }
+
+    #[test]
+    fn merge_signal_object_missing_bind_key_not_inserted() {
+        let val: serde_json::Value = serde_json::json!({"unrelated": "value"});
+        let bind_names = vec!["otp_code".to_string()];
+        let mut out = HashMap::new();
+        merge_signal_into_vars(&val, &bind_names, &mut out);
+        assert!(!out.contains_key("otp_code"));
+        assert_eq!(out.get("unrelated").unwrap(), "value");
+    }
+
+    #[test]
+    fn merge_signal_scalar_single_bind() {
+        let val: serde_json::Value = serde_json::json!("plain-value");
+        let bind_names = vec!["token".to_string()];
+        let mut out = HashMap::new();
+        merge_signal_into_vars(&val, &bind_names, &mut out);
+        assert_eq!(out.get("token").unwrap(), "plain-value");
+    }
+
+    #[test]
+    fn merge_signal_numeric_scalar() {
+        let val: serde_json::Value = serde_json::json!(42);
+        let bind_names = vec!["count".to_string()];
+        let mut out = HashMap::new();
+        merge_signal_into_vars(&val, &bind_names, &mut out);
+        assert_eq!(out.get("count").unwrap(), "42");
+    }
+
+    #[test]
+    fn merge_signal_bool_scalar() {
+        let val: serde_json::Value = serde_json::json!(true);
+        let bind_names = vec!["flag".to_string()];
+        let mut out = HashMap::new();
+        merge_signal_into_vars(&val, &bind_names, &mut out);
+        assert_eq!(out.get("flag").unwrap(), "true");
+    }
+
+    #[test]
+    fn merge_signal_null_scalar() {
+        let val: serde_json::Value = serde_json::json!(null);
+        let bind_names = vec!["maybe".to_string()];
+        let mut out = HashMap::new();
+        merge_signal_into_vars(&val, &bind_names, &mut out);
+        assert_eq!(out.get("maybe").unwrap(), "");
+    }
+
+    #[test]
+    fn merge_signal_scalar_ignored_when_multiple_binds() {
+        let val: serde_json::Value = serde_json::json!("single");
+        let bind_names = vec!["a".to_string(), "b".to_string()];
+        let mut out = HashMap::new();
+        merge_signal_into_vars(&val, &bind_names, &mut out);
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn merge_signal_object_skips_nested_values() {
+        let val: serde_json::Value =
+            serde_json::json!({"flat": "yes", "nested": {"deep": "value"}});
+        let bind_names = vec!["flat".to_string()];
+        let mut out = HashMap::new();
+        merge_signal_into_vars(&val, &bind_names, &mut out);
+        assert_eq!(out.get("flat").unwrap(), "yes");
+        assert!(!out.contains_key("nested"));
+    }
+
+    #[test]
+    fn merge_signal_empty_object_no_binds() {
+        let val: serde_json::Value = serde_json::json!({});
+        let bind_names: Vec<String> = vec![];
+        let mut out = HashMap::new();
+        merge_signal_into_vars(&val, &bind_names, &mut out);
+        assert!(out.is_empty());
+    }
+
+    // ─── json_scalar_to_string ───────────────────────────────────────
+
+    #[test]
+    fn scalar_string() {
+        let v = serde_json::json!("hello");
+        assert_eq!(json_scalar_to_string(&v), Some("hello".to_string()));
+    }
+
+    #[test]
+    fn scalar_number_int() {
+        let v = serde_json::json!(99);
+        assert_eq!(json_scalar_to_string(&v), Some("99".to_string()));
+    }
+
+    #[test]
+    fn scalar_number_float() {
+        let v = serde_json::json!(3.14);
+        assert_eq!(json_scalar_to_string(&v), Some("3.14".to_string()));
+    }
+
+    #[test]
+    fn scalar_bool_true() {
+        assert_eq!(
+            json_scalar_to_string(&serde_json::json!(true)),
+            Some("true".to_string())
+        );
+    }
+
+    #[test]
+    fn scalar_bool_false() {
+        assert_eq!(
+            json_scalar_to_string(&serde_json::json!(false)),
+            Some("false".to_string())
+        );
+    }
+
+    #[test]
+    fn scalar_null() {
+        assert_eq!(
+            json_scalar_to_string(&serde_json::json!(null)),
+            Some(String::new())
+        );
+    }
+
+    #[test]
+    fn scalar_array_returns_none() {
+        assert_eq!(json_scalar_to_string(&serde_json::json!([1, 2])), None);
+    }
+
+    #[test]
+    fn scalar_object_returns_none() {
+        assert_eq!(
+            json_scalar_to_string(&serde_json::json!({"a": 1})),
+            None
+        );
+    }
+
+    // ─── checkpoint state transitions ────────────────────────────────
+
+    #[test]
+    fn checkpoint_new_is_in_progress() {
+        let c = checkpoint::Checkpoint::new("test.md", 5);
+        assert_eq!(c.status, checkpoint::CheckpointStatus::InProgress);
+        assert_eq!(c.workbook, "test.md");
+        assert_eq!(c.total_blocks, 5);
+        assert_eq!(c.next_block, 0);
+        assert!(c.bound_vars.is_empty());
+        assert!(c.waits_completed.is_empty());
+    }
+
+    #[test]
+    fn checkpoint_pause_and_resume_transitions() {
+        let mut c = checkpoint::Checkpoint::new("test.md", 3);
+
+        let result = executor::BlockResult {
+            block_index: 0,
+            language: "bash".to_string(),
+            stdout: "ok".to_string(),
+            stderr: String::new(),
+            exit_code: 0,
+            duration: std::time::Duration::from_millis(50),
+        };
+        c.add_result(&result, 10, Some("Setup"), "echo ok");
+        assert_eq!(c.next_block, 1);
+        assert_eq!(c.results.len(), 1);
+
+        c.mark_paused();
+        assert_eq!(c.status, checkpoint::CheckpointStatus::Paused);
+
+        c.bound_vars
+            .insert("otp_code".to_string(), "123456".to_string());
+        c.complete_wait(2);
+        assert!(c.waits_completed.contains(&2));
+
+        c.mark_in_progress();
+        assert_eq!(c.status, checkpoint::CheckpointStatus::InProgress);
+        assert_eq!(c.bound_vars.get("otp_code").unwrap(), "123456");
+
+        c.mark_complete();
+        assert_eq!(c.status, checkpoint::CheckpointStatus::Complete);
+    }
+
+    #[test]
+    fn checkpoint_complete_wait_is_idempotent() {
+        let mut c = checkpoint::Checkpoint::new("test.md", 2);
+        c.complete_wait(5);
+        c.complete_wait(5);
+        c.complete_wait(5);
+        assert_eq!(c.waits_completed.len(), 1);
+        assert_eq!(c.waits_completed[0], 5);
+    }
+
+    #[test]
+    fn checkpoint_multiple_waits_tracked() {
+        let mut c = checkpoint::Checkpoint::new("test.md", 4);
+        c.complete_wait(2);
+        c.complete_wait(7);
+        c.complete_wait(12);
+        assert_eq!(c.waits_completed.len(), 3);
+        assert!(c.waits_completed.contains(&2));
+        assert!(c.waits_completed.contains(&7));
+        assert!(c.waits_completed.contains(&12));
+    }
+
+    #[test]
+    fn checkpoint_bound_vars_merged_into_context() {
+        let mut c = checkpoint::Checkpoint::new("test.md", 3);
+        c.bound_vars
+            .insert("api_key".to_string(), "secret123".to_string());
+        c.bound_vars
+            .insert("region".to_string(), "us-east-1".to_string());
+
+        let mut vars: HashMap<String, String> = HashMap::new();
+        vars.insert("existing".to_string(), "val".to_string());
+        vars.extend(c.bound_vars.clone());
+
+        assert_eq!(vars.get("existing").unwrap(), "val");
+        assert_eq!(vars.get("api_key").unwrap(), "secret123");
+        assert_eq!(vars.get("region").unwrap(), "us-east-1");
+    }
+
+    #[test]
+    fn checkpoint_block_results_roundtrip() {
+        let mut c = checkpoint::Checkpoint::new("test.md", 2);
+        let r1 = executor::BlockResult {
+            block_index: 0,
+            language: "bash".to_string(),
+            stdout: "hello\n".to_string(),
+            stderr: String::new(),
+            exit_code: 0,
+            duration: std::time::Duration::from_millis(120),
+        };
+        let r2 = executor::BlockResult {
+            block_index: 1,
+            language: "python".to_string(),
+            stdout: "42\n".to_string(),
+            stderr: "warning\n".to_string(),
+            exit_code: 0,
+            duration: std::time::Duration::from_millis(300),
+        };
+        c.add_result(&r1, 5, None, "echo hello");
+        c.add_result(&r2, 15, Some("Compute"), "print(42)");
+
+        let restored = c.block_results();
+        assert_eq!(restored.len(), 2);
+        assert_eq!(restored[0].language, "bash");
+        assert_eq!(restored[0].stdout, "hello\n");
+        assert_eq!(restored[0].exit_code, 0);
+        assert_eq!(restored[1].language, "python");
+        assert_eq!(restored[1].stdout, "42\n");
+        assert_eq!(restored[1].stderr, "warning\n");
+    }
+
+    #[test]
+    fn checkpoint_code_hash_stored() {
+        let mut c = checkpoint::Checkpoint::new("test.md", 1);
+        let r = executor::BlockResult {
+            block_index: 0,
+            language: "bash".to_string(),
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: 0,
+            duration: std::time::Duration::ZERO,
+        };
+        c.add_result(&r, 5, None, "echo hello");
+        let hash = c.results[0].code_hash.as_ref().unwrap();
+        assert_eq!(*hash, checkpoint::hash_code("echo hello"));
+        assert_ne!(*hash, checkpoint::hash_code("echo goodbye"));
+    }
+
+    // ─── checkpoint save/load/delete ─────────────────────────────────
+
+    #[test]
+    fn checkpoint_save_load_delete_roundtrip() {
+        let id = "test-save-load-roundtrip";
+        let _ = checkpoint::delete(id);
+
+        let mut c = checkpoint::Checkpoint::new("roundtrip.md", 3);
+        c.mark_paused();
+        c.bound_vars
+            .insert("token".to_string(), "abc".to_string());
+        c.complete_wait(4);
+
+        checkpoint::save(id, &c).expect("save should succeed");
+
+        let loaded = checkpoint::load(id)
+            .expect("load should not error")
+            .expect("checkpoint should exist");
+        assert_eq!(loaded.status, checkpoint::CheckpointStatus::Paused);
+        assert_eq!(loaded.workbook, "roundtrip.md");
+        assert_eq!(loaded.total_blocks, 3);
+        assert_eq!(loaded.bound_vars.get("token").unwrap(), "abc");
+        assert!(loaded.waits_completed.contains(&4));
+
+        checkpoint::delete(id).expect("delete should succeed");
+        let gone = checkpoint::load(id).expect("load after delete should not error");
+        assert!(gone.is_none());
+    }
+
+    // ─── pending descriptor build/save/load/delete ───────────────────
+
+    #[test]
+    fn pending_descriptor_roundtrip() {
+        let id = "test-pending-roundtrip";
+        let _ = pending::delete(id);
+
+        let spec = parser::WaitSpec {
+            kind: Some("email".to_string()),
+            match_: None,
+            bind: Some(parser::BindSpec::Single("otp".to_string())),
+            timeout: Some("10m".to_string()),
+            on_timeout: Some("abort".to_string()),
+            line_number: 25,
+            section_index: 3,
+        };
+
+        let desc = pending::build(id, "test-workbook.md", 2, &spec);
+        assert_eq!(desc.checkpoint_id, id);
+        assert_eq!(desc.workbook, "test-workbook.md");
+        assert_eq!(desc.next_block, 2);
+        assert_eq!(desc.line_number, 25);
+        assert_eq!(desc.section_index, 3);
+        assert_eq!(desc.kind.as_deref(), Some("email"));
+        assert!(desc.timeout_at.is_some());
+        assert_eq!(desc.on_timeout.as_deref(), Some("abort"));
+        match &desc.bind {
+            Some(parser::BindSpec::Single(s)) => assert_eq!(s, "otp"),
+            _ => panic!("expected Single bind"),
+        }
+
+        pending::save(id, &desc).expect("save pending should succeed");
+
+        let loaded = pending::load(id)
+            .expect("load should not error")
+            .expect("descriptor should exist");
+        assert_eq!(loaded.checkpoint_id, id);
+        assert_eq!(loaded.workbook, "test-workbook.md");
+        assert_eq!(loaded.kind.as_deref(), Some("email"));
+        assert!(!pending::is_expired(&loaded));
+
+        pending::delete(id).expect("delete should succeed");
+        let gone = pending::load(id).expect("load after delete should not error");
+        assert!(gone.is_none());
+    }
+
+    #[test]
+    fn pending_descriptor_no_timeout_never_expires() {
+        let spec = parser::WaitSpec {
+            kind: Some("manual".to_string()),
+            match_: None,
+            bind: None,
+            timeout: None,
+            on_timeout: None,
+            line_number: 10,
+            section_index: 1,
+        };
+        let desc = pending::build("no-timeout", "test.md", 0, &spec);
+        assert!(desc.timeout_at.is_none());
+        assert!(!pending::is_expired(&desc));
+    }
+
+    #[test]
+    fn pending_descriptor_past_timeout_is_expired() {
+        let spec = parser::WaitSpec {
+            kind: Some("webhook".to_string()),
+            match_: None,
+            bind: Some(parser::BindSpec::Single("data".to_string())),
+            timeout: Some("1s".to_string()),
+            on_timeout: Some("skip".to_string()),
+            line_number: 5,
+            section_index: 2,
+        };
+        let mut desc = pending::build("expired-test", "test.md", 0, &spec);
+        desc.timeout_at = Some("2020-01-01T00:00:00+00:00".to_string());
+        assert!(pending::is_expired(&desc));
+    }
+
+    // ─── wait block parsing integration ──────────────────────────────
+
+    #[test]
+    fn parse_workbook_with_wait_gives_correct_section_indices() {
+        let input = r#"# Test
+
+```bash
+echo "before"
+```
+
+```wait
+kind: api
+bind: result
+timeout: 2m
+```
+
+```bash
+echo "after $result"
+```
+"#;
+        let wb = parser::parse(input);
+        assert_eq!(wb.code_block_count(), 2);
+
+        let mut wait_count = 0;
+        let mut code_indices = Vec::new();
+        for (i, section) in wb.sections.iter().enumerate() {
+            match section {
+                parser::Section::Wait(w) => {
+                    wait_count += 1;
+                    assert_eq!(w.kind.as_deref(), Some("api"));
+                    assert_eq!(w.section_index, i);
+                }
+                parser::Section::Code(b) => {
+                    code_indices.push((i, b.language.clone()));
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(wait_count, 1);
+        assert_eq!(code_indices.len(), 2);
+    }
+
+    // ─── full wait/pause/resume subprocess integration ───────────────
+
+    #[test]
+    fn integration_wait_pause_resume_cycle() {
+        let build = std::process::Command::new("cargo")
+            .args(["build"])
+            .current_dir(env!("CARGO_MANIFEST_DIR"))
+            .output()
+            .expect("cargo build should run");
+        assert!(
+            build.status.success(),
+            "cargo build failed: {}",
+            String::from_utf8_lossy(&build.stderr)
+        );
+
+        let wb_bin = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("debug")
+            .join("wb");
+
+        let tmp = std::env::temp_dir().join("wb-test-wait-cycle");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        let workbook_path = tmp.join("wait-test.md");
+        std::fs::write(
+            &workbook_path,
+            r#"# Wait Test
+
+```bash
+echo "step-1-before-wait"
+```
+
+```wait
+kind: test
+bind: my_var
+timeout: 5m
+```
+
+```bash
+echo "step-2-got: $my_var"
+```
+"#,
+        )
+        .unwrap();
+
+        let ckpt_id = "integration-wait-test";
+        let _ = checkpoint::delete(ckpt_id);
+        let _ = pending::delete(ckpt_id);
+
+        // Run the workbook -- should pause at the wait block (exit 42)
+        let run_output = std::process::Command::new(&wb_bin)
+            .args([
+                "run",
+                workbook_path.to_str().unwrap(),
+                "--checkpoint",
+                ckpt_id,
+            ])
+            .env("WB_EXPERIMENTAL_WAIT", "1")
+            .output()
+            .expect("wb run should execute");
+
+        let exit_code = run_output.status.code().unwrap_or(-1);
+        assert_eq!(
+            exit_code, 42,
+            "expected exit code 42 (paused), got {}.\nstderr: {}",
+            exit_code,
+            String::from_utf8_lossy(&run_output.stderr)
+        );
+
+        // Verify checkpoint is paused
+        let ckpt = checkpoint::load(ckpt_id)
+            .expect("load should not error")
+            .expect("checkpoint should exist after pause");
+        assert_eq!(ckpt.status, checkpoint::CheckpointStatus::Paused);
+        assert_eq!(ckpt.next_block, 1);
+
+        // Verify pending descriptor exists
+        let desc = pending::load(ckpt_id)
+            .expect("load pending should not error")
+            .expect("pending descriptor should exist after pause");
+        assert_eq!(desc.kind.as_deref(), Some("test"));
+        match &desc.bind {
+            Some(parser::BindSpec::Single(s)) => assert_eq!(s, "my_var"),
+            _ => panic!("expected Single bind 'my_var'"),
+        }
+
+        // Create a signal payload and resume
+        let signal_path = tmp.join("signal.json");
+        std::fs::write(&signal_path, r#"{"my_var": "hello-from-signal"}"#).unwrap();
+
+        let resume_output = std::process::Command::new(&wb_bin)
+            .args([
+                "resume",
+                ckpt_id,
+                "--signal",
+                signal_path.to_str().unwrap(),
+            ])
+            .env("WB_EXPERIMENTAL_WAIT", "1")
+            .output()
+            .expect("wb resume should execute");
+
+        let resume_exit = resume_output.status.code().unwrap_or(-1);
+        assert_eq!(
+            resume_exit, 0,
+            "expected exit code 0 after resume, got {}.\nstderr: {}\nstdout: {}",
+            resume_exit,
+            String::from_utf8_lossy(&resume_output.stderr),
+            String::from_utf8_lossy(&resume_output.stdout),
+        );
+
+        // Verify bound var was available in resumed block
+        let stdout = String::from_utf8_lossy(&resume_output.stdout);
+        assert!(
+            stdout.contains("step-2-got: hello-from-signal"),
+            "expected bound var in output, got stdout: {}",
+            stdout
+        );
+
+        // Verify checkpoint is complete
+        let final_ckpt = checkpoint::load(ckpt_id)
+            .expect("load should not error")
+            .expect("checkpoint should still exist");
+        assert_eq!(final_ckpt.status, checkpoint::CheckpointStatus::Complete);
+
+        // Verify pending descriptor was cleaned up
+        let pending_gone = pending::load(ckpt_id).expect("load should not error");
+        assert!(
+            pending_gone.is_none(),
+            "pending descriptor should be deleted after resume"
+        );
+
+        // Clean up
+        let _ = checkpoint::delete(ckpt_id);
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn integration_wait_without_experimental_flag_exits_1() {
+        let build = std::process::Command::new("cargo")
+            .args(["build"])
+            .current_dir(env!("CARGO_MANIFEST_DIR"))
+            .output()
+            .expect("cargo build should run");
+        assert!(build.status.success());
+
+        let wb_bin = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("debug")
+            .join("wb");
+
+        let tmp = std::env::temp_dir().join("wb-test-no-flag");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        let workbook_path = tmp.join("wait-noflag.md");
+        std::fs::write(
+            &workbook_path,
+            r#"```bash
+echo "before"
+```
+
+```wait
+kind: test
+bind: x
+```
+
+```bash
+echo "after"
+```
+"#,
+        )
+        .unwrap();
+
+        let output = std::process::Command::new(&wb_bin)
+            .args([
+                "run",
+                workbook_path.to_str().unwrap(),
+                "--checkpoint",
+                "noflag-test",
+            ])
+            .env_remove("WB_EXPERIMENTAL_WAIT")
+            .output()
+            .expect("wb run should execute");
+
+        let exit_code = output.status.code().unwrap_or(-1);
+        assert_eq!(
+            exit_code, 1,
+            "expected exit 1 without WB_EXPERIMENTAL_WAIT, got {}",
+            exit_code
+        );
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            stderr.contains("experimental"),
+            "stderr should mention experimental: {}",
+            stderr
+        );
+
+        let _ = checkpoint::delete("noflag-test");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn integration_resume_with_value_shorthand() {
+        let build = std::process::Command::new("cargo")
+            .args(["build"])
+            .current_dir(env!("CARGO_MANIFEST_DIR"))
+            .output()
+            .expect("cargo build should run");
+        assert!(build.status.success());
+
+        let wb_bin = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join("debug")
+            .join("wb");
+
+        let tmp = std::env::temp_dir().join("wb-test-value-shorthand");
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        let workbook_path = tmp.join("value-test.md");
+        std::fs::write(
+            &workbook_path,
+            r#"```bash
+echo "pre-wait"
+```
+
+```wait
+kind: manual
+bind: pin
+timeout: 5m
+```
+
+```bash
+echo "pin=$pin"
+```
+"#,
+        )
+        .unwrap();
+
+        let ckpt_id = "integration-value-test";
+        let _ = checkpoint::delete(ckpt_id);
+        let _ = pending::delete(ckpt_id);
+
+        // Pause
+        let run = std::process::Command::new(&wb_bin)
+            .args([
+                "run",
+                workbook_path.to_str().unwrap(),
+                "--checkpoint",
+                ckpt_id,
+            ])
+            .env("WB_EXPERIMENTAL_WAIT", "1")
+            .output()
+            .expect("wb run");
+        assert_eq!(run.status.code().unwrap_or(-1), 42);
+
+        // Resume with --value instead of --signal
+        let resume = std::process::Command::new(&wb_bin)
+            .args(["resume", ckpt_id, "--value", "9999"])
+            .env("WB_EXPERIMENTAL_WAIT", "1")
+            .output()
+            .expect("wb resume");
+
+        assert_eq!(
+            resume.status.code().unwrap_or(-1),
+            0,
+            "resume with --value failed: {}",
+            String::from_utf8_lossy(&resume.stderr)
+        );
+
+        let stdout = String::from_utf8_lossy(&resume.stdout);
+        assert!(
+            stdout.contains("pin=9999"),
+            "expected pin=9999 in output: {}",
+            stdout
+        );
+
+        let _ = checkpoint::delete(ckpt_id);
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }
