@@ -6,6 +6,7 @@ mod parser;
 mod pending;
 mod sandbox;
 mod secrets;
+mod signal;
 mod update;
 
 use std::path::Path;
@@ -912,6 +913,13 @@ fn run_single(
         }
     }
 
+    // Auto-generate checkpoint ID from workbook filename if not provided.
+    let checkpoint_id = checkpoint_id.or_else(|| {
+        Path::new(file)
+            .file_stem()
+            .map(|s| s.to_string_lossy().to_string())
+    });
+
     // Load checkpoint if resuming
     let (replay_until, mut results, mut ckpt) = if let Some(ref id) = checkpoint_id {
         match checkpoint::load(id) {
@@ -1774,8 +1782,8 @@ fn cmd_cancel(id: &str) {
 #[derive(Parser)]
 #[command(name = "wb resume", about = "Resume a paused workbook with a signal payload")]
 struct ResumeCli {
-    /// Checkpoint id to resume
-    id: String,
+    /// Checkpoint id to resume (omit to auto-detect from pending signals)
+    id: Option<String>,
 
     /// Signal payload JSON file (use `-` for stdin)
     #[arg(long)]
@@ -1844,7 +1852,56 @@ fn cmd_resume(args: &[String]) {
         std::process::exit(1);
     }
 
-    let id = &cli.id;
+    // Build env table: process env first, then --env-file overlays. Used to
+    // resolve signal config when the user omits an id (auto-detect mode).
+    // env-file paths are treated as cwd-relative here because the workbook
+    // dir isn't known until after we resolve a checkpoint.
+    let mut env_for_signal: std::collections::HashMap<String, String> =
+        std::env::vars().collect();
+    for path in &cli.env_files {
+        match secrets::load_env_file(path) {
+            Ok(env) => env_for_signal.extend(env),
+            Err(e) => eprintln!("warning: env-file {}: {}", path, e),
+        }
+    }
+
+    let signal_config = signal::config_from_env(&env_for_signal);
+
+    // Resolve checkpoint id. If the user didn't pass one, scan pending
+    // descriptors for a Redis-ready signal and use that. The signal is
+    // consumed from Redis here; we thread it through as `preconsumed_signal`
+    // so the per-id read below becomes a no-op for that case.
+    let (id, preconsumed_signal): (String, Option<std::collections::HashMap<String, String>>) =
+        match cli.id.clone() {
+            Some(id) => (id, None),
+            None => {
+                let cfg = match signal_config.as_ref() {
+                    Some(c) => c,
+                    None => {
+                        eprintln!(
+                            "error: no checkpoint id provided and WB_SIGNAL_URL/WB_SIGNAL_KEY are not set."
+                        );
+                        eprintln!("hint: pass an id explicitly, or set WB_SIGNAL_URL + WB_SIGNAL_KEY to scan pending.");
+                        std::process::exit(1);
+                    }
+                };
+                match signal::find_ready_signal(cfg) {
+                    Ok(Some((found_id, vars))) => {
+                        eprintln!("wb: auto-detected pending '{}' with ready signal", found_id);
+                        (found_id, Some(vars))
+                    }
+                    Ok(None) => {
+                        eprintln!("wb: no pending workbooks have a ready signal");
+                        std::process::exit(0);
+                    }
+                    Err(e) => {
+                        eprintln!("error: scan pending: {}", e);
+                        std::process::exit(1);
+                    }
+                }
+            }
+        };
+    let id = id.as_str();
 
     // Load the paused checkpoint.
     let mut ckpt = match checkpoint::load(id) {
@@ -2026,11 +2083,32 @@ fn cmd_resume(args: &[String]) {
             }
         }
 
+        // If no --value or --signal provided, try reading from Redis signal store.
+        // (If we already consumed a signal during auto-detect, use that directly.)
+        if new_vars.is_empty() {
+            if let Some(sig_vars) = preconsumed_signal.as_ref() {
+                let bound = signal::bind_signal_vars(sig_vars, &desc.bind);
+                new_vars.extend(bound);
+            } else if let Some(sig_config) = &signal_config {
+                match signal::read_signal(sig_config, id) {
+                    Ok(Some(sig_vars)) => {
+                        let bound = signal::bind_signal_vars(&sig_vars, &desc.bind);
+                        new_vars.extend(bound);
+                        eprintln!("wb: signal read from {}", sig_config.signal_redis_key(id));
+                    }
+                    Ok(None) => {}
+                    Err(e) => {
+                        eprintln!("warning: {}", e);
+                    }
+                }
+            }
+        }
+
         // Verify required binds are satisfied.
         for name in &bind_names {
             if !new_vars.contains_key(name) {
                 eprintln!(
-                    "error: signal payload missing required bind '{}'. Provide via --signal <file> (JSON with key '{}') or --value <v>",
+                    "error: signal payload missing required bind '{}'. Provide via --signal <file> (JSON with key '{}'), --value <v>, or write to Redis signal key",
                     name, name
                 );
                 std::process::exit(1);
@@ -2082,7 +2160,7 @@ fn cmd_resume(args: &[String]) {
         cli.quiet,
         cli.bail,
         cli.no_setup,
-        Some(id.clone()),
+        Some(id.to_string()),
         cli.callback,
         cli.callback_secret,
         cli.callback_key,
