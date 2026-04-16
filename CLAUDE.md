@@ -158,6 +158,39 @@ Headers sent:
 
 Payloads include `checkpoint_id`, `workbook`, `progress`, and `timestamp`. The `checkpoint.failed` event includes `failed_block.stderr` for diagnostics.
 
+## Sandbox execution (experimental)
+
+Behind `WB_EXPERIMENTAL_SANDBOX=1`, workbooks can declare system/language deps in frontmatter and `wb` builds a Docker image, then re-invokes itself inside the container with the workbook mounted:
+
+```yaml
+---
+title: PDF Pipeline
+runtime: python
+requires:
+  sandbox: python          # python | node | custom
+  apt: [qpdf, poppler-utils]
+  pip: [pikepdf, pypdf]
+---
+```
+
+When `requires:` is set, `wb`:
+
+1. Generates a Dockerfile from the requires block (or uses `dockerfile:` for `sandbox: custom`).
+2. Hashes the requires block into a deterministic image tag (`wb-sandbox:<12-char-hash>`) and reuses a cached image when nothing changed.
+3. Mounts the workbook directory at `/work` and `~/.wb/checkpoints` at `/root/.wb/checkpoints` so checkpoint/pending state persists across container runs.
+4. Forwards resolved secrets, env-file contents, frontmatter env, and CLI vars via `-e` flags.
+5. Re-enters the container on `wb resume` for paused workbooks (pending descriptors live on the host via the mount).
+
+```bash
+WB_EXPERIMENTAL_SANDBOX=1 wb run examples/sandbox-demo.md
+wb containers list          # show cached sandbox images
+wb containers build some/   # pre-build images for a folder of workbooks
+wb containers prune         # remove all wb-sandbox images
+wb inspect file.md          # shows resolved sandbox config + image tag
+```
+
+Without the flag, a workbook with `requires:` exits 1 with an error asking you to set `WB_EXPERIMENTAL_SANDBOX=1`. See `examples/sandbox-demo.md` for a minimal working example.
+
 ## Secret Providers
 
 Configured in frontmatter or overridden via CLI flags:

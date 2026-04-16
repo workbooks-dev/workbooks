@@ -518,7 +518,12 @@ fn run_single_collect(
                 }
             }
             for path in &env_files {
-                if let Ok(env) = secrets::load_env_file(path) {
+                let resolved = if env_file_relative {
+                    resolve_env_file_path(path, &workbook_dir)
+                } else {
+                    path.to_string()
+                };
+                if let Ok(env) = secrets::load_env_file(&resolved) {
                     container_env.extend(env);
                 }
             }
@@ -788,7 +793,12 @@ fn run_single(
                 }
             }
             for path in &env_files {
-                if let Ok(env) = secrets::load_env_file(path) {
+                let resolved = if env_file_relative {
+                    resolve_env_file_path(path, &workbook_dir)
+                } else {
+                    path.to_string()
+                };
+                if let Ok(env) = secrets::load_env_file(&resolved) {
                     container_env.extend(env);
                 }
             }
@@ -1616,20 +1626,42 @@ fn transform_workbook(file: &str) {
 // ─── containers subcommand ──────────────────────────────────────────
 
 fn cmd_containers(args: &[String]) {
-    let sub = args.first().map(|s| s.as_str()).unwrap_or("help");
+    let sub = args.first().map(|s| s.as_str());
     match sub {
-        "build" => cmd_containers_build(&args[1..]),
-        "list" | "ls" => cmd_containers_list(),
-        "prune" => cmd_containers_prune(),
-        _ => {
-            eprintln!("usage: wb containers <build|list|prune>");
+        Some("build") => cmd_containers_build(&args[1..]),
+        Some("list") | Some("ls") => cmd_containers_list(),
+        Some("prune") => cmd_containers_prune(),
+        None | Some("help") | Some("--help") | Some("-h") => {
+            print_containers_usage();
+        }
+        Some(other) => {
+            eprintln!("error: unknown subcommand '{}'", other);
             eprintln!();
-            eprintln!("  build [path]   Build sandbox images for workbooks (file or directory)");
-            eprintln!("  list           List cached sandbox images");
-            eprintln!("  prune          Remove all sandbox images");
+            print_containers_usage_stderr();
             std::process::exit(1);
         }
     }
+}
+
+fn print_containers_usage() {
+    println!("usage: wb containers <build|list|prune>");
+    println!();
+    println!("Manage cached Docker images for sandboxed workbooks (experimental).");
+    println!();
+    println!("Subcommands:");
+    println!("  build [path]   Build sandbox images for workbooks (file or directory)");
+    println!("  list           List cached sandbox images");
+    println!("  prune          Remove all sandbox images");
+    println!();
+    println!("Sandboxing is gated behind WB_EXPERIMENTAL_SANDBOX=1 when running workbooks.");
+}
+
+fn print_containers_usage_stderr() {
+    eprintln!("usage: wb containers <build|list|prune>");
+    eprintln!();
+    eprintln!("  build [path]   Build sandbox images for workbooks (file or directory)");
+    eprintln!("  list           List cached sandbox images");
+    eprintln!("  prune          Remove all sandbox images");
 }
 
 fn cmd_containers_build(args: &[String]) {
