@@ -13,6 +13,24 @@ pub struct Frontmatter {
     pub setup: Option<SetupConfig>,
     pub exec: Option<ExecConfig>,
     pub working_dir: Option<DirConfig>,
+    pub requires: Option<RequiresConfig>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct RequiresConfig {
+    /// Sandbox type: "python", "node", or "custom"
+    pub sandbox: String,
+    /// System packages to install via apt-get
+    #[serde(default)]
+    pub apt: Vec<String>,
+    /// Python packages to install via uv pip
+    #[serde(default)]
+    pub pip: Vec<String>,
+    /// Node packages to install via npm
+    #[serde(default)]
+    pub node: Vec<String>,
+    /// Path to a custom Dockerfile (only for sandbox: custom)
+    pub dockerfile: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -502,6 +520,83 @@ bind: [code, sender]
         assert_eq!(parse_duration_secs("45").unwrap(), 45);
         assert!(parse_duration_secs("x").is_err());
         assert!(parse_duration_secs("").is_err());
+    }
+
+    #[test]
+    fn test_parse_requires_python() {
+        let input = r#"---
+title: Sandbox Test
+runtime: python
+requires:
+  sandbox: python
+  apt: [qpdf, poppler-utils]
+  pip: [pikepdf, pypdf]
+---
+
+```python
+print("hello")
+```
+"#;
+        let wb = parse(input);
+        let req = wb.frontmatter.requires.unwrap();
+        assert_eq!(req.sandbox, "python");
+        assert_eq!(req.apt, vec!["qpdf", "poppler-utils"]);
+        assert_eq!(req.pip, vec!["pikepdf", "pypdf"]);
+        assert!(req.node.is_empty());
+        assert!(req.dockerfile.is_none());
+    }
+
+    #[test]
+    fn test_parse_requires_node() {
+        let input = r#"---
+requires:
+  sandbox: node
+  apt: [chromium]
+  node: ["@browserbasehq/sdk", "axios"]
+---
+
+```bash
+echo "hello"
+```
+"#;
+        let wb = parse(input);
+        let req = wb.frontmatter.requires.unwrap();
+        assert_eq!(req.sandbox, "node");
+        assert_eq!(req.apt, vec!["chromium"]);
+        assert_eq!(req.node, vec!["@browserbasehq/sdk", "axios"]);
+        assert!(req.pip.is_empty());
+    }
+
+    #[test]
+    fn test_parse_requires_custom() {
+        let input = r#"---
+requires:
+  sandbox: custom
+  dockerfile: ./Dockerfile.payroll
+---
+
+```bash
+echo "hello"
+```
+"#;
+        let wb = parse(input);
+        let req = wb.frontmatter.requires.unwrap();
+        assert_eq!(req.sandbox, "custom");
+        assert_eq!(req.dockerfile.as_deref(), Some("./Dockerfile.payroll"));
+    }
+
+    #[test]
+    fn test_parse_no_requires() {
+        let input = r#"---
+title: No Sandbox
+---
+
+```bash
+echo "hello"
+```
+"#;
+        let wb = parse(input);
+        assert!(wb.frontmatter.requires.is_none());
     }
 
     #[test]

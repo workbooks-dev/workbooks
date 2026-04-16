@@ -4,6 +4,7 @@ mod executor;
 mod output;
 mod parser;
 mod pending;
+mod sandbox;
 mod secrets;
 mod update;
 
@@ -154,6 +155,10 @@ fn main() {
             }
             "resume" => {
                 cmd_resume(&args[2..]);
+                return;
+            }
+            "containers" => {
+                cmd_containers(&args[2..]);
                 return;
             }
             _ => {}
@@ -432,6 +437,129 @@ fn run_single_collect(
     let workbook = parser::parse(&content);
     let block_count = workbook.code_block_count();
 
+    // Sandbox: if `requires` is present and we're not inside a container,
+    // build the image and re-invoke wb inside Docker.
+    if let Some(ref requires) = workbook.frontmatter.requires {
+        if std::env::var("WB_SANDBOX_INNER").ok().as_deref() != Some("1") {
+            if std::env::var("WB_EXPERIMENTAL_SANDBOX").ok().as_deref() != Some("1") {
+                return output::RunSummary {
+                    source_file: file.to_string(),
+                    total_blocks: block_count,
+                    passed: 0,
+                    failed: 1,
+                    total_duration: std::time::Duration::ZERO,
+                    results: vec![executor::BlockResult {
+                        block_index: 0,
+                        language: "sandbox".to_string(),
+                        stdout: String::new(),
+                        stderr: "requires sandbox is experimental. Set WB_EXPERIMENTAL_SANDBOX=1 to enable.".to_string(),
+                        exit_code: 1,
+                        duration: std::time::Duration::ZERO,
+                    }],
+                };
+            }
+
+            let workbook_dir = std::path::Path::new(file)
+                .parent()
+                .filter(|p| !p.as_os_str().is_empty())
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_else(|| ".".to_string());
+
+            let tag = match sandbox::build_image(requires, &workbook_dir) {
+                Ok(t) => t,
+                Err(e) => {
+                    return output::RunSummary {
+                        source_file: file.to_string(),
+                        total_blocks: block_count,
+                        passed: 0,
+                        failed: 1,
+                        total_duration: std::time::Duration::ZERO,
+                        results: vec![executor::BlockResult {
+                            block_index: 0,
+                            language: "sandbox".to_string(),
+                            stdout: String::new(),
+                            stderr: format!("sandbox: {}", e),
+                            exit_code: 1,
+                            duration: std::time::Duration::ZERO,
+                        }],
+                    };
+                }
+            };
+
+            let mut container_env: std::collections::HashMap<String, String> =
+                std::collections::HashMap::new();
+            if let Some(ref fm_env) = workbook.frontmatter.env {
+                container_env.extend(fm_env.clone());
+            }
+            let secrets_config = build_secrets_config(
+                &workbook.frontmatter.secrets,
+                secrets_override,
+                project,
+                secrets_cmd,
+            );
+            if let Some(ref config) = secrets_config {
+                if let Ok(env) = secrets::resolve_secrets(config) {
+                    container_env.extend(env);
+                }
+            }
+            for path in &env_files {
+                if let Ok(env) = secrets::load_env_file(path) {
+                    container_env.extend(env);
+                }
+            }
+            let mut vars = workbook.frontmatter.vars.clone().unwrap_or_default();
+            vars.extend(cli_vars);
+            container_env.extend(vars);
+
+            let mut extra_args: Vec<String> = Vec::new();
+            if quiet {
+                extra_args.push("--quiet".to_string());
+            }
+            if no_setup {
+                extra_args.push("--no-setup".to_string());
+            }
+
+            let start = Instant::now();
+            let exit_code =
+                match sandbox::run_in_sandbox(&tag, file, &container_env, &extra_args) {
+                    Ok(code) => code,
+                    Err(e) => {
+                        return output::RunSummary {
+                            source_file: file.to_string(),
+                            total_blocks: block_count,
+                            passed: 0,
+                            failed: 1,
+                            total_duration: std::time::Duration::ZERO,
+                            results: vec![executor::BlockResult {
+                                block_index: 0,
+                                language: "sandbox".to_string(),
+                                stdout: String::new(),
+                                stderr: format!("sandbox run: {}", e),
+                                exit_code: 1,
+                                duration: std::time::Duration::ZERO,
+                            }],
+                        };
+                    }
+                };
+
+            return output::RunSummary {
+                source_file: file.to_string(),
+                total_blocks: block_count,
+                passed: if exit_code == 0 { block_count } else { 0 },
+                failed: if exit_code == 0 { 0 } else { 1 },
+                total_duration: start.elapsed(),
+                results: vec![executor::BlockResult {
+                    block_index: 0,
+                    language: "sandbox".to_string(),
+                    stdout: String::new(),
+                    stderr: String::new(),
+                    exit_code,
+                    duration: start.elapsed(),
+                }],
+            };
+        }
+    }
+
     let mut ctx = executor::ExecutionContext::from_frontmatter(&workbook.frontmatter, file);
     if let Some(ref d) = dir {
         ctx.working_dir = d.clone();
@@ -592,6 +720,104 @@ fn run_single(
     if block_count == 0 {
         eprintln!("no executable blocks in {}", file);
         std::process::exit(0);
+    }
+
+    // Sandbox: if `requires` is present and we're not already inside a container,
+    // build the image and re-invoke wb inside Docker.
+    if let Some(ref requires) = workbook.frontmatter.requires {
+        if std::env::var("WB_SANDBOX_INNER").ok().as_deref() != Some("1") {
+            if std::env::var("WB_EXPERIMENTAL_SANDBOX").ok().as_deref() != Some("1") {
+                eprintln!(
+                    "error: `requires` sandbox is experimental. Set WB_EXPERIMENTAL_SANDBOX=1 to enable."
+                );
+                std::process::exit(1);
+            }
+
+            let workbook_dir = std::path::Path::new(file)
+                .parent()
+                .filter(|p| !p.as_os_str().is_empty())
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or_else(|| ".".to_string());
+
+            let tag = match sandbox::build_image(requires, &workbook_dir) {
+                Ok(t) => t,
+                Err(e) => {
+                    eprintln!("error: sandbox: {}", e);
+                    std::process::exit(1);
+                }
+            };
+
+            // Build env for container: resolve secrets + env-files + cli vars
+            let mut container_env: std::collections::HashMap<String, String> =
+                std::collections::HashMap::new();
+            if let Some(ref fm_env) = workbook.frontmatter.env {
+                container_env.extend(fm_env.clone());
+            }
+
+            let secrets_config = build_secrets_config(
+                &workbook.frontmatter.secrets,
+                secrets_override,
+                project,
+                secrets_cmd,
+            );
+            if let Some(ref config) = secrets_config {
+                if let Ok(env) = secrets::resolve_secrets(config) {
+                    container_env.extend(env);
+                }
+            }
+            for path in &env_files {
+                if let Ok(env) = secrets::load_env_file(path) {
+                    container_env.extend(env);
+                }
+            }
+            let mut vars = workbook.frontmatter.vars.clone().unwrap_or_default();
+            vars.extend(cli_vars);
+            container_env.extend(vars);
+
+            // Forward CLI flags as extra args
+            let mut extra_args: Vec<String> = Vec::new();
+            if bail {
+                extra_args.push("--bail".to_string());
+            }
+            if quiet {
+                extra_args.push("--quiet".to_string());
+            }
+            if no_setup {
+                extra_args.push("--no-setup".to_string());
+            }
+            if let Some(ref id) = checkpoint_id {
+                extra_args.push("--checkpoint".to_string());
+                extra_args.push(id.clone());
+            }
+            if let Some(ref url) = callback_url {
+                extra_args.push("--callback".to_string());
+                extra_args.push(url.clone());
+            }
+            if let Some(ref secret) = callback_secret {
+                extra_args.push("--callback-secret".to_string());
+                extra_args.push(secret.clone());
+            }
+            if let Some(ref fmt_path) = output_path {
+                extra_args.push("-o".to_string());
+                extra_args.push(fmt_path.clone());
+            }
+            if let Some(ref fmt) = output_format {
+                match fmt {
+                    OutputFormat::Json => extra_args.push("--json".to_string()),
+                    OutputFormat::Yaml => extra_args.push("--yaml".to_string()),
+                    OutputFormat::Markdown => extra_args.push("--md".to_string()),
+                }
+            }
+
+            let exit_code = match sandbox::run_in_sandbox(&tag, file, &container_env, &extra_args) {
+                Ok(code) => code,
+                Err(e) => {
+                    eprintln!("error: sandbox run: {}", e);
+                    1
+                }
+            };
+            std::process::exit(exit_code);
+        }
     }
 
     let mut ctx = executor::ExecutionContext::from_frontmatter(&workbook.frontmatter, file);
@@ -989,6 +1215,24 @@ fn inspect_workbook(file: &str) {
         println!("secrets: configured");
     }
 
+    // Show requires/sandbox config
+    if let Some(ref req) = workbook.frontmatter.requires {
+        println!("sandbox: {}", req.sandbox);
+        if !req.apt.is_empty() {
+            println!("  apt: {}", req.apt.join(", "));
+        }
+        if !req.pip.is_empty() {
+            println!("  pip: {}", req.pip.join(", "));
+        }
+        if !req.node.is_empty() {
+            println!("  node: {}", req.node.join(", "));
+        }
+        if let Some(ref df) = req.dockerfile {
+            println!("  dockerfile: {}", df);
+        }
+        println!("  image: {}", sandbox::image_tag(req));
+    }
+
     // Show exec mappings
     if let Some(ref exec) = workbook.frontmatter.exec {
         match exec {
@@ -1313,6 +1557,123 @@ fn transform_workbook(file: &str) {
 }
 
 // ─── wait/pending/resume commands ─────────────────────────────────────
+
+// ─── containers subcommand ──────────────────────────────────────────
+
+fn cmd_containers(args: &[String]) {
+    let sub = args.first().map(|s| s.as_str()).unwrap_or("help");
+    match sub {
+        "build" => cmd_containers_build(&args[1..]),
+        "list" | "ls" => cmd_containers_list(),
+        "prune" => cmd_containers_prune(),
+        _ => {
+            eprintln!("usage: wb containers <build|list|prune>");
+            eprintln!();
+            eprintln!("  build [path]   Build sandbox images for workbooks (file or directory)");
+            eprintln!("  list           List cached sandbox images");
+            eprintln!("  prune          Remove all sandbox images");
+            std::process::exit(1);
+        }
+    }
+}
+
+fn cmd_containers_build(args: &[String]) {
+    let path = args.first().map(|s| s.as_str()).unwrap_or(".");
+
+    let files = if Path::new(path).is_dir() {
+        collect_workbooks(path, "a-z")
+    } else {
+        vec![path.to_string()]
+    };
+
+    if files.is_empty() {
+        eprintln!("no .md files found in {}", path);
+        std::process::exit(0);
+    }
+
+    let mut built = 0;
+    let mut skipped = 0;
+    let mut errors = 0;
+
+    for file in &files {
+        let content = match std::fs::read_to_string(file) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("  error: {}: {}", file, e);
+                errors += 1;
+                continue;
+            }
+        };
+
+        let workbook = parser::parse(&content);
+        let requires = match workbook.frontmatter.requires {
+            Some(ref r) => r,
+            None => {
+                skipped += 1;
+                continue;
+            }
+        };
+
+        let filename = Path::new(file)
+            .file_name()
+            .map(|f| f.to_string_lossy().to_string())
+            .unwrap_or_else(|| file.clone());
+
+        let tag = sandbox::image_tag(requires);
+        if sandbox::image_exists(&tag) {
+            eprintln!("  {} {} (cached: {})", "✓", filename, tag);
+            skipped += 1;
+            continue;
+        }
+
+        let workbook_dir = Path::new(file)
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .map(|p| p.to_string_lossy().to_string())
+            .unwrap_or_else(|| ".".to_string());
+
+        match sandbox::build_image(requires, &workbook_dir) {
+            Ok(t) => {
+                eprintln!("  {} {} -> {}", "✓", filename, t);
+                built += 1;
+            }
+            Err(e) => {
+                eprintln!("  {} {} — {}", "✗", filename, e);
+                errors += 1;
+            }
+        }
+    }
+
+    eprintln!();
+    eprintln!(
+        "  {} built, {} cached, {} errors",
+        built, skipped, errors
+    );
+
+    if errors > 0 {
+        std::process::exit(1);
+    }
+}
+
+fn cmd_containers_list() {
+    let images = sandbox::list_images();
+    if images.is_empty() {
+        eprintln!("no sandbox images");
+        return;
+    }
+    for (tag, size, created) in &images {
+        println!("  {}  {}  {}", tag, size, created);
+    }
+}
+
+fn cmd_containers_prune() {
+    let removed = sandbox::prune_images();
+    if removed == 0 {
+        eprintln!("no sandbox images to remove");
+    } else {
+        eprintln!("removed {} sandbox images", removed);
+    }
+}
 
 fn cmd_pending(args: &[String]) {
     let json_out = args.iter().any(|a| a == "--format=json" || a == "--json")
