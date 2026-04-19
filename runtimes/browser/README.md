@@ -44,10 +44,24 @@ wb  ←  {"type": "ready", "runtime": "wb-browser-runtime", "version": "...",
 ```
 wb  →  {"type": "slice", "session": "airbase", "verbs": [...],
         "line_number": 42, "section_index": 3}
+wb  ←  {"type": "slice.session_started", "session": "airbase",         (0..1, first slice per session)
+        "session_id": "abc123", "live_url": "https://..."}
 wb  ←  {"type": "verb.complete", "verb": "click", "summary": "..."}      (0..n)
 wb  ←  {"type": "verb.failed", "verb": "click", "error": "..."}          (0..n)
 wb  ←  {"type": "slice.complete"}  OR  {"type": "slice.failed", "error": "..."}
 ```
+
+### Lifecycle event passthrough
+
+Any `slice.<suffix>` event the sidecar emits (other than the terminal
+`slice.complete` / `slice.failed` / `slice.paused`) is forwarded by `wb` to
+the callback stream as a lifecycle event:
+
+- `slice.session_*`  →  `session.*`   (run-scoped, e.g. live URL ready)
+- `slice.<other>`    →  `step.<other>` (block-scoped, e.g. `slice.network_idle`)
+
+The full event payload (minus `type`) is merged into the callback envelope, so
+new fields ship without a `wb` release. See `src/sidecar.rs` for the dispatcher.
 
 ### Shutdown
 

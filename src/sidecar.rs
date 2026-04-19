@@ -344,6 +344,19 @@ impl Sidecar {
                                 pause: None,
                             };
                         }
+                        ty if ty.starts_with("slice.") => {
+                            // Generic lifecycle passthrough — any non-terminal
+                            // slice.* event flows as a callback so new event
+                            // types ship without a wb release.
+                            let event_name = derive_lifecycle_event_name(ty);
+                            if !quiet {
+                                crate::output::print_stderr_dim(&format!(
+                                    "  · {} → {}",
+                                    ty, event_name
+                                ));
+                            }
+                            fire_lifecycle(ctx, &event_name, &v);
+                        }
                         _ => {
                             stdout_buf.push_str(&line);
                             stdout_buf.push('\n');
@@ -429,6 +442,25 @@ fn extract_pause_info(msg: &Value) -> PauseInfo {
     }
 }
 
+/// Map a sidecar `slice.<suffix>` event name to the callback event we publish.
+///
+/// Convention:
+///   `slice.session_*` → `session.*`   (run-scoped lifecycle, e.g. live URL)
+///   `slice.<other>`   → `step.<other>` (block-scoped lifecycle)
+///
+/// Falls back to the original name if the prefix isn't `slice.`, so callers
+/// don't need to pre-check.
+fn derive_lifecycle_event_name(slice_event: &str) -> String {
+    let Some(suffix) = slice_event.strip_prefix("slice.") else {
+        return slice_event.to_string();
+    };
+    if let Some(rest) = suffix.strip_prefix("session_") {
+        format!("session.{}", rest)
+    } else {
+        format!("step.{}", suffix)
+    }
+}
+
 /// Resolve the sidecar binary path.
 ///
 /// 1. `WB_BROWSER_RUNTIME` env var — absolute path or bare command name.
@@ -508,5 +540,36 @@ mod tests {
         assert_eq!(info.resume_url.as_deref(), Some("https://browserbase/live/xyz"));
         assert_eq!(info.verb_index, Some(7));
         assert!(info.sidecar_state.is_some());
+    }
+
+    #[test]
+    fn derive_event_name_session_prefix_routes_to_session_namespace() {
+        assert_eq!(
+            derive_lifecycle_event_name("slice.session_started"),
+            "session.started"
+        );
+        assert_eq!(
+            derive_lifecycle_event_name("slice.session_closed"),
+            "session.closed"
+        );
+    }
+
+    #[test]
+    fn derive_event_name_other_slice_routes_to_step_namespace() {
+        assert_eq!(
+            derive_lifecycle_event_name("slice.network_idle"),
+            "step.network_idle"
+        );
+        assert_eq!(
+            derive_lifecycle_event_name("slice.screenshot_taken"),
+            "step.screenshot_taken"
+        );
+    }
+
+    #[test]
+    fn derive_event_name_passes_through_non_slice_prefix() {
+        // Defensive: shouldn't be reachable from the dispatcher, but the
+        // helper is total — non-slice inputs round-trip unchanged.
+        assert_eq!(derive_lifecycle_event_name("verb.complete"), "verb.complete");
     }
 }

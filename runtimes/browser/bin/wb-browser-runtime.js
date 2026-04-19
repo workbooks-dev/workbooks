@@ -4,6 +4,10 @@
 // Speaks wb's line-framed JSON protocol on stdio. See README.md.
 //
 // This skeleton echoes each verb as verb.complete. Demo-only behavior:
+//   - first verb of a new session (per `session:` field)  → emits
+//     slice.session_started with a stub live_url so wb can publish a
+//     `session.started` lifecycle callback for UIs that want to embed the
+//     live browser view.
 //   - verb `wait_for_mfa:` / `wait_for_email_otp:`       → emits slice.paused
 //     with an opaque sidecar_state blob so wb can persist + resume.
 //   - verb `act: ...` (the "AI recovery" verb)          → emits slice.recovered
@@ -13,6 +17,7 @@
 // paths but the protocol stays the same.
 
 import readline from "node:readline";
+import { randomUUID } from "node:crypto";
 
 const SUPPORTS = [
   "goto",
@@ -29,6 +34,34 @@ const SUPPORTS = [
 
 function send(obj) {
   process.stdout.write(JSON.stringify(obj) + "\n");
+}
+
+// Sessions seen across the lifetime of this sidecar process. The real runtime
+// will key this on Browserbase session objects; the skeleton just remembers
+// which session names have already fired `slice.session_started` so the event
+// is emitted exactly once per session.
+const sessions = new Map();
+
+function ensureSession(name) {
+  if (sessions.has(name)) return sessions.get(name);
+  const id = randomUUID().replace(/-/g, "").slice(0, 16);
+  const info = {
+    id,
+    // The real runtime will get this from `session.liveUrl` after
+    // `bb.sessions.create({...})`. The fake URL is enough for downstream
+    // consumers to wire iframe scaffolding end-to-end.
+    live_url: `https://www.browserbase.com/sessions/${id}/live`,
+    started_at: new Date().toISOString(),
+  };
+  sessions.set(name, info);
+  send({
+    type: "slice.session_started",
+    session: name,
+    session_id: id,
+    live_url: info.live_url,
+    started_at: info.started_at,
+  });
+  return info;
 }
 
 function log(...args) {
@@ -58,6 +91,13 @@ function handleSlice(msg) {
   const verbs = Array.isArray(msg.verbs) ? msg.verbs : [];
   const session = msg.session || "-";
   const restore = msg.restore || null;
+
+  // Fire the one-time session.started event. Skip on `restore` because the
+  // session predates this sidecar's process lifetime; the real runtime will
+  // republish on resume from its persisted session metadata.
+  if (!restore && session !== "-") {
+    ensureSession(session);
+  }
 
   if (restore) {
     const resumedAt = (restore.state && restore.state.verb_index) ?? 0;
@@ -145,7 +185,7 @@ rl.on("line", (line) => {
       send({
         type: "ready",
         runtime: "wb-browser-runtime",
-        version: "0.1.0",
+        version: "0.2.0",
         protocol: "wb-sidecar/1",
         supports: SUPPORTS,
       });
