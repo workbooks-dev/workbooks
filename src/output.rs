@@ -167,6 +167,7 @@ fn build_json_output(workbook: &Workbook, summary: &RunSummary) -> JsonOutput {
                 block_meta.push((last_heading.take(), block.line_number));
             }
             Section::Wait(_) => {}
+            Section::Browser(_) => {}
         }
     }
 
@@ -291,6 +292,18 @@ fn format_markdown(workbook: &Workbook, summary: &RunSummary) -> String {
             Section::Wait(spec) => {
                 out.push_str("```wait\n");
                 if let Ok(yaml) = serde_yaml::to_string(spec) {
+                    out.push_str(&yaml);
+                }
+                out.push_str("```\n\n");
+            }
+            Section::Browser(spec) => {
+                out.push_str("```browser\n");
+                if !spec.raw.is_empty() {
+                    out.push_str(&spec.raw);
+                    if !spec.raw.ends_with('\n') {
+                        out.push('\n');
+                    }
+                } else if let Ok(yaml) = serde_yaml::to_string(spec) {
                     out.push_str(&yaml);
                 }
                 out.push_str("```\n\n");

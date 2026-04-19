@@ -6,6 +6,7 @@ mod parser;
 mod pending;
 mod sandbox;
 mod secrets;
+mod sidecar;
 mod signal;
 mod update;
 
@@ -679,6 +680,37 @@ fn run_single_collect(
                 results.push(result);
                 block_idx += 1;
             }
+            parser::Section::Browser(spec) => {
+                let ctx = sidecar::SliceCallbackContext {
+                    cb: None,
+                    workbook: file,
+                    checkpoint_id: None,
+                    block_index: block_idx,
+                    heading: None,
+                    line_number: spec.line_number,
+                    completed: block_idx + 1,
+                    total: block_count,
+                };
+                let (result, pause) = session.execute_browser_slice(spec, block_idx, &ctx, None);
+                if pause.is_some() {
+                    // Folder mode: no --checkpoint, no way to resume. Fail loudly
+                    // rather than leak a half-run browser slice.
+                    results.push(executor::BlockResult {
+                        block_index: block_idx,
+                        language: "browser".to_string(),
+                        stdout: result.stdout,
+                        stderr: format!(
+                            "browser slice paused but folder runs do not support resume (L{}); use --checkpoint",
+                            spec.line_number
+                        ),
+                        exit_code: 1,
+                        duration: result.duration,
+                    });
+                    break;
+                }
+                results.push(result);
+                block_idx += 1;
+            }
             parser::Section::Wait(spec) => {
                 results.push(executor::BlockResult {
                     block_index: block_idx,
@@ -1025,6 +1057,23 @@ fn run_single(
 
     let mut replay_cleaned = replay_until == 0;
 
+    // If we were called by `cmd_resume` to resume a paused browser slice, the
+    // pending descriptor carries the opaque sidecar state + the resolver's
+    // signal payload. Consumed once by the paused block.
+    let mut browser_restore: Option<sidecar::RestoreArgs> = None;
+    if let Some(ref id) = checkpoint_id {
+        if let Ok(Some(desc)) = pending::load(id) {
+            if desc.sidecar_state.is_some() {
+                browser_restore = Some(sidecar::RestoreArgs {
+                    state: desc.sidecar_state.clone(),
+                    signal: std::env::var("WB_BROWSER_RESUME_SIGNAL")
+                        .ok()
+                        .and_then(|s| serde_json::from_str(&s).ok()),
+                });
+            }
+        }
+    }
+
     for (section_idx, section) in workbook.sections.iter().enumerate() {
         if let parser::Section::Text(text) = section {
             for line in text.lines() {
@@ -1177,6 +1226,139 @@ fn run_single(
                 if let Err(e) = checkpoint::save(checkpoint_id.as_ref().unwrap(), c) {
                     eprintln!("warning: checkpoint: {}", e);
                 }
+            }
+
+            results.push(result);
+            block_idx += 1;
+        }
+
+        if let parser::Section::Browser(spec) = section {
+            // Replay path: browser sidecars rehydrate via persistent Browserbase
+            // contexts, so a completed slice doesn't need to re-execute.
+            if block_idx < replay_until {
+                let replay_line = format!(
+                    "  ↻ replaying [{}/{}] browser (L{}) — skipped",
+                    block_idx + 1,
+                    block_count,
+                    spec.line_number
+                );
+                eprintln!("{}", output::style_dim(&replay_line));
+                last_heading = None;
+                block_idx += 1;
+                continue;
+            }
+
+            if !replay_cleaned {
+                session.remove_env("WB_REPLAY");
+                session.unset_env_in_sessions("WB_REPLAY");
+                replay_cleaned = true;
+            }
+
+            let block_heading = last_heading.take();
+
+            if !quiet {
+                let session_tag = spec.session.as_deref().unwrap_or("-");
+                let preview = format!("session={} verbs={}", session_tag, spec.verbs.len());
+                output::print_block_header(
+                    block_heading.as_deref(),
+                    "browser",
+                    spec.line_number,
+                    Some(&preview),
+                );
+            }
+
+            let slice_ctx = sidecar::SliceCallbackContext {
+                cb: cb.as_ref(),
+                workbook: file,
+                checkpoint_id: checkpoint_id.as_deref(),
+                block_index: block_idx,
+                heading: block_heading.as_deref(),
+                line_number: spec.line_number,
+                completed: block_idx + 1,
+                total: block_count,
+            };
+            // Take a one-shot restore, if the resume path handed us one earlier.
+            let restore = browser_restore.take();
+            let (result, pause_info) =
+                session.execute_browser_slice(spec, block_idx, &slice_ctx, restore.as_ref());
+
+            if let Some(pause) = pause_info {
+                pause_browser_slice(
+                    spec,
+                    section_idx,
+                    &checkpoint_id,
+                    ckpt.as_mut(),
+                    file,
+                    block_idx,
+                    cb.as_ref(),
+                    block_heading.as_deref(),
+                    pause,
+                );
+                // Unreachable — pause_browser_slice exits.
+            }
+
+            let success = result.success();
+
+            let status_line = format!(
+                "{} [{}/{}] browser ({:.1}s)",
+                if success { "✓" } else { "✗" },
+                block_idx + 1,
+                block_count,
+                result.duration.as_secs_f64()
+            );
+            if success {
+                eprintln!("{}", output::style_ok(&status_line));
+            } else {
+                eprintln!("{}", output::style_fail(&status_line));
+            }
+
+            if let Some(ref cb) = cb {
+                cb.step_complete(
+                    &result,
+                    block_idx + 1,
+                    block_count,
+                    file,
+                    checkpoint_id.as_deref(),
+                    block_heading.as_deref(),
+                    spec.line_number,
+                );
+            }
+
+            if bail && !success {
+                if let (Some(ref cb), Some(ref ckpt_id)) = (&cb, &checkpoint_id) {
+                    cb.checkpoint_failed(
+                        &result,
+                        block_idx,
+                        block_count,
+                        file,
+                        ckpt_id,
+                        block_heading.as_deref(),
+                        spec.line_number,
+                    );
+                }
+
+                if let Some(ref mut c) = ckpt {
+                    c.mark_failed();
+                    let _ = checkpoint::save(checkpoint_id.as_ref().unwrap(), c);
+                }
+                results.push(result);
+                break;
+            }
+
+            if let Some(ref mut c) = ckpt {
+                c.add_result(&result, spec.line_number, block_heading.as_deref(), &spec.raw);
+                if let Err(e) = checkpoint::save(checkpoint_id.as_ref().unwrap(), c) {
+                    eprintln!("warning: checkpoint: {}", e);
+                }
+            }
+
+            // If this slice was resumed from a pending descriptor (browser
+            // pause), clean up now that it completed.
+            if restore.is_some() {
+                if let Some(ref id) = checkpoint_id {
+                    let _ = pending::delete(id);
+                }
+                std::env::remove_var("WB_BROWSER_RESUME_SIGNAL");
             }
 
             results.push(result);
@@ -1354,6 +1536,16 @@ fn inspect_workbook(file: &str) {
                 format!(" {}", parts.join(" "))
             };
             println!("  \u{23f8} wait{} (L{})", detail, spec.line_number);
+        } else if let parser::Section::Browser(spec) = section {
+            idx += 1;
+            let session_tag = spec.session.as_deref().unwrap_or("-");
+            println!(
+                "  {}. [browser] L{} -> wb-browser-runtime — session={} verbs={}",
+                idx,
+                spec.line_number,
+                session_tag,
+                spec.verbs.len()
+            );
         }
     }
 
@@ -1482,6 +1674,112 @@ fn pause_for_signal(
             spec.kind.as_deref(),
             bind_names.as_deref(),
             desc.timeout_at.as_deref(),
+        );
+    }
+
+    std::process::exit(EXIT_PAUSED);
+}
+
+/// Pause a browser slice mid-run: persist sidecar state + pending descriptor,
+/// fire callback events, and exit EXIT_PAUSED. Mirrors `pause_for_signal` for
+/// the `wait` flow.
+#[allow(clippy::too_many_arguments)]
+fn pause_browser_slice(
+    spec: &parser::BrowserSliceSpec,
+    _section_idx: usize,
+    checkpoint_id: &Option<String>,
+    ckpt: Option<&mut checkpoint::Checkpoint>,
+    file: &str,
+    block_idx: usize,
+    cb: Option<&callback::CallbackConfig>,
+    heading: Option<&str>,
+    pause: sidecar::PauseInfo,
+) -> ! {
+    let id = match checkpoint_id.as_deref() {
+        Some(id) => id,
+        None => {
+            eprintln!(
+                "error: browser slice paused but no --checkpoint was set; slices with pauses require --checkpoint to resume. (L{})",
+                spec.line_number
+            );
+            std::process::exit(1);
+        }
+    };
+
+    if let Some(c) = ckpt {
+        c.next_block = block_idx;
+        c.mark_paused();
+        if let Err(e) = checkpoint::save(id, c) {
+            eprintln!("warning: checkpoint: {}", e);
+        }
+    }
+
+    let desc = pending::build_for_browser_pause(
+        id,
+        file,
+        block_idx,
+        spec,
+        pause.reason.clone(),
+        pause.resume_url.clone(),
+        pause.verb_index,
+        pause.sidecar_state.clone(),
+    );
+    if let Err(e) = pending::save(id, &desc) {
+        eprintln!("warning: pending descriptor: {}", e);
+    }
+
+    eprintln!(
+        "{}",
+        output::style_bold(&format!(
+            "⏸  browser slice paused at L{} — {} (checkpoint: {})",
+            spec.line_number,
+            pause.reason.as_deref().unwrap_or("slice.paused"),
+            id,
+        ))
+    );
+    if let Some(ref url) = pause.resume_url {
+        eprintln!("   resume_url: {}", url);
+    }
+    let desc_path = pending::descriptor_path(id);
+    eprintln!("   pending: {}", desc_path.display());
+    eprintln!(
+        "   resume:  wb resume {} [--signal <payload.json>]",
+        id
+    );
+
+    // Backwards-compat: fire workbook.paused so consumers already subscribed
+    // to that event see the run as paused.
+    if let Some(cb) = cb {
+        cb.workbook_paused(
+            file,
+            id,
+            pause.reason.as_deref().or(Some("browser.slice_paused")),
+            None,
+            None,
+        );
+        // Also fire step.paused with slice context for consumers that want
+        // granular detail (verb index, live-view URL, heading, etc.).
+        let mut extra = serde_json::Map::new();
+        if let Some(reason) = pause.reason.as_ref() {
+            extra.insert("reason".to_string(), serde_json::Value::String(reason.clone()));
+        }
+        if let Some(url) = pause.resume_url.as_ref() {
+            extra.insert("resume_url".to_string(), serde_json::Value::String(url.clone()));
+        }
+        if let Some(vi) = pause.verb_index {
+            extra.insert("verb_index".to_string(), serde_json::Value::Number(vi.into()));
+        }
+        cb.step_lifecycle(
+            "step.paused",
+            file,
+            Some(id),
+            block_idx,
+            "browser",
+            heading,
+            spec.line_number,
+            block_idx,
+            0,
+            serde_json::Value::Object(extra),
         );
     }
 
@@ -1970,6 +2268,100 @@ fn cmd_resume(args: &[String]) {
             std::process::exit(1);
         }
     };
+
+    // Browser-slice pauses have an opaque sidecar_state instead of bind names.
+    // Short-circuit the wait-flow validation, stash any signal payload for the
+    // resumed run to pick up, and hand control straight to run_single.
+    if desc.sidecar_state.is_some() {
+        let signal_payload: Option<serde_json::Value> = if let Some(ref v) = cli.value {
+            Some(serde_json::Value::String(v.clone()))
+        } else if let Some(ref path) = cli.signal {
+            let raw = if path == "-" {
+                use std::io::Read;
+                let mut buf = String::new();
+                if let Err(e) = std::io::stdin().read_to_string(&mut buf) {
+                    eprintln!("error: read stdin: {}", e);
+                    std::process::exit(1);
+                }
+                buf
+            } else {
+                match std::fs::read_to_string(path) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        eprintln!("error: read {}: {}", path, e);
+                        std::process::exit(1);
+                    }
+                }
+            };
+            match serde_json::from_str(&raw) {
+                Ok(v) => Some(v),
+                Err(e) => {
+                    eprintln!("error: parse signal JSON: {}", e);
+                    std::process::exit(1);
+                }
+            }
+        } else if let Some(ref sig_vars) = preconsumed_signal {
+            serde_json::to_value(sig_vars).ok()
+        } else {
+            None
+        };
+
+        if let Some(ref sig) = signal_payload {
+            if let Ok(serialized) = serde_json::to_string(sig) {
+                std::env::set_var("WB_BROWSER_RESUME_SIGNAL", serialized);
+            }
+        }
+
+        ckpt.mark_in_progress();
+        if let Err(e) = checkpoint::save(id, &ckpt) {
+            eprintln!("error: save checkpoint: {}", e);
+            std::process::exit(1);
+        }
+        // Note: pending descriptor is left in place until run_single's browser
+        // branch consumes sidecar_state; it's deleted once the slice completes.
+
+        let workbook_file = ckpt.workbook.clone();
+        let format_flag = if cli.json {
+            Some(OutputFormat::Json)
+        } else if cli.yaml {
+            Some(OutputFormat::Yaml)
+        } else if cli.md {
+            Some(OutputFormat::Markdown)
+        } else {
+            None
+        };
+        let file_format = cli.output.as_deref().and_then(OutputFormat::from_path);
+        let output_format = format_flag.or(file_format);
+        let stdout_output = format_flag.is_some() && cli.output.is_none();
+        let cli_vars: std::collections::HashMap<String, String> = cli
+            .set_vars
+            .iter()
+            .filter_map(|s| s.split_once('=').map(|(k, v)| (k.to_string(), v.to_string())))
+            .collect();
+
+        run_single(
+            &workbook_file,
+            cli.output,
+            output_format,
+            stdout_output,
+            cli.secrets,
+            cli.project,
+            cli.secrets_cmd,
+            cli.dir,
+            cli.quiet,
+            cli.bail,
+            cli.no_setup,
+            Some(id.to_string()),
+            cli.callback,
+            cli.callback_secret,
+            cli.callback_key,
+            cli_vars,
+            cli.redact,
+            cli.env_files,
+            cli.env_file_relative,
+        );
+        return;
+    }
 
     let expired = pending::is_expired(&desc);
     let on_timeout = desc.on_timeout.as_deref().unwrap_or("abort");

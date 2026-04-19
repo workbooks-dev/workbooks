@@ -16,7 +16,7 @@ pub struct PendingDescriptor {
     pub workbook: String,
     /// 1-indexed code-block position this wait follows (for humans).
     pub next_block: usize,
-    /// Line number of the `wait` fence in the source markdown.
+    /// Line number of the `wait` (or `browser`) fence in the source markdown.
     pub line_number: usize,
     pub section_index: usize,
     pub kind: Option<String>,
@@ -26,6 +26,17 @@ pub struct PendingDescriptor {
     pub created_at: String,
     pub timeout_at: Option<String>,
     pub on_timeout: Option<String>,
+    /// Opaque sidecar state captured at pause, restored on resume. Populated
+    /// only for browser-slice pauses; `wb` does not interpret it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sidecar_state: Option<serde_yaml::Value>,
+    /// Browserbase live-view URL (or equivalent) the human clicks to resolve
+    /// a slice-internal pause (MFA, OTP).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resume_url: Option<String>,
+    /// Verb position within the paused slice. Surfaces in `wb pending`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verb_index: Option<usize>,
 }
 
 pub fn descriptor_path(id: &str) -> PathBuf {
@@ -113,6 +124,45 @@ pub fn build(
         created_at: now.to_rfc3339(),
         timeout_at,
         on_timeout: spec.on_timeout.clone(),
+        sidecar_state: None,
+        resume_url: None,
+        verb_index: None,
+    }
+}
+
+/// Build a pending descriptor for a browser-slice pause. Sidecar state is
+/// opaque — `wb` just persists it so the resumed sidecar can pick up where it
+/// left off.
+pub fn build_for_browser_pause(
+    checkpoint_id: &str,
+    workbook: &str,
+    next_block: usize,
+    slice: &crate::parser::BrowserSliceSpec,
+    reason: Option<String>,
+    resume_url: Option<String>,
+    verb_index: Option<usize>,
+    sidecar_state: Option<serde_yaml::Value>,
+) -> PendingDescriptor {
+    let now = Utc::now();
+    let ckpt_path = checkpoint::checkpoint_path(checkpoint_id)
+        .to_string_lossy()
+        .to_string();
+    PendingDescriptor {
+        checkpoint: ckpt_path,
+        checkpoint_id: checkpoint_id.to_string(),
+        workbook: workbook.to_string(),
+        next_block,
+        line_number: slice.line_number,
+        section_index: slice.section_index,
+        kind: reason.or_else(|| Some("browser.slice_paused".to_string())),
+        match_: None,
+        bind: None,
+        created_at: now.to_rfc3339(),
+        timeout_at: None,
+        on_timeout: None,
+        sidecar_state,
+        resume_url,
+        verb_index,
     }
 }
 
@@ -318,6 +368,9 @@ mod tests {
             // 1 hour in the past
             timeout_at: Some((Utc::now() - ChronoDuration::hours(1)).to_rfc3339()),
             on_timeout: None,
+            sidecar_state: None,
+            resume_url: None,
+            verb_index: None,
         };
         assert!(is_expired(&desc));
     }
@@ -338,6 +391,9 @@ mod tests {
             // 1 hour in the future
             timeout_at: Some((Utc::now() + ChronoDuration::hours(1)).to_rfc3339()),
             on_timeout: None,
+            sidecar_state: None,
+            resume_url: None,
+            verb_index: None,
         };
         assert!(!is_expired(&desc));
     }
@@ -357,6 +413,9 @@ mod tests {
             created_at: Utc::now().to_rfc3339(),
             timeout_at: None,
             on_timeout: None,
+            sidecar_state: None,
+            resume_url: None,
+            verb_index: None,
         };
         assert!(!is_expired(&desc));
     }
@@ -376,6 +435,9 @@ mod tests {
             created_at: Utc::now().to_rfc3339(),
             timeout_at: Some("2099-01-01T00:00:00+00:00".to_string()),
             on_timeout: Some("abort".to_string()),
+            sidecar_state: None,
+            resume_url: None,
+            verb_index: None,
         };
         let s = summarize("my-run", &desc);
         assert!(s.contains("my-run"), "should contain id");
@@ -404,6 +466,9 @@ mod tests {
             created_at: Utc::now().to_rfc3339(),
             timeout_at: None,
             on_timeout: None,
+            sidecar_state: None,
+            resume_url: None,
+            verb_index: None,
         };
         let s = summarize("run-2", &desc);
         assert!(s.contains("code,sender"), "should contain joined bind vars");
@@ -425,6 +490,9 @@ mod tests {
             created_at: Utc::now().to_rfc3339(),
             timeout_at: Some((Utc::now() - ChronoDuration::hours(1)).to_rfc3339()),
             on_timeout: None,
+            sidecar_state: None,
+            resume_url: None,
+            verb_index: None,
         };
         let s = summarize("old-run", &desc);
         assert!(s.contains("[EXPIRED]"), "should show expired marker");
@@ -445,6 +513,9 @@ mod tests {
             created_at: Utc::now().to_rfc3339(),
             timeout_at: None,
             on_timeout: None,
+            sidecar_state: None,
+            resume_url: None,
+            verb_index: None,
         };
         let s = summarize("bare", &desc);
         // kind defaults to "-", bind defaults to "-"

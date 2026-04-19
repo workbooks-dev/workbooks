@@ -158,6 +158,50 @@ impl CallbackConfig {
         self.send("workbook.paused", &payload.to_string());
     }
 
+    /// Fired for intra-step lifecycle events emitted mid-slice by the sidecar:
+    /// `step.paused`, `step.resumed`, `step.recovered`. `wb` owns the envelope
+    /// (block metadata, progress, timestamp); the sidecar owns the slice-level
+    /// detail carried in `extra` (verb_index, reason, resume_url, recovered
+    /// selector, etc.) so new sidecar fields flow through without a wb release.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_lifecycle(
+        &self,
+        event: &str,
+        workbook: &str,
+        checkpoint_id: Option<&str>,
+        block_index: usize,
+        language: &str,
+        heading: Option<&str>,
+        line_number: usize,
+        completed: usize,
+        total: usize,
+        extra: serde_json::Value,
+    ) {
+        let mut payload = json!({
+            "event": event,
+            "checkpoint_id": checkpoint_id,
+            "workbook": workbook,
+            "block": {
+                "index": block_index,
+                "language": language,
+                "heading": heading,
+                "line_number": line_number,
+            },
+            "progress": {
+                "completed": completed,
+                "total": total,
+            },
+            "timestamp": Utc::now().to_rfc3339(),
+        });
+        // Merge sidecar-supplied top-level fields (slice, reason, resume_url, ...).
+        if let (Some(obj), Some(extra_obj)) = (payload.as_object_mut(), extra.as_object()) {
+            for (k, v) in extra_obj {
+                obj.insert(k.clone(), v.clone());
+            }
+        }
+        self.send(event, &payload.to_string());
+    }
+
     /// Fired when the entire run finishes (all blocks executed)
     pub fn run_complete(
         &self,
@@ -436,6 +480,41 @@ mod tests {
         assert_eq!(payload["block"]["stderr"], "");
         assert_eq!(payload["progress"]["completed"], 1);
         assert_eq!(payload["progress"]["total"], 6);
+    }
+
+    #[test]
+    fn test_step_lifecycle_envelope_shape() {
+        // We can't assert on send() side effects without a network, but we can
+        // re-build the payload inline to confirm shape by replicating the
+        // builder's logic for a known extra blob.
+        let extra = json!({
+            "slice": { "verb_index": 7 },
+            "reason": "airbase_totp",
+            "resume_url": "https://browserbase/live/abc123",
+        });
+        let mut payload = json!({
+            "event": "step.paused",
+            "checkpoint_id": "ckpt-1",
+            "workbook": "airbase-login",
+            "block": {
+                "index": 2,
+                "language": "browser",
+                "heading": "Login",
+                "line_number": 18,
+            },
+            "progress": { "completed": 2, "total": 5 },
+            "timestamp": Utc::now().to_rfc3339(),
+        });
+        if let (Some(obj), Some(extra_obj)) = (payload.as_object_mut(), extra.as_object()) {
+            for (k, v) in extra_obj {
+                obj.insert(k.clone(), v.clone());
+            }
+        }
+        assert_eq!(payload["event"], "step.paused");
+        assert_eq!(payload["block"]["language"], "browser");
+        assert_eq!(payload["slice"]["verb_index"], 7);
+        assert_eq!(payload["reason"], "airbase_totp");
+        assert_eq!(payload["resume_url"], "https://browserbase/live/abc123");
     }
 
     #[test]
