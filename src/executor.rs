@@ -6,7 +6,8 @@ use std::sync::mpsc::{self, Receiver};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::parser::{CodeBlock, DirConfig, ExecConfig, Frontmatter};
+use crate::parser::{BrowserSliceSpec, CodeBlock, DirConfig, ExecConfig, Frontmatter};
+use crate::sidecar::{PauseInfo, RestoreArgs, Sidecar, SliceCallbackContext};
 
 #[derive(Debug)]
 pub struct BlockResult {
@@ -244,6 +245,7 @@ impl Drop for PersistentProcess {
 pub struct Session {
     processes: HashMap<String, PersistentProcess>,
     ctx: ExecutionContext,
+    browser_sidecar: Option<Sidecar>,
 }
 
 impl Session {
@@ -251,6 +253,7 @@ impl Session {
         Session {
             processes: HashMap::new(),
             ctx,
+            browser_sidecar: None,
         }
     }
 
@@ -374,6 +377,82 @@ impl Session {
             exit_code,
             duration: start.elapsed(),
         }
+    }
+
+    /// Dispatch a browser slice to the long-lived sidecar.
+    ///
+    /// Gated behind `WB_EXPERIMENTAL_BROWSER=1`. Spawns the sidecar lazily on
+    /// the first call and reuses it for the rest of the run. Returns
+    /// `(BlockResult, Some(PauseInfo))` when the slice paused for a human;
+    /// main is expected to persist a pending descriptor and exit 42.
+    #[allow(clippy::too_many_arguments)]
+    pub fn execute_browser_slice(
+        &mut self,
+        spec: &BrowserSliceSpec,
+        index: usize,
+        ctx: &SliceCallbackContext,
+        restore: Option<&RestoreArgs>,
+    ) -> (BlockResult, Option<PauseInfo>) {
+        let start = Instant::now();
+
+        if std::env::var("WB_EXPERIMENTAL_BROWSER").ok().as_deref() != Some("1") {
+            let msg = format!(
+                "`browser` blocks are experimental. Set WB_EXPERIMENTAL_BROWSER=1 to enable. (L{})",
+                spec.line_number
+            );
+            if !self.ctx.quiet {
+                crate::output::print_stderr_dim(&msg);
+            }
+            return (
+                BlockResult {
+                    block_index: index,
+                    language: "browser".to_string(),
+                    stdout: String::new(),
+                    stderr: msg,
+                    exit_code: 1,
+                    duration: start.elapsed(),
+                },
+                None,
+            );
+        }
+
+        if self.browser_sidecar.is_none() {
+            match Sidecar::spawn(&self.ctx.env, &self.ctx.working_dir) {
+                Ok(sc) => self.browser_sidecar = Some(sc),
+                Err(e) => {
+                    if !self.ctx.quiet {
+                        crate::output::print_stderr_dim(&e);
+                    }
+                    return (
+                        BlockResult {
+                            block_index: index,
+                            language: "browser".to_string(),
+                            stdout: String::new(),
+                            stderr: e,
+                            exit_code: 127,
+                            duration: start.elapsed(),
+                        },
+                        None,
+                    );
+                }
+            }
+        }
+
+        let outcome = self
+            .browser_sidecar
+            .as_mut()
+            .unwrap()
+            .run_slice(spec, self.ctx.quiet, ctx, restore);
+
+        let block = BlockResult {
+            block_index: index,
+            language: "browser".to_string(),
+            stdout: redact_output(&outcome.stdout, &self.ctx.redact_values),
+            stderr: redact_output(&outcome.stderr, &self.ctx.redact_values),
+            exit_code: outcome.exit_code,
+            duration: start.elapsed(),
+        };
+        (block, outcome.pause)
     }
 }
 

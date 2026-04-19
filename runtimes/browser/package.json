@@ -1,0 +1,17 @@
+{
+  "name": "wb-browser-runtime",
+  "version": "0.1.0",
+  "description": "Browser sidecar runtime for wb — deterministic Playwright slices with AI recovery. Skeleton: JSON-over-stdio protocol only, no Playwright yet.",
+  "bin": {
+    "wb-browser-runtime": "bin/wb-browser-runtime.js"
+  },
+  "type": "module",
+  "engines": {
+    "node": ">=18"
+  },
+  "files": [
+    "bin",
+    "src",
+    "README.md"
+  ]
+}

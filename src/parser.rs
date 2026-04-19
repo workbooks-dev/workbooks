@@ -157,11 +157,31 @@ pub struct WaitSpec {
     pub section_index: usize,
 }
 
+/// Browser slice — body parsed into a structured envelope (`session`, `on_pause`)
+/// with an opaque `verbs` list forwarded verbatim to the sidecar. Verb vocabulary
+/// is sidecar-defined; `wb` does not interpret individual verbs.
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+pub struct BrowserSliceSpec {
+    #[serde(default)]
+    pub session: Option<String>,
+    #[serde(default)]
+    pub on_pause: Option<String>,
+    #[serde(default)]
+    pub verbs: Vec<serde_yaml::Value>,
+    #[serde(skip, default)]
+    pub line_number: usize,
+    #[serde(skip, default)]
+    pub section_index: usize,
+    #[serde(skip, default)]
+    pub raw: String,
+}
+
 #[derive(Debug)]
 pub enum Section {
     Text(String),
     Code(CodeBlock),
     Wait(WaitSpec),
+    Browser(BrowserSliceSpec),
 }
 
 #[derive(Debug)]
@@ -171,11 +191,13 @@ pub struct Workbook {
 }
 
 impl Workbook {
-    /// Count of executable code blocks
+    /// Count of executable units (code blocks + browser slices).
+    /// Browser slices consume a block index and show up in progress/callbacks
+    /// exactly like code blocks do.
     pub fn code_block_count(&self) -> usize {
         self.sections
             .iter()
-            .filter(|s| matches!(s, Section::Code(_)))
+            .filter(|s| matches!(s, Section::Code(_) | Section::Browser(_)))
             .count()
     }
 }
@@ -253,6 +275,38 @@ fn extract_sections(body: &str) -> Vec<Section> {
                 spec.line_number = line_num + 1;
                 spec.section_index = sections.len();
                 sections.push(Section::Wait(spec));
+                continue;
+            }
+
+            // Browser fence: parse YAML envelope, forward `verbs` opaquely to sidecar
+            if language.eq_ignore_ascii_case("browser") {
+                if !current_text.is_empty() {
+                    sections.push(Section::Text(current_text.clone()));
+                    current_text.clear();
+                }
+                let mut body_lines = Vec::new();
+                for (_ln, body_line) in lines.by_ref() {
+                    if body_line.trim() == "```" {
+                        break;
+                    }
+                    body_lines.push(body_line);
+                }
+                let yaml = body_lines.join("\n");
+                let mut spec: BrowserSliceSpec = match serde_yaml::from_str(&yaml) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        eprintln!(
+                            "wb: browser block parse error at L{}: {}",
+                            line_num + 1,
+                            e
+                        );
+                        BrowserSliceSpec::default()
+                    }
+                };
+                spec.line_number = line_num + 1;
+                spec.section_index = sections.len();
+                spec.raw = yaml;
+                sections.push(Section::Browser(spec));
                 continue;
             }
 
@@ -509,6 +563,36 @@ bind: [code, sender]
             Some(BindSpec::Multiple(v)) => assert_eq!(v, &vec!["code".to_string(), "sender".to_string()]),
             _ => panic!("expected Multiple bind"),
         }
+    }
+
+    #[test]
+    fn test_parse_browser_block() {
+        let input = r#"# Mail check
+
+```browser
+session: ipostal1
+verbs:
+  - goto: https://app.ipostal1.com
+  - click: "button.sign-in"
+  - fill:
+      selector: "input[name=email]"
+      value: "{{ email }}"
+  - act: "click the approve button"
+```
+"#;
+        let wb = parse(input);
+        assert_eq!(wb.code_block_count(), 1); // browser slices count as executable units
+        let browsers: Vec<&BrowserSliceSpec> = wb
+            .sections
+            .iter()
+            .filter_map(|s| if let Section::Browser(b) = s { Some(b) } else { None })
+            .collect();
+        assert_eq!(browsers.len(), 1);
+        let b = browsers[0];
+        assert_eq!(b.session.as_deref(), Some("ipostal1"));
+        assert_eq!(b.verbs.len(), 4);
+        assert!(b.line_number > 0);
+        assert!(!b.raw.is_empty());
     }
 
     #[test]
