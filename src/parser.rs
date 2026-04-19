@@ -118,6 +118,10 @@ pub struct CodeBlock {
     pub language: String,
     pub code: String,
     pub line_number: usize,
+    /// `{no-run}` info-string flag: parse/render like a normal block but never execute.
+    pub skip_execution: bool,
+    /// `{silent}` info-string flag: execute normally but suppress step.complete/step.failed callbacks.
+    pub silent: bool,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -174,6 +178,10 @@ pub struct BrowserSliceSpec {
     pub section_index: usize,
     #[serde(skip, default)]
     pub raw: String,
+    #[serde(skip, default)]
+    pub skip_execution: bool,
+    #[serde(skip, default)]
+    pub silent: bool,
 }
 
 #[derive(Debug)]
@@ -193,11 +201,16 @@ pub struct Workbook {
 impl Workbook {
     /// Count of executable units (code blocks + browser slices).
     /// Browser slices consume a block index and show up in progress/callbacks
-    /// exactly like code blocks do.
+    /// exactly like code blocks do. Blocks flagged `{no-run}` are excluded —
+    /// they're parsed but never execute, so they don't count toward progress.
     pub fn code_block_count(&self) -> usize {
         self.sections
             .iter()
-            .filter(|s| matches!(s, Section::Code(_) | Section::Browser(_)))
+            .filter(|s| match s {
+                Section::Code(b) => !b.skip_execution,
+                Section::Browser(b) => !b.skip_execution,
+                _ => false,
+            })
             .count()
     }
 }
@@ -241,15 +254,71 @@ fn extract_frontmatter(input: &str) -> (Frontmatter, String) {
     }
 }
 
+/// Parsed info string: language token + optional `{no-run, silent, ...}` flags.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct InfoString {
+    language: String,
+    skip_execution: bool,
+    silent: bool,
+}
+
+/// Split a fence info string like `bash {no-run, silent}` into language + flags.
+///
+/// Brace cluster is optional and can appear anywhere after the language token. Flags
+/// inside braces are comma or whitespace separated; unknown flags are currently
+/// ignored so the parser stays forward-compatible.
+fn parse_info_string(info: &str) -> InfoString {
+    let info = info.trim();
+    let (lang_part, flag_part) = match (info.find('{'), info.rfind('}')) {
+        (Some(open), Some(close)) if close > open => {
+            (info[..open].trim(), Some(&info[open + 1..close]))
+        }
+        _ => (info, None),
+    };
+    let mut out = InfoString {
+        language: lang_part.to_string(),
+        ..Default::default()
+    };
+    if let Some(flags) = flag_part {
+        for flag in flags
+            .split(|c: char| c == ',' || c.is_whitespace())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            match flag {
+                "no-run" => out.skip_execution = true,
+                "silent" => out.silent = true,
+                _ => {}
+            }
+        }
+    }
+    out
+}
+
 fn extract_sections(body: &str) -> Vec<Section> {
+    // Info-string attribute flags (`{no-run}`, `{silent}`) are gated behind the
+    // experimental env var. When disabled, fence lines like `bash {no-run}` stay
+    // as-is and fall through to the non-executable-language branch — preserving
+    // prior behavior so this feature is reversible.
+    let flags_enabled =
+        std::env::var("WB_EXPERIMENTAL_BLOCK_FLAGS").ok().as_deref() == Some("1");
+
     let mut sections = Vec::new();
     let mut current_text = String::new();
     let mut lines = body.lines().enumerate().peekable();
 
     while let Some((line_num, line)) = lines.next() {
         if line.starts_with("```") && line.len() > 3 {
-            // Opening fence with language
-            let language = line[3..].trim().to_string();
+            // Opening fence with language + optional `{flag, flag}` attribute cluster
+            let info = if flags_enabled {
+                parse_info_string(&line[3..])
+            } else {
+                InfoString {
+                    language: line[3..].trim().to_string(),
+                    ..Default::default()
+                }
+            };
+            let language = info.language.clone();
 
             // Wait fence: parse YAML body into a WaitSpec
             if language.eq_ignore_ascii_case("wait") {
@@ -306,6 +375,8 @@ fn extract_sections(body: &str) -> Vec<Section> {
                 spec.line_number = line_num + 1;
                 spec.section_index = sections.len();
                 spec.raw = yaml;
+                spec.skip_execution = info.skip_execution;
+                spec.silent = info.silent;
                 sections.push(Section::Browser(spec));
                 continue;
             }
@@ -345,6 +416,8 @@ fn extract_sections(body: &str) -> Vec<Section> {
                 language,
                 code: code_lines.join("\n"),
                 line_number: line_num + 1, // 1-indexed
+                skip_execution: info.skip_execution,
+                silent: info.silent,
             }));
         } else {
             current_text.push_str(line);
@@ -697,5 +770,194 @@ echo "this runs"
 "#;
         let wb = parse(input);
         assert_eq!(wb.code_block_count(), 1);
+    }
+
+    // --- info-string flag parsing ---
+
+    #[test]
+    fn test_parse_info_string_language_only() {
+        let info = parse_info_string("bash");
+        assert_eq!(info.language, "bash");
+        assert!(!info.skip_execution);
+        assert!(!info.silent);
+    }
+
+    #[test]
+    fn test_parse_info_string_no_run() {
+        let info = parse_info_string("bash {no-run}");
+        assert_eq!(info.language, "bash");
+        assert!(info.skip_execution);
+        assert!(!info.silent);
+    }
+
+    #[test]
+    fn test_parse_info_string_silent() {
+        let info = parse_info_string("browser {silent}");
+        assert_eq!(info.language, "browser");
+        assert!(!info.skip_execution);
+        assert!(info.silent);
+    }
+
+    #[test]
+    fn test_parse_info_string_both_flags_comma_separated() {
+        let info = parse_info_string("python {no-run, silent}");
+        assert_eq!(info.language, "python");
+        assert!(info.skip_execution);
+        assert!(info.silent);
+    }
+
+    #[test]
+    fn test_parse_info_string_both_flags_whitespace_separated() {
+        let info = parse_info_string("python {no-run silent}");
+        assert!(info.skip_execution);
+        assert!(info.silent);
+    }
+
+    #[test]
+    fn test_parse_info_string_unknown_flags_ignored() {
+        // Forward-compatible: unknown tokens inside braces are ignored rather
+        // than failing the parse, so older wb versions tolerate new flags.
+        let info = parse_info_string("bash {no-run, future-flag}");
+        assert_eq!(info.language, "bash");
+        assert!(info.skip_execution);
+        assert!(!info.silent);
+    }
+
+    #[test]
+    fn test_parse_info_string_unclosed_brace_is_language() {
+        // No closing `}` → whole token stays as the language (falls through
+        // to is_executable_language, which rejects it). Better than silently
+        // eating a malformed attribute cluster.
+        let info = parse_info_string("bash {no-run");
+        assert_eq!(info.language, "bash {no-run");
+        assert!(!info.skip_execution);
+    }
+
+    // --- extract_sections honors env gate ---
+    //
+    // These tests mutate WB_EXPERIMENTAL_BLOCK_FLAGS. A module-level mutex
+    // serializes them so parallel test execution can't interleave env writes.
+
+    use std::sync::Mutex;
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    struct EnvGuard {
+        prev: Option<String>,
+    }
+
+    impl EnvGuard {
+        fn set(value: Option<&str>) -> Self {
+            let prev = std::env::var("WB_EXPERIMENTAL_BLOCK_FLAGS").ok();
+            match value {
+                Some(v) => std::env::set_var("WB_EXPERIMENTAL_BLOCK_FLAGS", v),
+                None => std::env::remove_var("WB_EXPERIMENTAL_BLOCK_FLAGS"),
+            }
+            EnvGuard { prev }
+        }
+    }
+
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            match &self.prev {
+                Some(v) => std::env::set_var("WB_EXPERIMENTAL_BLOCK_FLAGS", v),
+                None => std::env::remove_var("WB_EXPERIMENTAL_BLOCK_FLAGS"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_flags_gated_off_by_default() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let _env = EnvGuard::set(None);
+
+        let input = r#"```bash {no-run}
+echo "should not run"
+```
+
+```bash
+echo "should run"
+```
+"#;
+        let wb = parse(input);
+        // With flag off: `bash {no-run}` is not recognized as executable
+        // (the brace cluster isn't stripped), so it falls through to the
+        // non-executable branch and is treated as documentation. Only the
+        // plain `bash` block counts.
+        assert_eq!(wb.code_block_count(), 1);
+    }
+
+    #[test]
+    fn test_no_run_excluded_from_count() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let _env = EnvGuard::set(Some("1"));
+
+        let input = r#"```bash {no-run}
+echo "illustrative"
+```
+
+```bash
+echo "runs"
+```
+"#;
+        let wb = parse(input);
+        // Only the plain bash block counts — no-run is excluded from progress.
+        assert_eq!(wb.code_block_count(), 1);
+        // But the no-run block is still parsed into the sections list so
+        // tooling (docs renderers, wb inspect) can see it.
+        let code_blocks: Vec<&CodeBlock> = wb
+            .sections
+            .iter()
+            .filter_map(|s| if let Section::Code(b) = s { Some(b) } else { None })
+            .collect();
+        assert_eq!(code_blocks.len(), 2);
+        assert!(code_blocks[0].skip_execution);
+        assert!(!code_blocks[1].skip_execution);
+    }
+
+    #[test]
+    fn test_silent_counts_toward_total() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let _env = EnvGuard::set(Some("1"));
+
+        let input = r#"```bash {silent}
+echo "setup"
+```
+
+```bash
+echo "main"
+```
+"#;
+        let wb = parse(input);
+        // Silent executes and counts — it just doesn't emit step.complete.
+        assert_eq!(wb.code_block_count(), 2);
+        let blocks: Vec<&CodeBlock> = wb
+            .sections
+            .iter()
+            .filter_map(|s| if let Section::Code(b) = s { Some(b) } else { None })
+            .collect();
+        assert!(blocks[0].silent);
+        assert!(!blocks[0].skip_execution);
+    }
+
+    #[test]
+    fn test_browser_flags_parsed() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let _env = EnvGuard::set(Some("1"));
+
+        let input = r#"```browser {no-run}
+session: airbase
+verbs:
+  - goto: https://example.com
+```
+"#;
+        let wb = parse(input);
+        let browsers: Vec<&BrowserSliceSpec> = wb
+            .sections
+            .iter()
+            .filter_map(|s| if let Section::Browser(b) = s { Some(b) } else { None })
+            .collect();
+        assert_eq!(browsers.len(), 1);
+        assert!(browsers[0].skip_execution);
+        assert_eq!(wb.code_block_count(), 0);
     }
 }

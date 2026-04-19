@@ -279,6 +279,8 @@ impl Session {
                     language: lang.to_string(),
                     code: format!("unset {}", key),
                     line_number: 0,
+                    skip_execution: false,
+                    silent: false,
                 };
                 let saved_quiet = self.ctx.quiet;
                 self.ctx.quiet = true;
@@ -291,6 +293,8 @@ impl Session {
                 language: "python".to_string(),
                 code: format!("import os; os.environ.pop('{}', None)", key),
                 line_number: 0,
+                skip_execution: false,
+                silent: false,
             };
             let saved_quiet = self.ctx.quiet;
             self.ctx.quiet = true;
@@ -302,6 +306,8 @@ impl Session {
                 language: "node".to_string(),
                 code: format!("delete process.env['{}']", key),
                 line_number: 0,
+                skip_execution: false,
+                silent: false,
             };
             let saved_quiet = self.ctx.quiet;
             self.ctx.quiet = true;
@@ -313,6 +319,8 @@ impl Session {
                 language: "ruby".to_string(),
                 code: format!("ENV.delete('{}')", key),
                 line_number: 0,
+                skip_execution: false,
+                silent: false,
             };
             let saved_quiet = self.ctx.quiet;
             self.ctx.quiet = true;
@@ -971,6 +979,8 @@ mod tests {
             language: "bash".to_string(),
             code: code.to_string(),
             line_number: 0,
+            skip_execution: false,
+            silent: false,
         }
     }
 

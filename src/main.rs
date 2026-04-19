@@ -676,11 +676,17 @@ fn run_single_collect(
     for section in &workbook.sections {
         match section {
             parser::Section::Code(block) => {
+                if block.skip_execution {
+                    continue;
+                }
                 let result = session.execute_block(block, block_idx);
                 results.push(result);
                 block_idx += 1;
             }
             parser::Section::Browser(spec) => {
+                if spec.skip_execution {
+                    continue;
+                }
                 let ctx = sidecar::SliceCallbackContext {
                     cb: None,
                     workbook: file,
@@ -1127,6 +1133,23 @@ fn run_single(
         }
 
         if let parser::Section::Code(block) = section {
+            // `{no-run}`: parsed for docs tooling but never executes. Doesn't
+            // advance block_idx (excluded from code_block_count), no callbacks,
+            // not checkpointed, not in results. A one-line hint keeps the skip
+            // visible in local runs.
+            if block.skip_execution {
+                if !quiet {
+                    eprintln!(
+                        "{}",
+                        output::style_dim(&format!(
+                            "  ⊘ skipped {{no-run}} [{}] (L{})",
+                            block.language, block.line_number
+                        ))
+                    );
+                }
+                continue;
+            }
+
             // Replay completed blocks to rebuild session state
             if block_idx < replay_until {
                 let replay_line = format!(
@@ -1192,21 +1215,26 @@ fn run_single(
                 eprintln!("{}", output::style_fail(&status_line));
             }
 
-            // Callback: step complete (fires for every executed block)
+            // Callback: step complete (fires for every executed block unless `{silent}`)
             if let Some(ref cb) = cb {
-                cb.step_complete(
-                    &result,
-                    block_idx + 1,
-                    block_count,
-                    file,
-                    checkpoint_id.as_deref(),
-                    block_heading.as_deref(),
-                    block.line_number,
-                );
+                if !block.silent {
+                    cb.step_complete(
+                        &result,
+                        block_idx + 1,
+                        block_count,
+                        file,
+                        checkpoint_id.as_deref(),
+                        block_heading.as_deref(),
+                        block.line_number,
+                    );
+                }
             }
 
             if bail && !success {
-                // Callback: checkpoint failed (when checkpointing is active)
+                // Callback: checkpoint failed (when checkpointing is active).
+                // `{silent}` only gates step.complete/step.failed — a failed
+                // silent block still produces a checkpoint.failed event so
+                // agent orchestrators know a run needs intervention.
                 if let (Some(ref cb), Some(ref ckpt_id)) = (&cb, &checkpoint_id) {
                     cb.checkpoint_failed(&result, block_idx, block_count, file, ckpt_id, block_heading.as_deref(), block.line_number);
                 }
@@ -1233,6 +1261,22 @@ fn run_single(
         }
 
         if let parser::Section::Browser(spec) = section {
+            // `{no-run}`: same semantics as code blocks — parsed but never
+            // dispatched to the sidecar. The sidecar isn't spawned for a
+            // run that has only no-run browser slices.
+            if spec.skip_execution {
+                if !quiet {
+                    eprintln!(
+                        "{}",
+                        output::style_dim(&format!(
+                            "  ⊘ skipped {{no-run}} [browser] (L{})",
+                            spec.line_number
+                        ))
+                    );
+                }
+                continue;
+            }
+
             // Replay path: browser sidecars rehydrate via persistent Browserbase
             // contexts, so a completed slice doesn't need to re-execute.
             if block_idx < replay_until {
@@ -1313,15 +1357,17 @@ fn run_single(
             }
 
             if let Some(ref cb) = cb {
-                cb.step_complete(
-                    &result,
-                    block_idx + 1,
-                    block_count,
-                    file,
-                    checkpoint_id.as_deref(),
-                    block_heading.as_deref(),
-                    spec.line_number,
-                );
+                if !spec.silent {
+                    cb.step_complete(
+                        &result,
+                        block_idx + 1,
+                        block_count,
+                        file,
+                        checkpoint_id.as_deref(),
+                        block_heading.as_deref(),
+                        spec.line_number,
+                    );
+                }
             }
 
             if bail && !success {
@@ -1511,7 +1557,11 @@ fn inspect_workbook(file: &str) {
                 .chars()
                 .take(50)
                 .collect();
-            println!("  {}. [{}] L{} -> {} — {}", idx, block.language, block.line_number, resolved, preview);
+            let flag_tag = flag_annotation(block.skip_execution, block.silent);
+            println!(
+                "  {}. [{}]{} L{} -> {} — {}",
+                idx, block.language, flag_tag, block.line_number, resolved, preview
+            );
         } else if let parser::Section::Wait(spec) = section {
             let mut parts = Vec::new();
             if let Some(ref k) = spec.kind {
@@ -1539,9 +1589,11 @@ fn inspect_workbook(file: &str) {
         } else if let parser::Section::Browser(spec) = section {
             idx += 1;
             let session_tag = spec.session.as_deref().unwrap_or("-");
+            let flag_tag = flag_annotation(spec.skip_execution, spec.silent);
             println!(
-                "  {}. [browser] L{} -> wb-browser-runtime — session={} verbs={}",
+                "  {}. [browser]{} L{} -> wb-browser-runtime — session={} verbs={}",
                 idx,
+                flag_tag,
                 spec.line_number,
                 session_tag,
                 spec.verbs.len()
@@ -1551,6 +1603,15 @@ fn inspect_workbook(file: &str) {
 
     if idx == 0 {
         println!("  (no executable blocks)");
+    }
+}
+
+/// Render `{no-run}` / `{silent}` badges next to the language tag in `wb inspect`.
+fn flag_annotation(skip_execution: bool, silent: bool) -> String {
+    match (skip_execution, silent) {
+        (true, _) => " {no-run}".to_string(),
+        (false, true) => " {silent}".to_string(),
+        _ => String::new(),
     }
 }
 
