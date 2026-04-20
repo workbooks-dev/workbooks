@@ -32,6 +32,11 @@ const DEFAULT_SIDECAR_BINARY: &str = "wb-browser-runtime";
 const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(15);
 /// Max time to wait for the next event while a slice is running.
 const SLICE_EVENT_TIMEOUT: Duration = Duration::from_secs(300);
+/// Max time to wait for the sidecar to exit cleanly after `shutdown` before
+/// we fall back to SIGKILL. Covers `flushRecording` (rrweb drain + ffmpeg
+/// finalize + per-kind upload) which has its own ~30s per-upload budget.
+/// Overridable via `WB_SIDECAR_SHUTDOWN_TIMEOUT_SECS` for test harnesses.
+const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(45);
 
 /// Info captured when a slice pauses for a human-in-the-loop action
 /// (MFA, OTP, etc.). Returned up to the executor + main so `wb` can write a
@@ -87,12 +92,37 @@ pub struct Sidecar {
 
 impl Drop for Sidecar {
     fn drop(&mut self) {
-        // Best-effort shutdown. Send a `shutdown` frame so the sidecar can close
-        // browser contexts cleanly; then kill if it ignores us.
+        // Best-effort shutdown. Send a `shutdown` frame so the sidecar can
+        // flush recordings + close browser contexts cleanly, then give it a
+        // bounded window to exit on its own before falling back to SIGKILL.
         let _ = writeln!(self.stdin, "{}", json!({ "type": "shutdown" }));
         let _ = self.stdin.flush();
+
+        let deadline = Instant::now() + shutdown_timeout();
+        loop {
+            match self.child.try_wait() {
+                Ok(Some(_)) => return,
+                Ok(None) if Instant::now() >= deadline => break,
+                Ok(None) => thread::sleep(Duration::from_millis(100)),
+                Err(_) => break,
+            }
+        }
         let _ = self.child.kill();
         let _ = self.child.wait();
+    }
+}
+
+/// Read `WB_SIDECAR_SHUTDOWN_TIMEOUT_SECS` if set to a non-negative integer,
+/// otherwise fall back to `SHUTDOWN_TIMEOUT`. A value of `0` disables the
+/// wait entirely (legacy SIGKILL-immediately behavior) for tests that need
+/// fast teardown and aren't exercising the recording flush path.
+fn shutdown_timeout() -> Duration {
+    match std::env::var("WB_SIDECAR_SHUTDOWN_TIMEOUT_SECS") {
+        Ok(v) => match v.trim().parse::<u64>() {
+            Ok(n) => Duration::from_secs(n),
+            Err(_) => SHUTDOWN_TIMEOUT,
+        },
+        Err(_) => SHUTDOWN_TIMEOUT,
     }
 }
 
