@@ -1,6 +1,6 @@
 {
   "name": "wb-browser-runtime",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Browser sidecar runtime for wb — Browserbase + Playwright over the wb-sidecar/1 line-framed JSON protocol.",
   "bin": {
     "wb-browser-runtime": "bin/wb-browser-runtime.js"
@@ -14,6 +14,7 @@
   },
   "files": [
     "bin",
+    "vendor",
     "README.md"
   ]
 }

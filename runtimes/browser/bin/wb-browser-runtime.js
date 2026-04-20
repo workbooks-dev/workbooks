@@ -20,6 +20,16 @@
 
 import readline from "node:readline";
 import { chromium } from "playwright-core";
+import { spawn, spawnSync } from "node:child_process";
+import { existsSync, readFileSync, promises as fsPromises } from "node:fs";
+import { randomUUID } from "node:crypto";
+import path from "node:path";
+import os from "node:os";
+import { fileURLToPath } from "node:url";
+import zlib from "node:zlib";
+import { promisify } from "node:util";
+
+const gzip = promisify(zlib.gzip);
 
 const SUPPORTS = [
   "goto",
@@ -34,7 +44,110 @@ const SUPPORTS = [
 ];
 
 const BB_BASE = "https://api.browserbase.com";
-const VERSION = "0.3.0";
+const VERSION = "0.4.0";
+
+// --- Recording config -------------------------------------------------------
+//
+// Feature is off unless WB_RECORDING_UPLOAD_URL is set. When enabled, every
+// session gets rrweb DOM-event capture and/or a CDP screencast video; both
+// artifacts are POSTed to the upload URL at session close.
+//
+// URL template supports `{run_id}` and `{kind}` placeholders, e.g.
+//   https://host/api/runs/{run_id}/recording/{kind}
+// kind ∈ {"rrweb", "video"}. Auth: `Authorization: Bearer <SECRET>`.
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const RRWEB_VENDOR_PATH = path.join(
+  __dirname,
+  "..",
+  "vendor",
+  "rrweb-record.min.js",
+);
+
+function checkFfmpeg() {
+  try {
+    const res = spawnSync("ffmpeg", ["-version"], { stdio: "ignore" });
+    return res.status === 0;
+  } catch {
+    return false;
+  }
+}
+
+function loadRecordingConfig() {
+  const uploadUrl = (process.env.WB_RECORDING_UPLOAD_URL || "").trim();
+  if (!uploadUrl) return { enabled: false, reason: "no-upload-url" };
+  const secret = (process.env.WB_RECORDING_UPLOAD_SECRET || "").trim();
+  if (!secret) {
+    log(
+      "[recording] WB_RECORDING_UPLOAD_URL is set but WB_RECORDING_UPLOAD_SECRET is empty — refusing to upload unauthenticated. Recording disabled.",
+    );
+    return { enabled: false, reason: "no-secret" };
+  }
+
+  const runId =
+    (process.env.WB_RECORDING_RUN_ID || "").trim() ||
+    (process.env.TRIGGER_RUN_ID || "").trim() ||
+    `wb-${randomUUID()}`;
+
+  const fps =
+    Number.parseInt(process.env.WB_RECORDING_SCREENCAST_FPS || "", 10) || 5;
+  const quality =
+    Number.parseInt(process.env.WB_RECORDING_SCREENCAST_QUALITY || "", 10) ||
+    60;
+
+  const rrwebRequested = process.env.WB_RECORDING_RRWEB !== "0";
+  const videoRequested = process.env.WB_RECORDING_VIDEO !== "0";
+
+  let rrwebSource = null;
+  if (rrwebRequested) {
+    if (!existsSync(RRWEB_VENDOR_PATH)) {
+      log(
+        `[recording] rrweb vendor file missing at ${RRWEB_VENDOR_PATH} — disabling rrweb capture`,
+      );
+    } else {
+      rrwebSource = readFileSync(RRWEB_VENDOR_PATH, "utf8");
+    }
+  }
+
+  const hasFfmpeg = videoRequested ? checkFfmpeg() : false;
+  if (videoRequested && !hasFfmpeg) {
+    log(
+      "[recording] ffmpeg not found on $PATH — disabling video capture (rrweb will continue if enabled)",
+    );
+  }
+
+  const kinds = {
+    rrweb: rrwebRequested && !!rrwebSource,
+    video: videoRequested && hasFfmpeg,
+  };
+
+  if (!kinds.rrweb && !kinds.video) {
+    log("[recording] no usable kinds — recording disabled");
+    return { enabled: false, reason: "all-kinds-disabled" };
+  }
+
+  return {
+    enabled: true,
+    uploadUrl,
+    secret,
+    runId,
+    fps,
+    quality,
+    kinds,
+    rrwebSource,
+  };
+}
+
+const RECORDING = loadRecordingConfig();
+if (RECORDING.enabled) {
+  const activeKinds = Object.entries(RECORDING.kinds)
+    .filter(([, v]) => v)
+    .map(([k]) => k)
+    .join(",");
+  log(
+    `[recording] enabled run_id=${RECORDING.runId} kinds=${activeKinds} fps=${RECORDING.fps} quality=${RECORDING.quality}`,
+  );
+}
 
 function send(obj) {
   process.stdout.write(JSON.stringify(obj) + "\n");
@@ -110,7 +223,7 @@ async function safeText(res) {
 
 // --- Session cache ----------------------------------------------------------
 
-const sessions = new Map(); // name -> { sid, browser, context, page, liveUrl }
+const sessions = new Map(); // name -> { sid, browser, context, page, liveUrl, recording }
 
 async function ensureSession(name) {
   if (sessions.has(name)) return sessions.get(name);
@@ -127,6 +240,7 @@ async function ensureSession(name) {
     context,
     page,
     liveUrl,
+    recording: null,
   };
   sessions.set(name, info);
 
@@ -137,7 +251,308 @@ async function ensureSession(name) {
     live_url: liveUrl,
     started_at: new Date().toISOString(),
   });
+
+  await startRecording(info, name);
   return info;
+}
+
+// --- Recording (rrweb + CDP screencast) ------------------------------------
+//
+// rrweb  — vendored record bundle injected via context.addInitScript. Events
+//          are emitted to window.__wbRrwebBuffer and flushed every 500ms (and
+//          on beforeunload) to a sidecar-side buffer via exposeBinding. This
+//          survives cross-origin navigations because the init script reruns on
+//          every new document.
+// video  — per-page CDPSession.startScreencast streams JPEG frames; each frame
+//          is piped into a long-lived `ffmpeg` subprocess that encodes to VP9
+//          WebM on disk. At session end we close the stdin, wait for ffmpeg to
+//          exit, and read the file.
+//
+// Both artifacts are POSTed with Bearer auth to the upload URL. Failure is
+// soft — slice.recording.failed events are emitted but the run still succeeds.
+
+async function startRecording(info, sessionName) {
+  if (!RECORDING.enabled) return;
+  info.recording = {
+    kinds: { ...RECORDING.kinds },
+    rrwebEvents: [],
+    cdp: null,
+    ffmpeg: null,
+    ffmpegDone: null,
+    videoPath: null,
+  };
+  const rec = info.recording;
+
+  if (rec.kinds.rrweb) {
+    try {
+      await info.context.exposeBinding("__wbRrwebFlush", (_src, batch) => {
+        if (Array.isArray(batch)) {
+          for (const e of batch) rec.rrwebEvents.push(e);
+        }
+      });
+      const bootstrap = `
+;(function(){
+  if (window.__wbRrwebActive) return;
+  window.__wbRrwebActive = true;
+  window.__wbRrwebBuffer = [];
+  try {
+    rrwebRecord({
+      emit: function(event){ window.__wbRrwebBuffer.push(event); },
+      sampling: { scroll: 150, media: 800, input: 'last' },
+      maskAllInputs: true
+    });
+  } catch (e) { /* rrweb unavailable on this page (e.g. chrome://) */ }
+  var flush = function(){
+    var buf = window.__wbRrwebBuffer;
+    if (buf && buf.length && typeof window.__wbRrwebFlush === 'function') {
+      window.__wbRrwebBuffer = [];
+      try { window.__wbRrwebFlush(buf); } catch (e) {}
+    }
+  };
+  setInterval(flush, 500);
+  window.addEventListener('beforeunload', flush);
+})();
+`;
+      await info.context.addInitScript({
+        content: RECORDING.rrwebSource + "\n" + bootstrap,
+      });
+    } catch (e) {
+      log(`[recording] rrweb setup failed: ${e.message}`);
+      rec.kinds.rrweb = false;
+    }
+  }
+
+  if (rec.kinds.video) {
+    try {
+      const outPath = path.join(
+        os.tmpdir(),
+        `wb-video-${sanitize(sessionName)}-${Date.now()}-${process.pid}.webm`,
+      );
+      rec.videoPath = outPath;
+      const ff = spawn(
+        "ffmpeg",
+        [
+          "-hide_banner",
+          "-loglevel",
+          "warning",
+          "-y",
+          "-f",
+          "image2pipe",
+          "-vcodec",
+          "mjpeg",
+          "-framerate",
+          String(RECORDING.fps),
+          "-i",
+          "pipe:0",
+          "-c:v",
+          "libvpx-vp9",
+          "-b:v",
+          "1M",
+          "-deadline",
+          "realtime",
+          "-pix_fmt",
+          "yuv420p",
+          outPath,
+        ],
+        { stdio: ["pipe", "ignore", "pipe"] },
+      );
+      ff.stderr.on("data", (d) => {
+        const s = d.toString().trim();
+        if (s) log(`[ffmpeg] ${s.slice(0, 240)}`);
+      });
+      // Broken pipe on shutdown is normal — swallow it so it doesn't crash the
+      // node process via the default 'error' handler.
+      ff.stdin.on("error", (e) => {
+        if (e.code !== "EPIPE") log(`[ffmpeg stdin] ${e.message}`);
+      });
+      rec.ffmpeg = ff;
+      rec.ffmpegDone = new Promise((resolve) => {
+        ff.on("close", (code) => resolve(code));
+      });
+
+      const cdp = await info.context.newCDPSession(info.page);
+      rec.cdp = cdp;
+      cdp.on("Page.screencastFrame", async (frame) => {
+        try {
+          if (ff.stdin.writable && !ff.killed) {
+            ff.stdin.write(Buffer.from(frame.data, "base64"));
+          }
+          // Must ack each frame or Chrome stops streaming.
+          await cdp.send("Page.screencastFrameAck", {
+            sessionId: frame.sessionId,
+          });
+        } catch {
+          // Session tearing down — safe to ignore.
+        }
+      });
+      await cdp.send("Page.startScreencast", {
+        format: "jpeg",
+        quality: RECORDING.quality,
+        everyNthFrame: 1,
+      });
+    } catch (e) {
+      log(`[recording] video setup failed: ${e.message}`);
+      rec.kinds.video = false;
+      if (rec.ffmpeg) {
+        try {
+          rec.ffmpeg.kill();
+        } catch {}
+      }
+    }
+  }
+
+  const active = Object.entries(rec.kinds)
+    .filter(([, v]) => v)
+    .map(([k]) => k);
+  if (active.length) {
+    send({
+      type: "slice.recording.started",
+      session: sessionName,
+      run_id: RECORDING.runId,
+      kinds: active,
+    });
+  }
+}
+
+async function flushRecording(info, sessionName) {
+  if (!info.recording) return;
+  const rec = info.recording;
+
+  let rrwebBody = null;
+  if (rec.kinds.rrweb) {
+    try {
+      const tail = await info.page.evaluate(() => {
+        if (!Array.isArray(window.__wbRrwebBuffer)) return [];
+        const out = window.__wbRrwebBuffer;
+        window.__wbRrwebBuffer = [];
+        return out;
+      });
+      if (Array.isArray(tail)) {
+        for (const e of tail) rec.rrwebEvents.push(e);
+      }
+    } catch (e) {
+      log(`[recording] rrweb final drain failed: ${e.message}`);
+    }
+    if (rec.rrwebEvents.length > 0) {
+      try {
+        const json = JSON.stringify({
+          run_id: RECORDING.runId,
+          session: sessionName,
+          event_count: rec.rrwebEvents.length,
+          events: rec.rrwebEvents,
+        });
+        rrwebBody = await gzip(Buffer.from(json, "utf8"));
+      } catch (e) {
+        log(`[recording] rrweb gzip failed: ${e.message}`);
+      }
+    }
+  }
+
+  let videoBody = null;
+  if (rec.kinds.video && rec.cdp && rec.ffmpeg) {
+    try {
+      await rec.cdp.send("Page.stopScreencast");
+    } catch {
+      // Browser may already be tearing down.
+    }
+    try {
+      rec.ffmpeg.stdin.end();
+      const settled = await Promise.race([
+        rec.ffmpegDone,
+        new Promise((r) => setTimeout(() => r("timeout"), 15_000)),
+      ]);
+      if (settled === "timeout") {
+        log("[recording] ffmpeg did not exit within 15s; killing");
+        try {
+          rec.ffmpeg.kill("SIGKILL");
+        } catch {}
+      }
+      if (rec.videoPath && existsSync(rec.videoPath)) {
+        videoBody = await fsPromises.readFile(rec.videoPath);
+        try {
+          await fsPromises.unlink(rec.videoPath);
+        } catch {}
+      }
+    } catch (e) {
+      log(`[recording] video finalize failed: ${e.message}`);
+    }
+  }
+
+  const uploads = [];
+  if (rrwebBody) {
+    uploads.push(
+      uploadArtifact(
+        "rrweb",
+        rrwebBody,
+        "application/json+gzip",
+        sessionName,
+        { event_count: rec.rrwebEvents.length },
+      ),
+    );
+  }
+  if (videoBody) {
+    uploads.push(
+      uploadArtifact("video", videoBody, "video/webm", sessionName, {
+        fps: RECORDING.fps,
+      }),
+    );
+  }
+  await Promise.allSettled(uploads);
+}
+
+async function uploadArtifact(kind, body, contentType, sessionName, extra) {
+  const url = RECORDING.uploadUrl
+    .replace("{run_id}", encodeURIComponent(RECORDING.runId))
+    .replace("{kind}", encodeURIComponent(kind));
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 30_000);
+  try {
+    const res = await fetch(url, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${RECORDING.secret}`,
+        "Content-Type": contentType,
+        "X-WB-Run-Id": RECORDING.runId,
+        "X-WB-Recording-Kind": kind,
+        "X-WB-Session": sessionName,
+      },
+      body,
+      signal: controller.signal,
+    });
+    if (!res.ok) {
+      send({
+        type: "slice.recording.failed",
+        session: sessionName,
+        run_id: RECORDING.runId,
+        kind,
+        status: res.status,
+        reason: (await safeText(res)) || res.statusText || "upload rejected",
+      });
+      return;
+    }
+    send({
+      type: "slice.recording.uploaded",
+      session: sessionName,
+      run_id: RECORDING.runId,
+      kind,
+      bytes: body.length,
+      ...(extra || {}),
+    });
+  } catch (e) {
+    send({
+      type: "slice.recording.failed",
+      session: sessionName,
+      run_id: RECORDING.runId,
+      kind,
+      reason: e.name === "AbortError" ? "timeout" : e.message,
+    });
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function sanitize(s) {
+  return String(s || "default").replace(/[^A-Za-z0-9_-]+/g, "_");
 }
 
 // --- {{ env.X }} substitution ----------------------------------------------
@@ -369,6 +784,15 @@ let shuttingDown = false;
 async function shutdown() {
   if (shuttingDown) return;
   shuttingDown = true;
+  // Recordings must flush BEFORE browser.close() — rrweb tail drain needs a
+  // live page.evaluate() and CDP screencast needs a live CDPSession.
+  for (const [name, info] of sessions) {
+    try {
+      await flushRecording(info, name);
+    } catch (e) {
+      log(`[shutdown] flush recording ${name}: ${e.message}`);
+    }
+  }
   for (const [name, info] of sessions) {
     try {
       await info.browser.close();

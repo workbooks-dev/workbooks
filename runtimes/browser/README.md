@@ -29,6 +29,39 @@ Verb arguments support `{{ env.NAME }}` substitution at dispatch time, so any
 secrets your runbook needs (e.g. `HACKERNEWS_PASSWORD`) get pulled from the
 sidecar process env without ever appearing on stdout.
 
+## Optional: session recording (rrweb + CDP screencast)
+
+Each browser session can be recorded two ways and uploaded to a consumer
+endpoint at session close. Recording is **off by default** — set
+`WB_RECORDING_UPLOAD_URL` to turn it on.
+
+| Env var                            | Default    | Purpose                                          |
+|------------------------------------|------------|--------------------------------------------------|
+| `WB_RECORDING_UPLOAD_URL`          | *(unset)*  | POST target. Supports `{run_id}` / `{kind}` placeholders. Unset disables recording entirely. |
+| `WB_RECORDING_UPLOAD_SECRET`       | *(unset)*  | Sent as `Authorization: Bearer <…>`. Required when upload URL is set. |
+| `WB_RECORDING_RUN_ID`              | *(auto)*   | Explicit run id. Falls back to `TRIGGER_RUN_ID`, then a UUID generated at boot. |
+| `WB_RECORDING_SCREENCAST_FPS`      | `5`        | CDP screencast frame rate.                        |
+| `WB_RECORDING_SCREENCAST_QUALITY`  | `60`       | JPEG quality (0–100).                             |
+| `WB_RECORDING_RRWEB`               | `1`        | Set `0` to skip rrweb even if recording is on.    |
+| `WB_RECORDING_VIDEO`               | `0` if no `ffmpeg` | Set `0` to skip video even if `ffmpeg` is present. |
+
+Artifacts are two parallel POSTs per session, `kind ∈ {rrweb, video}`:
+
+- **rrweb** — gzipped JSON (`application/json+gzip`) — `{ run_id, session, event_count, events: [...] }`. DOM mutations + input events captured from every page; defaults mask all inputs for PII.
+- **video** — VP9 WebM (`video/webm`) — encoded from JPEG screencast frames via `ffmpeg`. Requires `ffmpeg` on `$PATH` (droplet install: `apt-get install -y ffmpeg`). If `ffmpeg` is missing the video kind silently disables and rrweb continues alone.
+
+Each POST carries headers `Authorization: Bearer <secret>`,
+`X-WB-Run-Id`, `X-WB-Recording-Kind`, `X-WB-Session`.
+
+### Callback events
+
+`wb` forwards `slice.recording.*` events emitted by the sidecar as
+`step.recording.*` on the callback stream:
+
+- `step.recording.started` — once per session, payload includes `run_id`, `kinds`.
+- `step.recording.uploaded` — on 2xx PUT, payload includes `kind`, `bytes`.
+- `step.recording.failed` — on network/ffmpeg/upload error, payload includes `kind`, `status?`, `reason`. Non-fatal: the slice still completes.
+
 ## Usage
 
 ```bash
@@ -105,7 +138,8 @@ Sidecar exits 0.
 
 - v0.1 — protocol skeleton (echo only)
 - v0.2 — `slice.session_started` event with stub URL
-- v0.3 — Browserbase + playwright-core, real `goto/fill/click/wait_for/extract/assert` (this)
-- v0.4 — `act:` recovery via Stagehand, `slice.recovered` events
-- v0.5 — `wait_for_mfa` / `wait_for_email_otp` emitting `slice.paused` with
+- v0.3 — Browserbase + playwright-core, real `goto/fill/click/wait_for/extract/assert`
+- v0.4 — rrweb + CDP screencast recording, uploaded to a consumer endpoint (this)
+- v0.5 — `act:` recovery via Stagehand, `slice.recovered` events
+- v0.6 — `wait_for_mfa` / `wait_for_email_otp` emitting `slice.paused` with
   `resume_url`
