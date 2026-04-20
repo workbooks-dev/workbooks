@@ -101,6 +101,7 @@ main() {
                 BUILT_BINARY="$TMPDIR/workbooks/target/release/wb"
                 if [ -f "$BUILT_BINARY" ]; then
                     install_binary "$BUILT_BINARY"
+                    maybe_install_browser_runtime
                     success
                     return
                 fi
@@ -123,7 +124,31 @@ main() {
     download "$DOWNLOAD_URL" "$TMPFILE" || error "Download failed"
 
     install_binary "$TMPFILE"
+    maybe_install_browser_runtime
     success
+}
+
+# Optional: install the browser runtime sidecar (Node package) when
+# WB_WITH_BROWSER=1 is set. Skipped silently when unset; prints a friendly
+# notice when requested but npm is missing.
+maybe_install_browser_runtime() {
+    if [ "${WB_WITH_BROWSER:-0}" != "1" ]; then
+        return 0
+    fi
+
+    printf "\n"
+    if ! command -v npm > /dev/null 2>&1; then
+        info "WB_WITH_BROWSER=1 set, but npm not found — skipping browser runtime."
+        printf "  ${DIM}Install Node 18+ and run: npm i -g wb-browser-runtime${RESET}\n"
+        return 0
+    fi
+
+    info "Installing browser runtime (wb-browser-runtime)"
+    if npm i -g wb-browser-runtime; then
+        info "Browser runtime installed"
+    else
+        printf "${BOLD}${RED}warn:${RESET} browser runtime install failed. Retry manually: npm i -g wb-browser-runtime\n" >&2
+    fi
 }
 
 install_binary() {
@@ -161,6 +186,11 @@ success() {
     printf "  ${DIM}With output:${RESET}     wb run notebook.md -o results.md\n"
     printf "  ${DIM}With secrets:${RESET}    wb run notebook.md --secrets doppler\n"
     printf "  ${DIM}Inspect:${RESET}         wb inspect notebook.md\n"
+    if [ "${WB_WITH_BROWSER:-0}" != "1" ]; then
+        printf "\n"
+        printf "  ${DIM}Browser blocks?${RESET}  npm i -g wb-browser-runtime\n"
+        printf "  ${DIM}Or re-run:${RESET}       WB_WITH_BROWSER=1 curl -fsSL https://get.workbooks.dev | sh\n"
+    fi
     printf "\n"
 }
 

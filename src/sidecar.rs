@@ -475,9 +475,8 @@ fn resolve_binary() -> Result<String, String> {
         return Ok(DEFAULT_SIDECAR_BINARY.to_string());
     }
     Err(format!(
-        "browser runtime binary not found. Install `{name}` on $PATH, or set \
-WB_BROWSER_RUNTIME=/path/to/{name}. See runtimes/browser/ in the wb repo for the \
-reference implementation.",
+        "browser runtime binary not found. Install with `npm i -g {name}` (requires \
+Node 18+), or set WB_BROWSER_RUNTIME=/path/to/{name} to point at a custom build.",
         name = DEFAULT_SIDECAR_BINARY
     ))
 }
