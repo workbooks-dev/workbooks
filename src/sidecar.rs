@@ -241,6 +241,7 @@ impl Sidecar {
             "on_pause": spec.on_pause,
             "line_number": spec.line_number,
             "section_index": spec.section_index,
+            "block_index": ctx.block_index,
             "verbs": spec.verbs,
         });
 

@@ -85,9 +85,44 @@ example, see the `browserbase-hn-upvoted-probe` runbook in the xatabase repo.
 | `extract`    | —                           | `selector` (rows), `fields: { name → spec }`    |
 | `assert`     | `assert: <selector>`        | `selector`, `text_contains`, `url_contains`     |
 | `eval`       | `eval: <js>`                | `script`                                        |
+| `save`       | `save: <name>`              | `name`, `value` (captures prior `extract`/`eval` when omitted) |
 
 `extract`'s `fields` entries are either a CSS selector string (returns
 `textContent`), or `{ selector, attr }` to read an attribute.
+
+## Artifacts
+
+`wb` exports `$WB_ARTIFACTS_DIR` to every cell — a per-run directory
+(`~/.wb/runs/<run_id>/artifacts/` by default) where any cell can drop files
+that later cells will read back. The browser `save:` verb is the
+sidecar-side equivalent:
+
+```yaml
+- extract:
+    selector: .order-row
+    fields:
+      id: .order-id
+      total: .total
+- save: orders            # writes $WB_ARTIFACTS_DIR/orders.json
+```
+
+Forms:
+
+- `save: <name>` — captures the previous verb's JSON output (from
+  `extract` or `eval`) into `<name>.json`.
+- `save: { name: orders, value: { ... } }` — writes an inline value.
+- `save: {}` — auto-names the file `cell-<block_index>-<rand>.json`.
+
+Downstream bash/python cells read the file directly:
+
+```bash
+jq '.[0].id' "$WB_ARTIFACTS_DIR/orders.json"
+```
+
+When `WB_ARTIFACTS_UPLOAD_URL` is set (template supports `{run_id}` and
+`{filename}`), `wb` POSTs each new artifact file after the cell that
+produced it completes. Auth reuses `WB_RECORDING_UPLOAD_SECRET`
+(`Authorization: Bearer <…>`); failures are logged and non-fatal.
 
 ## Protocol
 
@@ -139,7 +174,8 @@ Sidecar exits 0.
 - v0.1 — protocol skeleton (echo only)
 - v0.2 — `slice.session_started` event with stub URL
 - v0.3 — Browserbase + playwright-core, real `goto/fill/click/wait_for/extract/assert`
-- v0.4 — rrweb + CDP screencast recording, uploaded to a consumer endpoint (this)
-- v0.5 — `act:` recovery via Stagehand, `slice.recovered` events
-- v0.6 — `wait_for_mfa` / `wait_for_email_otp` emitting `slice.paused` with
+- v0.4 — rrweb + CDP screencast recording, uploaded to a consumer endpoint
+- v0.5 — `save:` verb + shared `$WB_ARTIFACTS_DIR` for cross-cell data (this)
+- v0.6 — `act:` recovery via Stagehand, `slice.recovered` events
+- v0.7 — `wait_for_mfa` / `wait_for_email_otp` emitting `slice.paused` with
   `resume_url`

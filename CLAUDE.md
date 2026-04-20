@@ -119,6 +119,22 @@ echo '{"otp_code": "..."}' | wb resume my-run --signal -   # stdin (agent-style)
 
 See `examples/wait-demo.md` for an end-to-end example.
 
+## Artifacts
+
+`wb` creates a per-run artifacts directory and exports `$WB_ARTIFACTS_DIR`
+into every cell's env. Any cell (bash, python, browser) can drop files
+there; later cells read them back. The browser runtime has a `save:` verb
+that persists the previous `extract`/`eval` result into the dir.
+
+Default path: `~/.wb/runs/<run_id>/artifacts/` when a run id is set via
+`WB_RECORDING_RUN_ID` or `TRIGGER_RUN_ID`; otherwise a fresh tmp dir per run.
+
+When `WB_ARTIFACTS_UPLOAD_URL` is set (template supports `{run_id}` and
+`{filename}`), `wb` POSTs each new artifact to that URL after the cell that
+wrote it completes, with `Authorization: Bearer $WB_RECORDING_UPLOAD_SECRET`.
+
+See `examples/artifacts-demo.md`.
+
 ## Checkpointing
 
 Resume workbook runs from where they stopped. Designed for agent workflows where blocks may fail due to external issues (API down, missing input, rate limits).

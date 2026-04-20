@@ -1,3 +1,4 @@
+mod artifacts;
 mod callback;
 mod checkpoint;
 mod executor;
@@ -668,6 +669,12 @@ fn run_single_collect(
         }
     }
 
+    // Artifacts: create the dir and inject WB_ARTIFACTS_DIR into every cell's
+    // env so bash/python/browser cells can drop files there. After each cell
+    // completes, `artifacts.sync()` picks up new files and uploads them when
+    // WB_ARTIFACTS_UPLOAD_URL + WB_RECORDING_UPLOAD_SECRET are set.
+    let mut artifacts = artifacts::Artifacts::init(&mut ctx.env);
+
     let start = Instant::now();
     let mut results = Vec::new();
     let mut block_idx = 0;
@@ -680,6 +687,7 @@ fn run_single_collect(
                     continue;
                 }
                 let result = session.execute_block(block, block_idx);
+                artifacts.sync();
                 results.push(result);
                 block_idx += 1;
             }
@@ -698,6 +706,7 @@ fn run_single_collect(
                     total: block_count,
                 };
                 let (result, pause) = session.execute_browser_slice(spec, block_idx, &ctx, None);
+                artifacts.sync();
                 if pause.is_some() {
                     // Folder mode: no --checkpoint, no way to resume. Fail loudly
                     // rather than leak a half-run browser slice.
@@ -1022,6 +1031,10 @@ fn run_single(
         stream_key: resolved_callback_key.unwrap_or_else(|| "wb:events".to_string()),
     });
 
+    // Artifacts: same semantics as the non-checkpoint path — create/read the
+    // dir, inject WB_ARTIFACTS_DIR, upload new files after each cell.
+    let mut artifacts = artifacts::Artifacts::init(&mut ctx.env);
+
     let start = Instant::now();
     let mut block_idx = 0;
     let mut session = executor::Session::new(ctx);
@@ -1198,6 +1211,7 @@ fn run_single(
             }
 
             let result = session.execute_block(block, block_idx);
+            artifacts.sync();
             let success = result.success();
 
             // Per-block progress
@@ -1325,6 +1339,7 @@ fn run_single(
             let restore = browser_restore.take();
             let (result, pause_info) =
                 session.execute_browser_slice(spec, block_idx, &slice_ctx, restore.as_ref());
+            artifacts.sync();
 
             if let Some(pause) = pause_info {
                 pause_browser_slice(

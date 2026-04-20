@@ -41,10 +41,11 @@ const SUPPORTS = [
   "extract",
   "assert",
   "eval",
+  "save",
 ];
 
 const BB_BASE = "https://api.browserbase.com";
-const VERSION = "0.4.0";
+const VERSION = "0.5.0";
 
 // --- Recording config -------------------------------------------------------
 //
@@ -597,7 +598,7 @@ function arg(value, primaryKey) {
   return {};
 }
 
-async function runVerb(page, verb, index) {
+async function runVerb(page, verb, index, ctx) {
   const name = verbName(verb);
   const raw = verb[name];
   const a = expand(arg(raw, defaultKey(name)));
@@ -670,6 +671,7 @@ async function runVerb(page, verb, index) {
       // Emit as JSON to stdout so wb captures it in step.complete.stdout.
       // Pretty-printed for readability when a runbook surfaces the output.
       console.log(JSON.stringify(items, null, 2));
+      if (ctx) ctx.lastResult = items;
       return `${rowSelector} → ${items.length} rows`;
     }
     case "assert": {
@@ -695,11 +697,61 @@ async function runVerb(page, verb, index) {
       // Run arbitrary JS in the page; result is JSON-serialized to stdout.
       const result = await page.evaluate(a.script);
       console.log(JSON.stringify(result, null, 2));
+      if (ctx) ctx.lastResult = result;
       return `script ran`;
+    }
+    case "save": {
+      // Persist a JSON artifact into $WB_ARTIFACTS_DIR so later cells can read
+      // it and wb can upload it. Captures the previous verb's output unless
+      // the author provides an explicit `value:`.
+      const artifactsDir = (process.env.WB_ARTIFACTS_DIR || "").trim();
+      if (!artifactsDir) {
+        throw new Error(
+          "save: $WB_ARTIFACTS_DIR is not set — run this workbook via `wb run` (wb exports the dir for you)",
+        );
+      }
+      const explicitValue = a.value !== undefined;
+      const payload = explicitValue ? a.value : ctx?.lastResult;
+      if (payload === undefined) {
+        throw new Error(
+          "save: no value provided and no prior extract/eval result to capture",
+        );
+      }
+      const name =
+        typeof a.name === "string" && a.name.trim().length > 0
+          ? sanitizeArtifactName(a.name)
+          : autoArtifactName(ctx?.blockIndex ?? index);
+      const filename = name.endsWith(".json") ? name : `${name}.json`;
+      const full = path.join(artifactsDir, filename);
+      await fsPromises.mkdir(artifactsDir, { recursive: true });
+      await fsPromises.writeFile(
+        full,
+        JSON.stringify(payload, null, 2),
+        "utf8",
+      );
+      send({
+        type: "slice.artifact_saved",
+        filename,
+        path: full,
+        bytes: Buffer.byteLength(JSON.stringify(payload)),
+      });
+      return `→ ${filename}`;
     }
     default:
       throw new Error(`unsupported verb: ${name}`);
   }
+}
+
+function sanitizeArtifactName(s) {
+  // Keep author-chosen names readable but safe as filenames. Drop anything
+  // that could escape the artifacts dir (slashes, NULs, etc.).
+  return String(s).replace(/[^A-Za-z0-9_.-]+/g, "_").slice(0, 200);
+}
+
+function autoArtifactName(blockIndex) {
+  const rand = randomUUID().replace(/-/g, "").slice(0, 8);
+  const n = Number.isFinite(blockIndex) ? blockIndex : 0;
+  return `cell-${n}-${rand}`;
 }
 
 function defaultKey(name) {
@@ -716,6 +768,8 @@ function defaultKey(name) {
       return "key";
     case "eval":
       return "script";
+    case "save":
+      return "name";
     default:
       return "value";
   }
@@ -733,6 +787,8 @@ async function handleSlice(msg) {
   const verbs = Array.isArray(msg.verbs) ? msg.verbs : [];
   const sessionName = msg.session || "default";
   const restore = msg.restore || null;
+  const blockIndex =
+    typeof msg.block_index === "number" ? msg.block_index : null;
 
   let session;
   try {
@@ -750,11 +806,14 @@ async function handleSlice(msg) {
   // is where we'd jump to verbs[restore.state.verb_index].
   const startAt = restore?.state?.verb_index ?? 0;
 
+  // Per-slice scratch so `save:` can capture the prior verb's JSON output.
+  const sliceCtx = { lastResult: undefined, blockIndex };
+
   for (let i = startAt; i < verbs.length; i++) {
     const v = verbs[i];
     const name = verbName(v);
     try {
-      const summary = await runVerb(session.page, v, i);
+      const summary = await runVerb(session.page, v, i, sliceCtx);
       send({
         type: "verb.complete",
         verb: name,
