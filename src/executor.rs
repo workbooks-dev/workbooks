@@ -17,12 +17,47 @@ pub struct BlockResult {
     pub stderr: String,
     pub exit_code: i32,
     pub duration: Duration,
+    /// Machine-readable failure category. `None` for a successful block.
+    /// Agents branch on this instead of regex-parsing stderr. Stable tokens:
+    ///   `spawn_not_found`  — ENOENT launching the runtime binary
+    ///   `spawn_failed`     — other OS-level spawn failure
+    ///   `nonzero_exit`     — block ran but exited non-zero
+    ///   `signal_killed`    — killed by a signal (exit code ≥ 128 on Unix)
+    ///   `timeout`          — reached the block-level timeout
+    ///   `sandbox_failed`   — `requires:` sandbox setup or build failed
+    ///   `read_error`       — workbook file unreadable (run_single_collect path)
+    pub error_type: Option<String>,
 }
 
 impl BlockResult {
     pub fn success(&self) -> bool {
         self.exit_code == 0
     }
+
+    /// Post-hoc classification: if the block failed and no specific
+    /// `error_type` has been set (e.g. by a spawn-error path), infer one
+    /// from the exit code. Idempotent.
+    pub fn auto_classify(&mut self) {
+        if self.error_type.is_none() && self.exit_code != 0 {
+            let kind = classify_exit(self.exit_code);
+            if !kind.is_empty() {
+                self.error_type = Some(kind.to_string());
+            }
+        }
+    }
+}
+
+/// Categorize a non-zero exit into a stable error-type token.
+pub fn classify_exit(exit_code: i32) -> &'static str {
+    if exit_code == 0 {
+        return "";
+    }
+    // Unix convention: values ≥ 128 encode a signal (e.g. 137 = SIGKILL, 143 = SIGTERM).
+    #[cfg(unix)]
+    if exit_code >= 128 && exit_code < 128 + 64 {
+        return "signal_killed";
+    }
+    "nonzero_exit"
 }
 
 pub struct ExecutionContext {
@@ -335,7 +370,9 @@ impl Session {
 
         // Fall back to one-shot for unsupported languages
         if !supports_session(&lang) {
-            return execute_block_oneshot(block, index, &self.ctx);
+            let mut r = execute_block_oneshot(block, index, &self.ctx);
+            r.auto_classify();
+            return r;
         }
 
         // Ensure persistent process exists
@@ -346,6 +383,13 @@ impl Session {
                     self.processes.insert(lang.clone(), proc);
                 }
                 Err(e) => {
+                    // spawn_persistent now returns spawn_error_message text
+                    // for ENOENT; propagate the type so agents branch on it.
+                    let kind = if e.starts_with('`') && e.contains("not found on PATH") {
+                        "spawn_not_found"
+                    } else {
+                        "spawn_failed"
+                    };
                     return BlockResult {
                         block_index: index,
                         language: block.language.clone(),
@@ -353,6 +397,7 @@ impl Session {
                         stderr: e,
                         exit_code: 127,
                         duration: start.elapsed(),
+                        error_type: Some(kind.to_string()),
                     };
                 }
             }
@@ -377,22 +422,23 @@ impl Session {
             self.processes.remove(&lang);
         }
 
-        BlockResult {
+        let mut result = BlockResult {
             block_index: index,
             language: block.language.clone(),
             stdout: redact_output(&stdout, &self.ctx.redact_values),
             stderr: redact_output(&stderr, &self.ctx.redact_values),
             exit_code,
             duration: start.elapsed(),
-        }
+            error_type: None,
+        };
+        result.auto_classify();
+        result
     }
 
-    /// Dispatch a browser slice to the long-lived sidecar.
-    ///
-    /// Gated behind `WB_EXPERIMENTAL_BROWSER=1`. Spawns the sidecar lazily on
-    /// the first call and reuses it for the rest of the run. Returns
-    /// `(BlockResult, Some(PauseInfo))` when the slice paused for a human;
-    /// main is expected to persist a pending descriptor and exit 42.
+    /// Dispatch a browser slice to the long-lived sidecar. Spawns the sidecar
+    /// lazily on the first call and reuses it for the rest of the run.
+    /// Returns `(BlockResult, Some(PauseInfo))` when the slice paused for a
+    /// human; main is expected to persist a pending descriptor and exit 42.
     #[allow(clippy::too_many_arguments)]
     pub fn execute_browser_slice(
         &mut self,
@@ -402,27 +448,6 @@ impl Session {
         restore: Option<&RestoreArgs>,
     ) -> (BlockResult, Option<PauseInfo>) {
         let start = Instant::now();
-
-        if std::env::var("WB_EXPERIMENTAL_BROWSER").ok().as_deref() != Some("1") {
-            let msg = format!(
-                "`browser` blocks are experimental. Set WB_EXPERIMENTAL_BROWSER=1 to enable. (L{})",
-                spec.line_number
-            );
-            if !self.ctx.quiet {
-                crate::output::print_stderr_dim(&msg);
-            }
-            return (
-                BlockResult {
-                    block_index: index,
-                    language: "browser".to_string(),
-                    stdout: String::new(),
-                    stderr: msg,
-                    exit_code: 1,
-                    duration: start.elapsed(),
-                },
-                None,
-            );
-        }
 
         if self.browser_sidecar.is_none() {
             match Sidecar::spawn(&self.ctx.env, &self.ctx.working_dir) {
@@ -439,6 +464,7 @@ impl Session {
                             stderr: e,
                             exit_code: 127,
                             duration: start.elapsed(),
+                            error_type: Some("spawn_not_found".to_string()),
                         },
                         None,
                     );
@@ -452,14 +478,16 @@ impl Session {
             .unwrap()
             .run_slice(spec, self.ctx.quiet, ctx, restore);
 
-        let block = BlockResult {
+        let mut block = BlockResult {
             block_index: index,
             language: "browser".to_string(),
             stdout: redact_output(&outcome.stdout, &self.ctx.redact_values),
             stderr: redact_output(&outcome.stderr, &self.ctx.redact_values),
             exit_code: outcome.exit_code,
             duration: start.elapsed(),
+            error_type: None,
         };
+        block.auto_classify();
         (block, outcome.pause)
     }
 }
@@ -806,23 +834,34 @@ pub fn execute_block_oneshot(
             let status = child.wait();
             let exit_code = status.map(|s| s.code().unwrap_or(-1)).unwrap_or(-1);
 
-            BlockResult {
+            let mut r = BlockResult {
                 block_index: index,
                 language: block.language.clone(),
                 stdout: redact_output(stdout_buf.trim_end(), &ctx.redact_values),
                 stderr: redact_output(stderr_buf.trim_end(), &ctx.redact_values),
                 exit_code,
                 duration: start.elapsed(),
+                error_type: None,
+            };
+            r.auto_classify();
+            r
+        }
+        Err(e) => {
+            let kind = if e.kind() == std::io::ErrorKind::NotFound {
+                "spawn_not_found"
+            } else {
+                "spawn_failed"
+            };
+            BlockResult {
+                block_index: index,
+                language: block.language.clone(),
+                stdout: String::new(),
+                stderr: spawn_error_message(&effective_program, &block.language, &e),
+                exit_code: 127,
+                duration: start.elapsed(),
+                error_type: Some(kind.to_string()),
             }
         }
-        Err(e) => BlockResult {
-            block_index: index,
-            language: block.language.clone(),
-            stdout: String::new(),
-            stderr: spawn_error_message(&effective_program, &block.language, &e),
-            exit_code: 127,
-            duration: start.elapsed(),
-        },
     }
 }
 

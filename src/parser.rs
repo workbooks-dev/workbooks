@@ -333,12 +333,6 @@ fn parse_info_string(info: &str) -> InfoString {
 }
 
 fn extract_sections(body: &str) -> Vec<Section> {
-    // Info-string attribute flags (`{no-run}`, `{silent}`) are gated behind the
-    // experimental env var. When disabled, fence lines like `bash {no-run}` stay
-    // as-is and fall through to the non-executable-language branch — preserving
-    // prior behavior so this feature is reversible.
-    let flags_enabled = std::env::var("WB_EXPERIMENTAL_BLOCK_FLAGS").ok().as_deref() == Some("1");
-
     let mut sections = Vec::new();
     let mut current_text = String::new();
     let mut lines = body.lines().enumerate().peekable();
@@ -346,14 +340,7 @@ fn extract_sections(body: &str) -> Vec<Section> {
     while let Some((line_num, line)) = lines.next() {
         if line.starts_with("```") && line.len() > 3 {
             // Opening fence with language + optional `{flag, flag}` attribute cluster
-            let info = if flags_enabled {
-                parse_info_string(&line[3..])
-            } else {
-                InfoString {
-                    language: line[3..].trim().to_string(),
-                    ..Default::default()
-                }
-            };
+            let info = parse_info_string(&line[3..]);
             let language = info.language.clone();
 
             // Wait fence: parse YAML body into a WaitSpec
@@ -964,64 +951,10 @@ echo "this runs"
         assert!(!info.skip_execution);
     }
 
-    // --- extract_sections honors env gate ---
-    //
-    // These tests mutate WB_EXPERIMENTAL_BLOCK_FLAGS. A module-level mutex
-    // serializes them so parallel test execution can't interleave env writes.
-
-    use std::sync::Mutex;
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
-
-    struct EnvGuard {
-        prev: Option<String>,
-    }
-
-    impl EnvGuard {
-        fn set(value: Option<&str>) -> Self {
-            let prev = std::env::var("WB_EXPERIMENTAL_BLOCK_FLAGS").ok();
-            match value {
-                Some(v) => std::env::set_var("WB_EXPERIMENTAL_BLOCK_FLAGS", v),
-                None => std::env::remove_var("WB_EXPERIMENTAL_BLOCK_FLAGS"),
-            }
-            EnvGuard { prev }
-        }
-    }
-
-    impl Drop for EnvGuard {
-        fn drop(&mut self) {
-            match &self.prev {
-                Some(v) => std::env::set_var("WB_EXPERIMENTAL_BLOCK_FLAGS", v),
-                None => std::env::remove_var("WB_EXPERIMENTAL_BLOCK_FLAGS"),
-            }
-        }
-    }
-
-    #[test]
-    fn test_flags_gated_off_by_default() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        let _env = EnvGuard::set(None);
-
-        let input = r#"```bash {no-run}
-echo "should not run"
-```
-
-```bash
-echo "should run"
-```
-"#;
-        let wb = parse(input);
-        // With flag off: `bash {no-run}` is not recognized as executable
-        // (the brace cluster isn't stripped), so it falls through to the
-        // non-executable branch and is treated as documentation. Only the
-        // plain `bash` block counts.
-        assert_eq!(wb.code_block_count(), 1);
-    }
+    // --- {no-run} and {silent} fence flags (stable since v0.9.8) ---
 
     #[test]
     fn test_no_run_excluded_from_count() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        let _env = EnvGuard::set(Some("1"));
-
         let input = r#"```bash {no-run}
 echo "illustrative"
 ```
@@ -1053,9 +986,6 @@ echo "runs"
 
     #[test]
     fn test_silent_counts_toward_total() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        let _env = EnvGuard::set(Some("1"));
-
         let input = r#"```bash {silent}
 echo "setup"
 ```
@@ -1084,9 +1014,6 @@ echo "main"
 
     #[test]
     fn test_browser_flags_parsed() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        let _env = EnvGuard::set(Some("1"));
-
         let input = r#"```browser {no-run}
 session: airbase
 verbs:

@@ -136,6 +136,9 @@ struct JsonBlockResult {
     stdout: String,
     #[serde(skip_serializing_if = "String::is_empty")]
     stderr: String,
+    /// Machine-readable failure category; omitted on success.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error_type: Option<String>,
 }
 
 /// Format results in the requested format
@@ -194,6 +197,7 @@ fn build_json_output(workbook: &Workbook, summary: &RunSummary) -> JsonOutput {
                 duration_ms: r.duration.as_millis() as u64,
                 stdout: r.stdout.clone(),
                 stderr: r.stderr.clone(),
+                error_type: r.error_type.clone(),
             }
         })
         .collect();
@@ -395,6 +399,7 @@ fn build_batch_output(summaries: &[RunSummary], dir: &str, total_duration: Durat
                     duration_ms: r.duration.as_millis() as u64,
                     stdout: r.stdout.clone(),
                     stderr: r.stderr.clone(),
+                    error_type: r.error_type.clone(),
                 })
                 .collect();
 

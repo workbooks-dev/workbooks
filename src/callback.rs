@@ -63,6 +63,7 @@ fn build_step_complete_payload(
             "duration_ms": result.duration.as_millis() as u64,
             "stdout": truncate_for_callback(&result.stdout),
             "stderr": truncate_for_callback(&result.stderr),
+            "error_type": result.error_type,
         },
         "progress": {
             "completed": completed,
@@ -134,6 +135,7 @@ impl CallbackConfig {
                 "line_number": line_number,
                 "exit_code": result.exit_code,
                 "stderr": &result.stderr,
+                "error_type": result.error_type,
             },
             "progress": {
                 "completed": completed,
@@ -473,6 +475,7 @@ mod tests {
             stderr: "".to_string(),
             exit_code: 0,
             duration: std::time::Duration::from_millis(16),
+            error_type: None,
         };
         let payload = build_step_complete_payload(
             &result,
@@ -545,6 +548,7 @@ mod tests {
             stderr: "oops\0binary".to_string(),
             exit_code: 1,
             duration: std::time::Duration::from_millis(5),
+            error_type: None,
         };
         let payload = build_step_complete_payload(
             &result,

@@ -40,8 +40,6 @@ echo ""
 # Clean up any leftover state from previous runs
 cleanup
 
-export WB_EXPERIMENTAL_WAIT=1
-
 # --- Step 1: Run the workbook, expect exit 42 (paused) ---
 echo "Step 1: Run wait-demo.md (expect pause at wait block)"
 set +e

@@ -275,11 +275,6 @@ pub fn run_in_sandbox(
     // Prevent sandbox recursion
     cmd.args(["-e", "WB_SANDBOX_INNER=1"]);
 
-    // Pass through experimental flags
-    if std::env::var("WB_EXPERIMENTAL_WAIT").ok().as_deref() == Some("1") {
-        cmd.args(["-e", "WB_EXPERIMENTAL_WAIT=1"]);
-    }
-
     cmd.arg(image_tag);
 
     // wb run <file> inside container

@@ -19,7 +19,7 @@
 //! | 1    | `EXIT_BLOCK_FAILED`       | A workbook block exited non-zero (with `--bail`, or run-complete failure count > 0). |
 //! | 2    | `EXIT_USAGE`              | Bad CLI args, unreadable workbook file, or no executable blocks. |
 //! | 3    | `EXIT_WORKBOOK_INVALID`   | Workbook parsed but shape is wrong for this command (e.g. `resume` on a non-paused checkpoint). |
-//! | 5    | `EXIT_SANDBOX_UNAVAILABLE`| `requires:` sandbox declared but `WB_EXPERIMENTAL_SANDBOX=1` not set, or Docker is missing / image build failed. |
+//! | 5    | `EXIT_SANDBOX_UNAVAILABLE`| `requires:` sandbox declared but Docker is missing or the image build failed. |
 //! | 6    | `EXIT_CHECKPOINT_BUSY`    | Another `wb` process holds the session flock on the requested checkpoint id. |
 //! | 7    | `EXIT_SIGNAL_TIMEOUT`     | A `wait` pause expired and `on_timeout: abort` (or equivalent) fired. |
 //! | 42   | `EXIT_PAUSED`             | Run paused on a `wait` or browser-slice pause — not an error; an external resolver should eventually `wb resume`. |

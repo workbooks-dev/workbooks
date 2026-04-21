@@ -82,16 +82,15 @@ wb run file.md -C /path/to/dir        # Set working directory
 wb run file.md --checkpoint my-run    # Save/resume execution state
 wb run file.md --callback <url>       # POST events to webhook
 wb inspect file.md                    # Show structure without running
-wb pending                            # List paused workbooks (experimental)
+wb pending                            # List paused workbooks
 wb resume <id> --signal <file>        # Resume a paused workbook with a signal payload
 wb cancel <id>                        # Drop a paused workbook without resuming
 ```
 
-## Pausing on external signals (experimental)
+## Pausing on external signals
 
-Behind `WB_EXPERIMENTAL_WAIT=1`, workbooks can pause on a `wait` fence until an
-external resolver (an agent, webhook handler, cron job, or a human) delivers the
-awaited payload:
+Workbooks can pause on a `wait` fence until an external resolver (an agent,
+webhook handler, cron job, or a human) delivers the awaited payload:
 
 ```markdown
 ```wait
@@ -174,9 +173,9 @@ Headers sent:
 
 Payloads include `checkpoint_id`, `workbook`, `progress`, and `timestamp`. The `checkpoint.failed` event includes `failed_block.stderr` for diagnostics.
 
-## Sandbox execution (experimental)
+## Sandbox execution
 
-Behind `WB_EXPERIMENTAL_SANDBOX=1`, workbooks can declare system/language deps in frontmatter and `wb` builds a Docker image, then re-invokes itself inside the container with the workbook mounted:
+Workbooks can declare system/language deps in frontmatter and `wb` builds a Docker image, then re-invokes itself inside the container with the workbook mounted:
 
 ```yaml
 ---
@@ -198,14 +197,14 @@ When `requires:` is set, `wb`:
 5. Re-enters the container on `wb resume` for paused workbooks (pending descriptors live on the host via the mount).
 
 ```bash
-WB_EXPERIMENTAL_SANDBOX=1 wb run examples/sandbox-demo.md
+wb run examples/sandbox-demo.md
 wb containers list          # show cached sandbox images
 wb containers build some/   # pre-build images for a folder of workbooks
 wb containers prune         # remove all wb-sandbox images
 wb inspect file.md          # shows resolved sandbox config + image tag
 ```
 
-Without the flag, a workbook with `requires:` exits 1 with an error asking you to set `WB_EXPERIMENTAL_SANDBOX=1`. See `examples/sandbox-demo.md` for a minimal working example.
+Docker must be installed and running. If missing or the image build fails, `wb` exits with code 5 (`EXIT_SANDBOX_UNAVAILABLE`). See `examples/sandbox-demo.md` for a minimal working example.
 
 ## Secret Providers
 

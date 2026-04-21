@@ -461,6 +461,7 @@ fn run_single_collect(
                     stderr: format!("read error: {}", e),
                     exit_code: 1,
                     duration: std::time::Duration::ZERO,
+                    error_type: Some("read_error".to_string()),
                 }],
             };
         }
@@ -470,28 +471,11 @@ fn run_single_collect(
     let block_count = workbook.code_block_count();
 
     // Sandbox: if `requires` is present and we're not inside a container,
-    // build the image and re-invoke wb inside Docker.
+    // build the image and re-invoke wb inside Docker. If Docker is missing
+    // or the build fails, `sandbox::build_image` surfaces a clear error and
+    // the caller exits with EXIT_SANDBOX_UNAVAILABLE.
     if let Some(ref requires) = workbook.frontmatter.requires {
         if std::env::var("WB_SANDBOX_INNER").ok().as_deref() != Some("1") {
-            if std::env::var("WB_EXPERIMENTAL_SANDBOX").ok().as_deref() != Some("1") {
-                return output::RunSummary {
-                    source_file: file.to_string(),
-                    run_id: run_id.clone(),
-                    total_blocks: block_count,
-                    passed: 0,
-                    failed: 1,
-                    total_duration: std::time::Duration::ZERO,
-                    results: vec![executor::BlockResult {
-                        block_index: 0,
-                        language: "sandbox".to_string(),
-                        stdout: String::new(),
-                        stderr: "requires sandbox is experimental. Set WB_EXPERIMENTAL_SANDBOX=1 to enable.".to_string(),
-                        exit_code: 1,
-                        duration: std::time::Duration::ZERO,
-                    }],
-                };
-            }
-
             let workbook_dir = std::path::Path::new(file)
                 .parent()
                 .filter(|p| !p.as_os_str().is_empty())
@@ -515,6 +499,7 @@ fn run_single_collect(
                             stderr: format!("sandbox: {}", e),
                             exit_code: 1,
                             duration: std::time::Duration::ZERO,
+                            error_type: Some("sandbox_failed".to_string()),
                         }],
                     };
                 }
@@ -576,6 +561,7 @@ fn run_single_collect(
                             stderr: format!("sandbox run: {}", e),
                             exit_code: 1,
                             duration: std::time::Duration::ZERO,
+                            error_type: Some("sandbox_failed".to_string()),
                         }],
                     };
                 }
@@ -595,6 +581,7 @@ fn run_single_collect(
                     stderr: String::new(),
                     exit_code,
                     duration: start.elapsed(),
+                    error_type: Some("sandbox_failed".to_string()),
                 }],
             };
         }
@@ -643,6 +630,7 @@ fn run_single_collect(
                         stderr: e,
                         exit_code: 1,
                         duration: std::time::Duration::ZERO,
+                        error_type: Some("env_file_failed".to_string()),
                     }],
                 };
             }
@@ -683,6 +671,7 @@ fn run_single_collect(
                         stderr: e,
                         exit_code: 1,
                         duration: std::time::Duration::ZERO,
+                        error_type: Some("setup_failed".to_string()),
                     }],
                 };
             }
@@ -740,6 +729,7 @@ fn run_single_collect(
                         ),
                         exit_code: 1,
                         duration: result.duration,
+                        error_type: Some("pause_without_checkpoint".to_string()),
                     });
                     break;
                 }
@@ -757,6 +747,7 @@ fn run_single_collect(
                     ),
                     exit_code: 1,
                     duration: std::time::Duration::ZERO,
+                    error_type: Some("wait_without_checkpoint".to_string()),
                 });
                 break;
             }
@@ -819,23 +810,17 @@ fn run_single(
     if block_count == 0 {
         eprintln!(
             "no executable blocks in {}. Known runtimes: bash, sh, zsh, python, node, ruby, perl, r, php, lua, swift, go. \
-             Check your fence language tags — `{{no-run}}` requires WB_EXPERIMENTAL_BLOCK_FLAGS=1.",
+             Check your fence language tags — `{{no-run}}` and `{{silent}}` are stable as of v0.9.8.",
             file
         );
         std::process::exit(exit_codes::EXIT_USAGE);
     }
 
     // Sandbox: if `requires` is present and we're not already inside a container,
-    // build the image and re-invoke wb inside Docker.
+    // build the image and re-invoke wb inside Docker. If Docker is missing the
+    // build fails and we exit with EXIT_SANDBOX_UNAVAILABLE.
     if let Some(ref requires) = workbook.frontmatter.requires {
         if std::env::var("WB_SANDBOX_INNER").ok().as_deref() != Some("1") {
-            if std::env::var("WB_EXPERIMENTAL_SANDBOX").ok().as_deref() != Some("1") {
-                eprintln!(
-                    "error: `requires` sandbox is experimental. Set WB_EXPERIMENTAL_SANDBOX=1 to enable."
-                );
-                std::process::exit(exit_codes::EXIT_SANDBOX_UNAVAILABLE);
-            }
-
             let workbook_dir = std::path::Path::new(file)
                 .parent()
                 .filter(|p| !p.as_os_str().is_empty())
@@ -1898,14 +1883,6 @@ fn pause_for_signal(
     _results: &[executor::BlockResult],
     cb: Option<&callback::CallbackConfig>,
 ) -> ! {
-    if std::env::var("WB_EXPERIMENTAL_WAIT").ok().as_deref() != Some("1") {
-        eprintln!(
-            "error: `wait` blocks are experimental. Set WB_EXPERIMENTAL_WAIT=1 to enable. (L{})",
-            spec.line_number
-        );
-        std::process::exit(1);
-    }
-
     let id = match checkpoint_id.as_deref() {
         Some(id) => id,
         None => {
@@ -2248,14 +2225,15 @@ fn cmd_containers(args: &[String]) {
 fn print_containers_usage() {
     println!("usage: wb containers <build|list|prune>");
     println!();
-    println!("Manage cached Docker images for sandboxed workbooks (experimental).");
+    println!("Manage cached Docker images for sandboxed workbooks.");
     println!();
     println!("Subcommands:");
     println!("  build [path]   Build sandbox images for workbooks (file or directory)");
     println!("  list           List cached sandbox images");
     println!("  prune          Remove all sandbox images");
     println!();
-    println!("Sandboxing is gated behind WB_EXPERIMENTAL_SANDBOX=1 when running workbooks.");
+    println!("Workbooks with a `requires:` frontmatter block build a Docker image on first run.");
+    println!("Docker must be installed and running. If missing, `wb` exits with code 5.");
 }
 
 fn print_containers_usage_stderr() {
@@ -2483,11 +2461,6 @@ fn cmd_resume(args: &[String]) {
     let mut parse_args = vec!["wb-resume".to_string()];
     parse_args.extend_from_slice(args);
     let cli = ResumeCli::parse_from(parse_args);
-
-    if std::env::var("WB_EXPERIMENTAL_WAIT").ok().as_deref() != Some("1") {
-        eprintln!("error: `wb resume` is experimental. Set WB_EXPERIMENTAL_WAIT=1 to enable.");
-        std::process::exit(1);
-    }
 
     // Build env table: process env first, then --env-file overlays. Used to
     // resolve signal config when the user omits an id (auto-detect mode).
@@ -3145,6 +3118,7 @@ mod tests {
             stderr: String::new(),
             exit_code: 0,
             duration: std::time::Duration::from_millis(50),
+            error_type: None,
         };
         c.add_result(&result, 10, Some("Setup"), "echo ok");
         assert_eq!(c.next_block, 1);
@@ -3215,6 +3189,7 @@ mod tests {
             stderr: String::new(),
             exit_code: 0,
             duration: std::time::Duration::from_millis(120),
+            error_type: None,
         };
         let r2 = executor::BlockResult {
             block_index: 1,
@@ -3223,6 +3198,7 @@ mod tests {
             stderr: "warning\n".to_string(),
             exit_code: 0,
             duration: std::time::Duration::from_millis(300),
+            error_type: None,
         };
         c.add_result(&r1, 5, None, "echo hello");
         c.add_result(&r2, 15, Some("Compute"), "print(42)");
@@ -3247,6 +3223,7 @@ mod tests {
             stderr: String::new(),
             exit_code: 0,
             duration: std::time::Duration::ZERO,
+            error_type: None,
         };
         c.add_result(&r, 5, None, "echo hello");
         let hash = c.results[0].code_hash.as_ref().unwrap();
@@ -3460,7 +3437,6 @@ echo "step-2-got: $my_var"
                 "--checkpoint",
                 ckpt_id,
             ])
-            .env("WB_EXPERIMENTAL_WAIT", "1")
             .output()
             .expect("wb run should execute");
 
@@ -3496,7 +3472,6 @@ echo "step-2-got: $my_var"
 
         let resume_output = std::process::Command::new(&wb_bin)
             .args(["resume", ckpt_id, "--signal", signal_path.to_str().unwrap()])
-            .env("WB_EXPERIMENTAL_WAIT", "1")
             .output()
             .expect("wb resume should execute");
 
@@ -3533,72 +3508,6 @@ echo "step-2-got: $my_var"
 
         // Clean up
         let _ = checkpoint::delete(ckpt_id);
-        let _ = std::fs::remove_dir_all(&tmp);
-    }
-
-    #[test]
-    fn integration_wait_without_experimental_flag_exits_1() {
-        let build = std::process::Command::new("cargo")
-            .args(["build"])
-            .current_dir(env!("CARGO_MANIFEST_DIR"))
-            .output()
-            .expect("cargo build should run");
-        assert!(build.status.success());
-
-        let wb_bin = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("target")
-            .join("debug")
-            .join("wb");
-
-        let tmp = std::env::temp_dir().join("wb-test-no-flag");
-        let _ = std::fs::remove_dir_all(&tmp);
-        std::fs::create_dir_all(&tmp).unwrap();
-
-        let workbook_path = tmp.join("wait-noflag.md");
-        std::fs::write(
-            &workbook_path,
-            r#"```bash
-echo "before"
-```
-
-```wait
-kind: test
-bind: x
-```
-
-```bash
-echo "after"
-```
-"#,
-        )
-        .unwrap();
-
-        let output = std::process::Command::new(&wb_bin)
-            .args([
-                "run",
-                workbook_path.to_str().unwrap(),
-                "--checkpoint",
-                "noflag-test",
-            ])
-            .env_remove("WB_EXPERIMENTAL_WAIT")
-            .output()
-            .expect("wb run should execute");
-
-        let exit_code = output.status.code().unwrap_or(-1);
-        assert_eq!(
-            exit_code, 1,
-            "expected exit 1 without WB_EXPERIMENTAL_WAIT, got {}",
-            exit_code
-        );
-
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(
-            stderr.contains("experimental"),
-            "stderr should mention experimental: {}",
-            stderr
-        );
-
-        let _ = checkpoint::delete("noflag-test");
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
@@ -3652,7 +3561,6 @@ echo "pin=$pin"
                 "--checkpoint",
                 ckpt_id,
             ])
-            .env("WB_EXPERIMENTAL_WAIT", "1")
             .output()
             .expect("wb run");
         assert_eq!(run.status.code().unwrap_or(-1), 42);
@@ -3660,7 +3568,6 @@ echo "pin=$pin"
         // Resume with --value instead of --signal
         let resume = std::process::Command::new(&wb_bin)
             .args(["resume", ckpt_id, "--value", "9999"])
-            .env("WB_EXPERIMENTAL_WAIT", "1")
             .output()
             .expect("wb resume");
 

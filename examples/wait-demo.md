@@ -7,10 +7,9 @@ title: Wait Demo — Manual Signal Resolver
 Demonstrates the `wait` primitive end-to-end with `kind: manual` — no
 external resolver needed, a human runs `wb resume` to unblock the workbook.
 
-This example requires the experimental flag:
+Run it like any workbook:
 
 ```
-export WB_EXPERIMENTAL_WAIT=1
 wb run examples/wait-demo.md --checkpoint demo-1
 ```
 

@@ -10,7 +10,7 @@ requires:
 # Sandbox Demo
 
 This workbook runs inside a Docker container with `jq`, `curl`, and `httpx` installed.
-Set `WB_EXPERIMENTAL_SANDBOX=1` to enable.
+Requires Docker to be installed and running.
 
 ## System deps available
 
