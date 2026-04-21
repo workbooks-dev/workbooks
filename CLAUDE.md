@@ -103,7 +103,8 @@ wb run file.md -C /path/to/dir        # Set working directory
 wb run file.md --checkpoint my-run    # Save/resume execution state
 wb run file.md --callback <url>       # POST events to webhook
 wb inspect file.md                    # Show structure without running
-wb pending                            # List paused workbooks
+wb pending                            # List paused workbooks (auto-reaps expired abort-mode descriptors)
+wb pending --no-reap                  # List without reaping — safe for automation/inspection
 wb resume <id> --signal <file>        # Resume a paused workbook with a signal payload
 wb cancel <id>                        # Drop a paused workbook without resuming
 ```
@@ -138,6 +139,16 @@ echo '{"otp_code": "..."}' | wb resume my-run --signal -   # stdin (agent-style)
 ```
 
 See `examples/wait-demo.md` for an end-to-end example.
+
+### Timeout reaping
+
+Because `wb` is not a daemon, expired `wait` timeouts only fire when `wb`
+next runs. `wb pending` handles this on every invocation: it sweeps
+descriptors whose `timeout_at` has passed and whose `on_timeout` is `abort`
+(or unset/unknown — both treated as abort on resume), marks the checkpoint
+as failed, and deletes the pending descriptor. `skip` and `prompt` modes are
+left alone because resolving them requires actually running the remaining
+blocks, which `wb resume` does. Pass `--no-reap` for pure inspection.
 
 ## Artifacts
 

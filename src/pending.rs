@@ -167,6 +167,60 @@ pub fn build_for_browser_pause(
     }
 }
 
+/// Entry describing one descriptor that was reaped by `reap_expired`.
+#[derive(Debug, Clone, Serialize)]
+pub struct ReapedEntry {
+    pub id: String,
+    pub workbook: String,
+    pub kind: Option<String>,
+    pub on_timeout: Option<String>,
+    pub timeout_at: Option<String>,
+    /// Whether the checkpoint file was found and marked failed.
+    pub checkpoint_marked_failed: bool,
+}
+
+/// Reap expired pending descriptors whose `on_timeout` resolves to "abort"
+/// semantics (explicit `abort`, unset, or an unrecognised value — which the
+/// resume path also treats as abort). For each reaped descriptor:
+///   - mark the associated checkpoint as failed (if present)
+///   - delete the pending descriptor file
+///
+/// Modes that need to resume execution (`skip`, `prompt`) are skipped — they
+/// require `wb resume` to bind empty values and continue running blocks, which
+/// this function deliberately does not do. Best-effort: any I/O error on an
+/// individual descriptor is ignored so one broken entry can't stall the sweep.
+pub fn reap_expired() -> Vec<ReapedEntry> {
+    let mut reaped = Vec::new();
+    for (id, desc) in list_all() {
+        if !is_expired(&desc) {
+            continue;
+        }
+        let mode = desc.on_timeout.as_deref().unwrap_or("abort");
+        if mode == "skip" || mode == "prompt" {
+            continue;
+        }
+
+        let mut marked = false;
+        if let Ok(Some(mut ckpt)) = checkpoint::load(&id) {
+            ckpt.mark_failed();
+            if checkpoint::save(&id, &ckpt).is_ok() {
+                marked = true;
+            }
+        }
+        let _ = delete(&id);
+
+        reaped.push(ReapedEntry {
+            id: id.clone(),
+            workbook: desc.workbook.clone(),
+            kind: desc.kind.clone(),
+            on_timeout: desc.on_timeout.clone(),
+            timeout_at: desc.timeout_at.clone(),
+            checkpoint_marked_failed: marked,
+        });
+    }
+    reaped
+}
+
 /// Returns true if the descriptor's timeout has passed.
 pub fn is_expired(desc: &PendingDescriptor) -> bool {
     match desc.timeout_at.as_deref() {
@@ -551,5 +605,165 @@ mod tests {
         // Clean up
         delete(&id_a).expect("cleanup a");
         delete(&id_b).expect("cleanup b");
+    }
+
+    /// Build an already-expired pending descriptor suitable for reaper tests.
+    fn expired_desc(id: &str, workbook: &str, on_timeout: Option<&str>) -> PendingDescriptor {
+        PendingDescriptor {
+            checkpoint: checkpoint::checkpoint_path(id).to_string_lossy().to_string(),
+            checkpoint_id: id.to_string(),
+            workbook: workbook.to_string(),
+            next_block: 1,
+            line_number: 1,
+            section_index: 0,
+            kind: Some("email".to_string()),
+            match_: None,
+            bind: Some(BindSpec::Single("otp".to_string())),
+            created_at: (Utc::now() - ChronoDuration::hours(2)).to_rfc3339(),
+            timeout_at: Some((Utc::now() - ChronoDuration::hours(1)).to_rfc3339()),
+            on_timeout: on_timeout.map(String::from),
+            sidecar_state: None,
+            resume_url: None,
+            verb_index: None,
+        }
+    }
+
+    // Note: `reap_expired` scans the shared checkpoint dir, so parallel tests
+    // can reap each other's descriptors. Tests assert post-conditions (gone /
+    // still present) rather than "my call returned my id", which is racy.
+
+    #[test]
+    fn test_reap_expired_abort_mode_is_reaped() {
+        let id = unique_id("test_reap_abort");
+        // Save checkpoint BEFORE pending: any parallel reaper that sees our
+        // pending descriptor will also find the checkpoint. Reversing this
+        // order lets a racing reaper delete pending before our ckpt is saved,
+        // leaving the ckpt unmarked.
+        let ckpt = checkpoint::Checkpoint::new("deploy.md", 3);
+        checkpoint::save(&id, &ckpt).expect("save ckpt");
+        let desc = expired_desc(&id, "deploy.md", Some("abort"));
+        save(&id, &desc).expect("save");
+
+        let _ = reap_expired();
+
+        assert!(load(&id).expect("load").is_none(), "pending descriptor should be gone");
+        let loaded_ckpt = checkpoint::load(&id).expect("load ckpt").expect("ckpt");
+        assert_eq!(loaded_ckpt.status, checkpoint::CheckpointStatus::Failed);
+
+        let _ = checkpoint::delete(&id);
+    }
+
+    #[test]
+    fn test_reap_expired_unset_on_timeout_is_reaped() {
+        // Unset on_timeout defaults to abort semantics — should be reaped.
+        let id = unique_id("test_reap_unset");
+        let desc = expired_desc(&id, "deploy.md", None);
+        save(&id, &desc).expect("save");
+
+        let _ = reap_expired();
+        assert!(load(&id).expect("load").is_none(), "unset on_timeout should be reaped");
+    }
+
+    #[test]
+    fn test_reap_expired_unknown_on_timeout_is_reaped() {
+        // Unknown values default to abort on resume, so reaper treats same.
+        let id = unique_id("test_reap_unknown");
+        let desc = expired_desc(&id, "deploy.md", Some("explode"));
+        save(&id, &desc).expect("save");
+
+        let _ = reap_expired();
+        assert!(load(&id).expect("load").is_none(), "unknown on_timeout should be reaped");
+    }
+
+    #[test]
+    fn test_reap_expired_returns_entry_fields() {
+        // Confirm the ReapedEntry shape is populated correctly. Isolate by
+        // only asserting fields of entries whose id matches ours — a racing
+        // test's reap may have already consumed ours, in which case the
+        // post-condition (gone) is already checked elsewhere.
+        let id = unique_id("test_reap_entry_fields");
+        // Save ckpt before pending — see `test_reap_expired_abort_mode_is_reaped`
+        // for the race this ordering prevents.
+        let ckpt = checkpoint::Checkpoint::new("fields.md", 2);
+        checkpoint::save(&id, &ckpt).expect("save ckpt");
+        let desc = expired_desc(&id, "fields.md", Some("abort"));
+        save(&id, &desc).expect("save");
+
+        let reaped = reap_expired();
+        if let Some(ours) = reaped.iter().find(|r| r.id == id) {
+            assert_eq!(ours.workbook, "fields.md");
+            assert_eq!(ours.on_timeout.as_deref(), Some("abort"));
+            assert!(ours.timeout_at.is_some());
+            assert!(ours.checkpoint_marked_failed);
+        }
+        // If we didn't see our id (raced), at minimum the file should be gone.
+        assert!(load(&id).expect("load").is_none());
+
+        let _ = checkpoint::delete(&id);
+    }
+
+    #[test]
+    fn test_reap_leaves_skip_mode() {
+        // `skip` needs to bind empty vars and keep executing — can't reap
+        // without running blocks, so the reaper must skip it.
+        let id = unique_id("test_reap_skip");
+        let desc = expired_desc(&id, "deploy.md", Some("skip"));
+        save(&id, &desc).expect("save");
+
+        let reaped = reap_expired();
+        assert!(
+            reaped.iter().all(|r| r.id != id),
+            "skip mode must not be reaped"
+        );
+        assert!(load(&id).expect("load").is_some(), "descriptor should remain");
+
+        delete(&id).expect("cleanup");
+    }
+
+    #[test]
+    fn test_reap_leaves_prompt_mode() {
+        // `prompt` requires an interactive terminal on resume — can't reap.
+        let id = unique_id("test_reap_prompt");
+        let desc = expired_desc(&id, "deploy.md", Some("prompt"));
+        save(&id, &desc).expect("save");
+
+        let reaped = reap_expired();
+        assert!(reaped.iter().all(|r| r.id != id), "prompt mode must not be reaped");
+        assert!(load(&id).expect("load").is_some());
+
+        delete(&id).expect("cleanup");
+    }
+
+    #[test]
+    fn test_reap_leaves_unexpired() {
+        let id = unique_id("test_reap_unexpired");
+        let mut desc = expired_desc(&id, "deploy.md", Some("abort"));
+        // Move timeout into the future.
+        desc.timeout_at = Some((Utc::now() + ChronoDuration::hours(1)).to_rfc3339());
+        save(&id, &desc).expect("save");
+
+        let reaped = reap_expired();
+        assert!(reaped.iter().all(|r| r.id != id), "unexpired must not be reaped");
+        assert!(load(&id).expect("load").is_some());
+
+        delete(&id).expect("cleanup");
+    }
+
+    #[test]
+    fn test_reap_no_checkpoint_is_ok() {
+        // Descriptor without a paired checkpoint should still be deleted,
+        // just with checkpoint_marked_failed=false (when our call reaps it).
+        let id = unique_id("test_reap_no_ckpt");
+        let desc = expired_desc(&id, "deploy.md", Some("abort"));
+        save(&id, &desc).expect("save");
+        // No checkpoint::save — simulating a descriptor whose checkpoint
+        // was already cleaned up (or never existed).
+
+        let reaped = reap_expired();
+        if let Some(ours) = reaped.iter().find(|r| r.id == id) {
+            assert!(!ours.checkpoint_marked_failed);
+        }
+        // Post-condition holds regardless of which parallel call reaped it.
+        assert!(load(&id).expect("load").is_none());
     }
 }

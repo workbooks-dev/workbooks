@@ -2433,6 +2433,30 @@ fn cmd_pending(args: &[String]) {
         || args
             .windows(2)
             .any(|w| w[0] == "--format" && w[1] == "json");
+    let no_reap = args.iter().any(|a| a == "--no-reap");
+
+    if !no_reap {
+        let reaped = pending::reap_expired();
+        if !reaped.is_empty() {
+            eprintln!(
+                "wb: reaped {} expired pending workbook(s) (on_timeout=abort):",
+                reaped.len()
+            );
+            for r in &reaped {
+                let kind = r.kind.as_deref().unwrap_or("-");
+                let mode = r.on_timeout.as_deref().unwrap_or("abort");
+                let ckpt_note = if r.checkpoint_marked_failed {
+                    "checkpoint marked failed"
+                } else {
+                    "no checkpoint"
+                };
+                eprintln!(
+                    "  {}  {}  kind={}  on_timeout={}  {}",
+                    r.id, r.workbook, kind, mode, ckpt_note
+                );
+            }
+        }
+    }
 
     let descriptors = pending::list_all();
 
