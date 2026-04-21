@@ -49,7 +49,7 @@ const SUPPORTS = [
 ];
 
 const BB_BASE = "https://api.browserbase.com";
-const VERSION = "0.5.0";
+const VERSION = "0.5.3";
 
 // --- Recording config -------------------------------------------------------
 //
