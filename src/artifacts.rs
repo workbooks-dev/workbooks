@@ -46,15 +46,19 @@ impl Artifacts {
     /// Resolve the artifacts dir from `env`, create it, and return a handle.
     /// Also mutates `env` so the path is propagated to every spawned cell.
     ///
-    /// If a cell already set `WB_ARTIFACTS_DIR` (e.g. an orchestrator picked
-    /// the path), we honour it. Otherwise we pick a path based on the run id.
+    /// Resolution order: frontmatter `env:` block → process env (so an
+    /// orchestrator like rav can `export WB_ARTIFACTS_DIR=...` before
+    /// `wb run`) → default under `~/.wb/runs/<run_id>/artifacts`.
     pub fn init(env: &mut HashMap<String, String>) -> Self {
         let run_id = resolve_run_id(env);
 
-        let dir = match env.get(ENV_DIR).filter(|s| !s.is_empty()) {
-            Some(existing) => PathBuf::from(existing),
-            None => default_dir(&run_id),
-        };
+        let dir = env
+            .get(ENV_DIR)
+            .filter(|s| !s.is_empty())
+            .cloned()
+            .or_else(|| std::env::var(ENV_DIR).ok().filter(|s| !s.is_empty()))
+            .map(PathBuf::from)
+            .unwrap_or_else(|| default_dir(&run_id));
 
         if let Err(e) = fs::create_dir_all(&dir) {
             // Non-fatal: the dir may not be writable, but cells can still
