@@ -1,4 +1,5 @@
 mod artifacts;
+mod atomic_io;
 mod callback;
 mod checkpoint;
 mod executor;
@@ -1254,18 +1255,18 @@ fn run_single(
                 }
 
                 // Don't checkpoint the failed block — re-run it on resume
-                if let Some(ref mut c) = ckpt {
+                if let (Some(ref mut c), Some(ref ckpt_id)) = (&mut ckpt, &checkpoint_id) {
                     c.mark_failed();
-                    let _ = checkpoint::save(checkpoint_id.as_ref().unwrap(), c);
+                    let _ = checkpoint::save(ckpt_id, c);
                 }
                 results.push(result);
                 break;
             }
 
             // Checkpoint after each successful block (or any block without bail)
-            if let Some(ref mut c) = ckpt {
+            if let (Some(ref mut c), Some(ref ckpt_id)) = (&mut ckpt, &checkpoint_id) {
                 c.add_result(&result, block.line_number, block_heading.as_deref(), &block.code);
-                if let Err(e) = checkpoint::save(checkpoint_id.as_ref().unwrap(), c) {
+                if let Err(e) = checkpoint::save(ckpt_id, c) {
                     eprintln!("warning: checkpoint: {}", e);
                 }
             }
@@ -1398,17 +1399,17 @@ fn run_single(
                     );
                 }
 
-                if let Some(ref mut c) = ckpt {
+                if let (Some(ref mut c), Some(ref ckpt_id)) = (&mut ckpt, &checkpoint_id) {
                     c.mark_failed();
-                    let _ = checkpoint::save(checkpoint_id.as_ref().unwrap(), c);
+                    let _ = checkpoint::save(ckpt_id, c);
                 }
                 results.push(result);
                 break;
             }
 
-            if let Some(ref mut c) = ckpt {
+            if let (Some(ref mut c), Some(ref ckpt_id)) = (&mut ckpt, &checkpoint_id) {
                 c.add_result(&result, spec.line_number, block_heading.as_deref(), &spec.raw);
-                if let Err(e) = checkpoint::save(checkpoint_id.as_ref().unwrap(), c) {
+                if let Err(e) = checkpoint::save(ckpt_id, c) {
                     eprintln!("warning: checkpoint: {}", e);
                 }
             }
@@ -1428,10 +1429,10 @@ fn run_single(
     }
 
     // Mark complete if all blocks ran
-    if let Some(ref mut c) = ckpt {
+    if let (Some(ref mut c), Some(ref ckpt_id)) = (&mut ckpt, &checkpoint_id) {
         if c.status == checkpoint::CheckpointStatus::InProgress {
             c.mark_complete();
-            let _ = checkpoint::save(checkpoint_id.as_ref().unwrap(), c);
+            let _ = checkpoint::save(ckpt_id, c);
         }
     }
 

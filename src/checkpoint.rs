@@ -156,7 +156,8 @@ pub fn save(id: &str, checkpoint: &Checkpoint) -> Result<(), String> {
     let path = checkpoint_path(id);
     let json =
         serde_json::to_string_pretty(checkpoint).map_err(|e| format!("serialize checkpoint: {}", e))?;
-    std::fs::write(&path, json).map_err(|e| format!("write checkpoint: {}", e))?;
+    crate::atomic_io::write_secret_file(&path, json.as_bytes())
+        .map_err(|e| format!("write checkpoint: {}", e))?;
     Ok(())
 }
 

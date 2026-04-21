@@ -49,7 +49,8 @@ pub fn save(id: &str, desc: &PendingDescriptor) -> Result<(), String> {
     let path = descriptor_path(id);
     let json =
         serde_json::to_string_pretty(desc).map_err(|e| format!("serialize descriptor: {}", e))?;
-    std::fs::write(&path, json).map_err(|e| format!("write descriptor: {}", e))?;
+    crate::atomic_io::write_secret_file(&path, json.as_bytes())
+        .map_err(|e| format!("write descriptor: {}", e))?;
     Ok(())
 }
 
