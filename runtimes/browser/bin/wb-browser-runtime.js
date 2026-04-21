@@ -14,9 +14,13 @@
 //   BROWSERBASE_API_KEY
 //   BROWSERBASE_PROJECT_ID
 //
-// Verb args support `{{ env.NAME }}` substitution, expanded recursively
-// against process.env at dispatch time. Credentials passed this way never
-// hit stdout — only the verb name + selector make it into the summary.
+// Verb args support two substitutions, expanded recursively at dispatch time:
+//   {{ env.NAME }}        → process.env.NAME
+//   {{ artifacts.NAME }}  → contents of $WB_ARTIFACTS_DIR/NAME.txt (or .../NAME)
+// The artifacts form lets an earlier bash cell compute a value — OTP, magic
+// link, export id — and feed it into a later browser verb without a sidecar
+// round-trip. Credentials passed via either form never hit stdout — only the
+// verb name + selector make it into the summary.
 
 import readline from "node:readline";
 import { chromium } from "playwright-core";
@@ -576,22 +580,44 @@ function sanitize(s) {
   return String(s || "default").replace(/[^A-Za-z0-9_-]+/g, "_");
 }
 
-// --- {{ env.X }} substitution ----------------------------------------------
+// --- {{ env.X }} / {{ artifacts.X }} substitution --------------------------
 
 const ENV_RE = /\{\{\s*env\.([A-Za-z_][A-Za-z0-9_]*)\s*\}\}/g;
+const ARTIFACT_RE = /\{\{\s*artifacts\.([A-Za-z_][A-Za-z0-9_.-]*)\s*\}\}/g;
+
+function readArtifact(name) {
+  const dir = (process.env.WB_ARTIFACTS_DIR || "").trim();
+  if (!dir) {
+    log(`[warn] artifacts.${name} referenced but WB_ARTIFACTS_DIR is not set`);
+    return "";
+  }
+  // Per-verb read (no cache) so a bash cell that writes the artifact between
+  // slices is always picked up by the next browser verb.
+  for (const p of [path.join(dir, `${name}.txt`), path.join(dir, name)]) {
+    try {
+      return readFileSync(p, "utf8").trimEnd();
+    } catch {
+      // try next candidate
+    }
+  }
+  log(`[warn] artifact ${name} not found in ${dir}; leaving placeholder`);
+  return "";
+}
 
 function expand(value) {
   if (typeof value === "string") {
-    return value.replace(ENV_RE, (_, name) => {
-      const v = process.env[name];
-      if (v === undefined) {
-        // Leave the placeholder visible so failures surface in stderr summaries
-        // instead of silently turning into empty strings.
-        log(`[warn] env var ${name} is not set; leaving placeholder`);
-        return "";
-      }
-      return v;
-    });
+    return value
+      .replace(ENV_RE, (_, name) => {
+        const v = process.env[name];
+        if (v === undefined) {
+          // Leave the placeholder visible so failures surface in stderr
+          // summaries instead of silently turning into empty strings.
+          log(`[warn] env var ${name} is not set; leaving placeholder`);
+          return "";
+        }
+        return v;
+      })
+      .replace(ARTIFACT_RE, (_, name) => readArtifact(name));
   }
   if (Array.isArray(value)) return value.map(expand);
   if (value && typeof value === "object") {

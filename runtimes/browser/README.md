@@ -25,9 +25,12 @@ specific run.
 - `BROWSERBASE_API_KEY`
 - `BROWSERBASE_PROJECT_ID`
 
-Verb arguments support `{{ env.NAME }}` substitution at dispatch time, so any
-secrets your runbook needs (e.g. `HACKERNEWS_PASSWORD`) get pulled from the
-sidecar process env without ever appearing on stdout.
+Verb arguments support two substitutions at dispatch time:
+
+- `{{ env.NAME }}` — reads `process.env.NAME`. Use for static secrets injected via Doppler / the agent's env.
+- `{{ artifacts.NAME }}` — reads `$WB_ARTIFACTS_DIR/NAME.txt` (falling back to `$WB_ARTIFACTS_DIR/NAME`). Use for dynamic values produced by an earlier bash cell — OTPs, magic-link URLs, export IDs, anything polled from an external system mid-run. Each read happens per-verb with no caching, so writes land immediately.
+
+Both forms are redacted in stdout summaries — only the verb name + selector make it into the log.
 
 ## Optional: anti-detection
 
