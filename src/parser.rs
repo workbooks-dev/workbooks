@@ -143,6 +143,43 @@ impl BindSpec {
     }
 }
 
+/// Bind names that would shadow an env var the shell or `wb` itself relies on.
+/// Resolved signal values get exported into the child process env on resume,
+/// so binding to one of these would silently break the workbook — or worse,
+/// the runtime (e.g. `bind: PATH` replaces the executable search path).
+const RESERVED_BIND_NAMES: &[&str] = &[
+    "PATH",
+    "HOME",
+    "USER",
+    "SHELL",
+    "PWD",
+    "OLDPWD",
+    "LD_LIBRARY_PATH",
+    "DYLD_LIBRARY_PATH",
+    "DYLD_FALLBACK_LIBRARY_PATH",
+    "TRIGGER_RUN_ID",
+    "TMPDIR",
+    "LANG",
+    "LC_ALL",
+];
+
+/// Returns the first reserved name hit, if any. Names starting with `WB_`
+/// are reserved as a namespace for wb-internal variables.
+pub fn reserved_bind_name<'a>(names: impl IntoIterator<Item = &'a str>) -> Option<&'a str> {
+    for name in names {
+        if name.starts_with("WB_") {
+            return Some(name);
+        }
+        if RESERVED_BIND_NAMES
+            .iter()
+            .any(|r| r.eq_ignore_ascii_case(name))
+        {
+            return Some(name);
+        }
+    }
+    None
+}
+
 #[derive(Debug, Deserialize, Serialize, Clone, Default)]
 pub struct WaitSpec {
     #[serde(default)]
@@ -238,7 +275,7 @@ fn extract_frontmatter(input: &str) -> (Frontmatter, String) {
         Some(pos) => {
             let yaml_str = &after_opening[..pos];
             let rest = &after_opening[pos + 4..]; // skip \n---
-            // Skip the newline after closing ---
+                                                  // Skip the newline after closing ---
             let rest = rest.strip_prefix('\n').unwrap_or(rest);
 
             let frontmatter: Frontmatter = match serde_yaml::from_str(yaml_str) {
@@ -300,8 +337,7 @@ fn extract_sections(body: &str) -> Vec<Section> {
     // experimental env var. When disabled, fence lines like `bash {no-run}` stay
     // as-is and fall through to the non-executable-language branch — preserving
     // prior behavior so this feature is reversible.
-    let flags_enabled =
-        std::env::var("WB_EXPERIMENTAL_BLOCK_FLAGS").ok().as_deref() == Some("1");
+    let flags_enabled = std::env::var("WB_EXPERIMENTAL_BLOCK_FLAGS").ok().as_deref() == Some("1");
 
     let mut sections = Vec::new();
     let mut current_text = String::new();
@@ -341,6 +377,18 @@ fn extract_sections(body: &str) -> Vec<Section> {
                         WaitSpec::default()
                     }
                 };
+                if let Some(ref bind) = spec.bind {
+                    if let Some(reserved) = reserved_bind_name(bind.names()) {
+                        eprintln!(
+                            "wb: wait block at L{}: bind name '{}' is reserved (would override an env var the shell or wb depends on). \
+                             Rename the bind (e.g. '{}_value') and update references in later blocks.",
+                            line_num + 1,
+                            reserved,
+                            reserved.to_lowercase()
+                        );
+                        spec.bind = None;
+                    }
+                }
                 spec.line_number = line_num + 1;
                 spec.section_index = sections.len();
                 sections.push(Section::Wait(spec));
@@ -364,11 +412,7 @@ fn extract_sections(body: &str) -> Vec<Section> {
                 let mut spec: BrowserSliceSpec = match serde_yaml::from_str(&yaml) {
                     Ok(s) => s,
                     Err(e) => {
-                        eprintln!(
-                            "wb: browser block parse error at L{}: {}",
-                            line_num + 1,
-                            e
-                        );
+                        eprintln!("wb: browser block parse error at L{}: {}", line_num + 1, e);
                         BrowserSliceSpec::default()
                     }
                 };
@@ -578,6 +622,34 @@ echo "hello"
     }
 
     #[test]
+    #[test]
+    fn test_reserved_bind_name_exact() {
+        assert_eq!(reserved_bind_name(std::iter::once("PATH")), Some("PATH"));
+        assert_eq!(reserved_bind_name(std::iter::once("Home")), Some("Home"));
+        assert_eq!(reserved_bind_name(std::iter::once("otp_code")), None);
+    }
+
+    #[test]
+    fn test_reserved_bind_name_wb_prefix() {
+        assert_eq!(
+            reserved_bind_name(std::iter::once("WB_ARTIFACTS_DIR")),
+            Some("WB_ARTIFACTS_DIR")
+        );
+        assert_eq!(
+            reserved_bind_name(std::iter::once("WB_custom")),
+            Some("WB_custom")
+        );
+        // Non-WB prefix is fine.
+        assert_eq!(reserved_bind_name(std::iter::once("MY_VAR")), None);
+    }
+
+    #[test]
+    fn test_reserved_bind_name_first_hit() {
+        let names = vec!["otp_code", "PATH", "sender"];
+        assert_eq!(reserved_bind_name(names.iter().copied()), Some("PATH"));
+    }
+
+    #[test]
     fn test_parse_wait_block() {
         let input = r#"# Runbook
 
@@ -606,7 +678,13 @@ echo "$otp_code" | ./login --otp
         let waits: Vec<&WaitSpec> = wb
             .sections
             .iter()
-            .filter_map(|s| if let Section::Wait(w) = s { Some(w) } else { None })
+            .filter_map(|s| {
+                if let Section::Wait(w) = s {
+                    Some(w)
+                } else {
+                    None
+                }
+            })
             .collect();
         assert_eq!(waits.len(), 1);
         let w = waits[0];
@@ -620,6 +698,45 @@ echo "$otp_code" | ./login --otp
     }
 
     #[test]
+    #[test]
+    fn test_parse_wait_rejects_reserved_bind() {
+        let input = "```wait\nkind: email\nbind: PATH\n```\n";
+        let wb = parse(input);
+        let waits: Vec<&WaitSpec> = wb
+            .sections
+            .iter()
+            .filter_map(|s| match s {
+                Section::Wait(w) => Some(w),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(waits.len(), 1, "wait section should still exist");
+        assert!(
+            waits[0].bind.is_none(),
+            "reserved bind name should be cleared, not preserved"
+        );
+    }
+
+    #[test]
+    fn test_parse_wait_rejects_reserved_in_list() {
+        let input = "```wait\nkind: email\nbind:\n  - otp\n  - WB_ARTIFACTS_DIR\n```\n";
+        let wb = parse(input);
+        let waits: Vec<&WaitSpec> = wb
+            .sections
+            .iter()
+            .filter_map(|s| match s {
+                Section::Wait(w) => Some(w),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(waits.len(), 1);
+        assert!(
+            waits[0].bind.is_none(),
+            "reserved name anywhere in bind list should reject the whole bind"
+        );
+    }
+
+    #[test]
     fn test_parse_wait_multi_bind() {
         let input = r#"```wait
 kind: manual
@@ -630,10 +747,18 @@ bind: [code, sender]
         let w = wb
             .sections
             .iter()
-            .find_map(|s| if let Section::Wait(w) = s { Some(w) } else { None })
+            .find_map(|s| {
+                if let Section::Wait(w) = s {
+                    Some(w)
+                } else {
+                    None
+                }
+            })
             .unwrap();
         match &w.bind {
-            Some(BindSpec::Multiple(v)) => assert_eq!(v, &vec!["code".to_string(), "sender".to_string()]),
+            Some(BindSpec::Multiple(v)) => {
+                assert_eq!(v, &vec!["code".to_string(), "sender".to_string()])
+            }
             _ => panic!("expected Multiple bind"),
         }
     }
@@ -658,7 +783,13 @@ verbs:
         let browsers: Vec<&BrowserSliceSpec> = wb
             .sections
             .iter()
-            .filter_map(|s| if let Section::Browser(b) = s { Some(b) } else { None })
+            .filter_map(|s| {
+                if let Section::Browser(b) = s {
+                    Some(b)
+                } else {
+                    None
+                }
+            })
             .collect();
         assert_eq!(browsers.len(), 1);
         let b = browsers[0];
@@ -907,7 +1038,13 @@ echo "runs"
         let code_blocks: Vec<&CodeBlock> = wb
             .sections
             .iter()
-            .filter_map(|s| if let Section::Code(b) = s { Some(b) } else { None })
+            .filter_map(|s| {
+                if let Section::Code(b) = s {
+                    Some(b)
+                } else {
+                    None
+                }
+            })
             .collect();
         assert_eq!(code_blocks.len(), 2);
         assert!(code_blocks[0].skip_execution);
@@ -933,7 +1070,13 @@ echo "main"
         let blocks: Vec<&CodeBlock> = wb
             .sections
             .iter()
-            .filter_map(|s| if let Section::Code(b) = s { Some(b) } else { None })
+            .filter_map(|s| {
+                if let Section::Code(b) = s {
+                    Some(b)
+                } else {
+                    None
+                }
+            })
             .collect();
         assert!(blocks[0].silent);
         assert!(!blocks[0].skip_execution);
@@ -954,7 +1097,13 @@ verbs:
         let browsers: Vec<&BrowserSliceSpec> = wb
             .sections
             .iter()
-            .filter_map(|s| if let Section::Browser(b) = s { Some(b) } else { None })
+            .filter_map(|s| {
+                if let Section::Browser(b) = s {
+                    Some(b)
+                } else {
+                    None
+                }
+            })
             .collect();
         assert_eq!(browsers.len(), 1);
         assert!(browsers[0].skip_execution);
