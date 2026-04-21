@@ -187,7 +187,7 @@ impl Artifacts {
     }
 }
 
-fn resolve_run_id(env: &HashMap<String, String>) -> String {
+pub fn resolve_run_id(env: &HashMap<String, String>) -> String {
     if let Some(v) = env.get(ENV_RUN_ID).filter(|s| !s.is_empty()) {
         return v.clone();
     }

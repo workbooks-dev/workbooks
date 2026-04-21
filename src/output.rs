@@ -77,6 +77,10 @@ pub struct RunSummary {
     pub failed: usize,
     pub total_duration: Duration,
     pub results: Vec<BlockResult>,
+    /// Trace-correlation id: `WB_RECORDING_RUN_ID` → `TRIGGER_RUN_ID` → generated.
+    /// Stamped on result artifacts and callback payloads so a run is joinable
+    /// across logs, dashboards, and artifact storage via a single key.
+    pub run_id: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -103,6 +107,7 @@ impl OutputFormat {
 struct JsonOutput {
     source: String,
     title: String,
+    run_id: String,
     ran_at: String,
     duration_ms: u64,
     status: String,
@@ -196,6 +201,7 @@ fn build_json_output(workbook: &Workbook, summary: &RunSummary) -> JsonOutput {
     JsonOutput {
         source: summary.source_file.clone(),
         title,
+        run_id: summary.run_id.clone(),
         ran_at: Utc::now().to_rfc3339(),
         duration_ms: summary.total_duration.as_millis() as u64,
         status: if summary.failed == 0 { "pass".into() } else { "fail".into() },
@@ -231,6 +237,9 @@ fn format_markdown(workbook: &Workbook, summary: &RunSummary) -> String {
     out.push_str("---\n");
     out.push_str(&format!("source: {}\n", summary.source_file));
     out.push_str(&format!("title: {}\n", title));
+    if !summary.run_id.is_empty() {
+        out.push_str(&format!("run_id: {}\n", summary.run_id));
+    }
     out.push_str(&format!("ran_at: {}\n", Utc::now().to_rfc3339()));
     out.push_str(&format!(
         "duration: {:.1}s\n",

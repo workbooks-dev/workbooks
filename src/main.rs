@@ -238,7 +238,11 @@ fn dispatch(cli: Cli) {
             cli.env_file_relative,
         );
     } else if cli.inspect {
-        inspect_workbook(path);
+        if cli.json {
+            inspect_workbook_json(path);
+        } else {
+            inspect_workbook(path);
+        }
     } else {
         run_single(
             path,
@@ -434,11 +438,17 @@ fn run_single_collect(
     env_files: Vec<String>,
     env_file_relative: bool,
 ) -> output::RunSummary {
+    // Resolve the trace-correlation id once so every subsequent artifact,
+    // callback, and early-return RunSummary carries the same value.
+    // Uses WB_RECORDING_RUN_ID → TRIGGER_RUN_ID → generated.
+    let run_id = artifacts::resolve_run_id(&std::collections::HashMap::new());
+
     let content = match std::fs::read_to_string(file) {
         Ok(c) => c,
         Err(e) => {
             return output::RunSummary {
                 source_file: file.to_string(),
+                run_id: run_id.clone(),
                 total_blocks: 0,
                 passed: 0,
                 failed: 1,
@@ -465,6 +475,7 @@ fn run_single_collect(
             if std::env::var("WB_EXPERIMENTAL_SANDBOX").ok().as_deref() != Some("1") {
                 return output::RunSummary {
                     source_file: file.to_string(),
+                    run_id: run_id.clone(),
                     total_blocks: block_count,
                     passed: 0,
                     failed: 1,
@@ -491,6 +502,7 @@ fn run_single_collect(
                 Err(e) => {
                     return output::RunSummary {
                         source_file: file.to_string(),
+                        run_id: run_id.clone(),
                         total_blocks: block_count,
                         passed: 0,
                         failed: 1,
@@ -551,6 +563,7 @@ fn run_single_collect(
                 Err(e) => {
                     return output::RunSummary {
                         source_file: file.to_string(),
+                        run_id: run_id.clone(),
                         total_blocks: block_count,
                         passed: 0,
                         failed: 1,
@@ -569,6 +582,7 @@ fn run_single_collect(
 
             return output::RunSummary {
                 source_file: file.to_string(),
+                run_id: run_id.clone(),
                 total_blocks: block_count,
                 passed: if exit_code == 0 { block_count } else { 0 },
                 failed: if exit_code == 0 { 0 } else { 1 },
@@ -616,6 +630,7 @@ fn run_single_collect(
             Err(e) => {
                 return output::RunSummary {
                     source_file: file.to_string(),
+                    run_id: run_id.clone(),
                     total_blocks: block_count,
                     passed: 0,
                     failed: 1,
@@ -655,6 +670,7 @@ fn run_single_collect(
             if let Err(e) = run_setup(setup, &ctx.working_dir) {
                 return output::RunSummary {
                     source_file: file.to_string(),
+                    run_id: run_id.clone(),
                     total_blocks: block_count,
                     passed: 0,
                     failed: 1,
@@ -753,6 +769,7 @@ fn run_single_collect(
 
     output::RunSummary {
         source_file: file.to_string(),
+        run_id: run_id.clone(),
         total_blocks: block_count,
         passed,
         failed,
@@ -783,6 +800,10 @@ fn run_single(
     env_files: Vec<String>,
     env_file_relative: bool,
 ) {
+    // Resolve the trace-correlation id once; flows into CallbackConfig and
+    // the final RunSummary so every artifact/event of this run shares a key.
+    let run_id = artifacts::resolve_run_id(&std::collections::HashMap::new());
+
     let content = match std::fs::read_to_string(file) {
         Ok(c) => c,
         Err(e) => {
@@ -1069,6 +1090,7 @@ fn run_single(
         url,
         secret: resolved_callback_secret,
         stream_key: resolved_callback_key.unwrap_or_else(|| "wb:events".to_string()),
+        run_id: run_id.clone(),
     });
 
     // Artifacts: same semantics as the non-checkpoint path — create/read the
@@ -1526,6 +1548,7 @@ fn run_single(
 
     let summary = output::RunSummary {
         source_file: file.to_string(),
+        run_id: run_id.clone(),
         total_blocks: block_count,
         passed,
         failed,
@@ -1695,6 +1718,127 @@ fn inspect_workbook(file: &str) {
     if idx == 0 {
         println!("  (no executable blocks)");
     }
+}
+
+/// Machine-readable inspect output. Same semantics as `inspect_workbook` but
+/// emits a JSON document agents can parse directly instead of grepping prose.
+/// Shape (stable within a major version):
+///   {
+///     "source": "...",
+///     "frontmatter": { "title": "...", "runtime": "...", "sandbox": { ... } },
+///     "blocks": [
+///       { "index": 1, "kind": "code"|"wait"|"browser",
+///         "language": "bash", "line": 12, "heading": "Step Two",
+///         "flags": { "no_run": false, "silent": false },
+///         /* code-only */    "resolved_exec": "bash",
+///         /* wait-only */    "kind_name": "email", "bind": "otp_code", "timeout": "5m",
+///         /* browser-only */ "session": "main", "verb_count": 3 }
+///     ]
+///   }
+fn inspect_workbook_json(file: &str) {
+    let content = match std::fs::read_to_string(file) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("error: {}: {}", file, e);
+            std::process::exit(1);
+        }
+    };
+    let workbook = parser::parse(&content);
+
+    let fm = &workbook.frontmatter;
+    let sandbox_obj = fm.requires.as_ref().map(|req| {
+        serde_json::json!({
+            "kind": req.sandbox,
+            "apt": req.apt,
+            "pip": req.pip,
+            "node": req.node,
+            "dockerfile": req.dockerfile,
+            "image": sandbox::image_tag(req),
+        })
+    });
+
+    let mut blocks = Vec::new();
+    let mut idx: usize = 0;
+    for section in &workbook.sections {
+        match section {
+            parser::Section::Code(block) => {
+                idx += 1;
+                let lang = block.language.to_lowercase();
+                let resolved = match &fm.exec {
+                    Some(parser::ExecConfig::Global(prefix)) => {
+                        format!("{} {}", prefix, default_program(&lang))
+                    }
+                    Some(parser::ExecConfig::PerLanguage(map)) => {
+                        let normalized = normalize_block_language(&lang);
+                        match map.get(normalized) {
+                            Some(cmd) => cmd.clone(),
+                            None => default_program(&lang).to_string(),
+                        }
+                    }
+                    None => default_program(&lang).to_string(),
+                };
+                blocks.push(serde_json::json!({
+                    "index": idx,
+                    "kind": "code",
+                    "language": block.language,
+                    "line": block.line_number,
+                    "flags": {
+                        "no_run": block.skip_execution,
+                        "silent": block.silent,
+                    },
+                    "resolved_exec": resolved,
+                }));
+            }
+            parser::Section::Wait(spec) => {
+                let bind_val = spec.bind.as_ref().map(|b| match b {
+                    parser::BindSpec::Single(s) => serde_json::Value::String(s.clone()),
+                    parser::BindSpec::Multiple(v) => serde_json::Value::Array(
+                        v.iter().map(|s| serde_json::Value::String(s.clone())).collect(),
+                    ),
+                });
+                blocks.push(serde_json::json!({
+                    "kind": "wait",
+                    "line": spec.line_number,
+                    "kind_name": spec.kind,
+                    "bind": bind_val,
+                    "timeout": spec.timeout,
+                    "on_timeout": spec.on_timeout,
+                }));
+            }
+            parser::Section::Browser(spec) => {
+                idx += 1;
+                blocks.push(serde_json::json!({
+                    "index": idx,
+                    "kind": "browser",
+                    "language": "browser",
+                    "line": spec.line_number,
+                    "flags": {
+                        "no_run": spec.skip_execution,
+                        "silent": spec.silent,
+                    },
+                    "session": spec.session,
+                    "verb_count": spec.verbs.len(),
+                }));
+            }
+            parser::Section::Text(_) => {}
+        }
+    }
+
+    let out = serde_json::json!({
+        "source": file,
+        "frontmatter": {
+            "title": fm.title,
+            "runtime": fm.runtime,
+            "venv": fm.venv,
+            "vars": fm.vars.as_ref().map(|v| v.keys().cloned().collect::<Vec<_>>()),
+            "redact": fm.redact,
+            "secrets": fm.secrets.is_some(),
+            "sandbox": sandbox_obj,
+        },
+        "blocks": blocks,
+        "executable_count": workbook.code_block_count(),
+    });
+    println!("{}", serde_json::to_string_pretty(&out).unwrap());
 }
 
 /// Render `{no-run}` / `{silent}` badges next to the language tag in `wb inspect`.

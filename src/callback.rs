@@ -38,6 +38,7 @@ fn truncate_for_callback(s: &str) -> String {
 
 /// Build the `step.complete` JSON payload. Factored out of `step_complete` so
 /// we can unit-test the payload shape without firing curl/redis side effects.
+#[allow(clippy::too_many_arguments)]
 fn build_step_complete_payload(
     result: &BlockResult,
     completed: usize,
@@ -46,9 +47,11 @@ fn build_step_complete_payload(
     checkpoint_id: Option<&str>,
     heading: Option<&str>,
     line_number: usize,
+    run_id: &str,
 ) -> serde_json::Value {
     json!({
         "event": "step.complete",
+        "run_id": run_id,
         "checkpoint_id": checkpoint_id,
         "workbook": workbook,
         "block": {
@@ -73,6 +76,10 @@ pub struct CallbackConfig {
     pub url: String,
     pub secret: Option<String>,
     pub stream_key: String,
+    /// Trace-correlation id stamped on every payload. Same value appears in
+    /// the result artifact's `run_id` field so a dashboard can join across
+    /// callbacks + final report without extra plumbing.
+    pub run_id: String,
 }
 
 impl CallbackConfig {
@@ -99,6 +106,7 @@ impl CallbackConfig {
             checkpoint_id,
             heading,
             line_number,
+            &self.run_id,
         );
         self.send("step.complete", &payload.to_string());
     }
@@ -116,6 +124,7 @@ impl CallbackConfig {
     ) {
         let payload = json!({
             "event": "checkpoint.failed",
+            "run_id": &self.run_id,
             "checkpoint_id": checkpoint_id,
             "workbook": workbook,
             "failed_block": {
@@ -146,6 +155,7 @@ impl CallbackConfig {
     ) {
         let payload = json!({
             "event": "workbook.paused",
+            "run_id": &self.run_id,
             "checkpoint_id": checkpoint_id,
             "workbook": workbook,
             "wait": {
@@ -179,6 +189,7 @@ impl CallbackConfig {
     ) {
         let mut payload = json!({
             "event": event,
+            "run_id": &self.run_id,
             "checkpoint_id": checkpoint_id,
             "workbook": workbook,
             "block": {
@@ -214,6 +225,7 @@ impl CallbackConfig {
     ) {
         let payload = json!({
             "event": "run.complete",
+            "run_id": &self.run_id,
             "checkpoint_id": checkpoint_id,
             "workbook": workbook,
             "status": if failed == 0 { "pass" } else { "fail" },
@@ -342,6 +354,7 @@ mod tests {
             url: "https://hooks.example.com/wb".to_string(),
             secret: None,
             stream_key: "wb:events".to_string(),
+            run_id: "test-run".to_string(),
         };
         assert!(!http_cb.is_redis());
 
@@ -349,6 +362,7 @@ mod tests {
             url: "rediss://default:tok@my.upstash.io:6379".to_string(),
             secret: None,
             stream_key: "wb:events".to_string(),
+            run_id: "test-run".to_string(),
         };
         assert!(redis_cb.is_redis());
 
@@ -356,6 +370,7 @@ mod tests {
             url: "redis://default:tok@localhost:6379".to_string(),
             secret: None,
             stream_key: "wb:events".to_string(),
+            run_id: "test-run".to_string(),
         };
         assert!(redis_plain.is_redis());
     }
@@ -366,6 +381,7 @@ mod tests {
             url: "http://localhost:8080/hooks".to_string(),
             secret: Some("mysecret".to_string()),
             stream_key: "wb:events".to_string(),
+            run_id: "test-run".to_string(),
         };
         assert!(!cb.is_redis());
     }
@@ -466,8 +482,10 @@ mod tests {
             Some("ckpt-1"),
             Some("Identity"),
             42,
+            "run-abc",
         );
         assert_eq!(payload["event"], "step.complete");
+        assert_eq!(payload["run_id"], "run-abc");
         assert_eq!(payload["checkpoint_id"], "ckpt-1");
         assert_eq!(payload["workbook"], "health-check");
         assert_eq!(payload["block"]["index"], 0);
@@ -536,6 +554,7 @@ mod tests {
             None,
             None,
             0,
+            "",
         );
         let stdout = payload["block"]["stdout"].as_str().unwrap();
         assert!(stdout.contains("…[truncated 50 bytes]"));
