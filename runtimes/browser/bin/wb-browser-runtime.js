@@ -946,12 +946,18 @@ async function runVerb(page, verb, index, ctx) {
         );
       }
       await fsPromises.mkdir(path.dirname(full), { recursive: true });
-      // Write to a unique .tmp first, then atomically rename, so a crash
-      // mid-capture can't leave a truncated PNG that's already been announced
-      // via slice.artifact_saved and uploaded to R2.
+      // Atomic write via tmp + rename so a crash mid-capture can't leave a
+      // truncated PNG that's already been announced via slice.artifact_saved
+      // and uploaded to R2. We capture to a Buffer (with `type` derived from
+      // the requested extension) and write it ourselves — passing a `.tmp`
+      // path directly to Playwright fails because it infers format from the
+      // file extension and rejects unknown ones.
+      const ext = path.extname(full).toLowerCase();
+      const type = ext === ".jpg" || ext === ".jpeg" ? "jpeg" : "png";
       const tmp = `${full}.${process.pid}.${randomUUID().slice(0, 8)}.tmp`;
       try {
-        await page.screenshot({ path: tmp, fullPage: !!a.full_page });
+        const buf = await page.screenshot({ type, fullPage: !!a.full_page });
+        await fsPromises.writeFile(tmp, buf);
         await fsPromises.rename(tmp, full);
       } catch (e) {
         try {
