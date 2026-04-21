@@ -168,15 +168,35 @@ async function bbCreateSession() {
       "BROWSERBASE_API_KEY and BROWSERBASE_PROJECT_ID must be set",
     );
   }
+
+  // Both flags opt-in per session. advancedStealth is Scale-plan-gated on
+  // Browserbase's side; proxies adds residential-IP cost. Default off so a
+  // misconfigured plan doesn't break unrelated runs (HN, Google Sheets, etc.);
+  // flip per vendor when the target sits behind Cloudflare / similar bot
+  // detection (e.g., Airbase).
+  const envBool = (v) => v === "1" || (typeof v === "string" && v.toLowerCase() === "true");
+  const advancedStealth = envBool(process.env.BROWSERBASE_ADVANCED_STEALTH);
+  const proxies = envBool(process.env.BROWSERBASE_PROXIES);
+
+  // keepAlive:false — slice lifetime is tied to wb process; on shutdown
+  // we explicitly REQUEST_RELEASE so quota isn't burned by orphans.
+  const body = { projectId, keepAlive: false };
+  if (advancedStealth) {
+    body.browserSettings = { advancedStealth: true };
+  }
+  if (proxies) {
+    body.proxies = true;
+  }
+
+  log(`[bb] session create advancedStealth=${advancedStealth} proxies=${proxies}`);
+
   const res = await fetch(`${BB_BASE}/v1/sessions`, {
     method: "POST",
     headers: {
       "X-BB-API-Key": apiKey,
       "Content-Type": "application/json",
     },
-    // keepAlive:false — slice lifetime is tied to wb process; on shutdown
-    // we explicitly REQUEST_RELEASE so quota isn't burned by orphans.
-    body: JSON.stringify({ projectId, keepAlive: false }),
+    body: JSON.stringify(body),
   });
   if (!res.ok) {
     throw new Error(

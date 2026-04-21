@@ -29,6 +29,21 @@ Verb arguments support `{{ env.NAME }}` substitution at dispatch time, so any
 secrets your runbook needs (e.g. `HACKERNEWS_PASSWORD`) get pulled from the
 sidecar process env without ever appearing on stdout.
 
+## Optional: anti-detection
+
+Targets behind Cloudflare / Kasada / DataDome (e.g. Airbase) will reject the
+default Browserbase session fingerprint and serve a non-interactive challenge
+page. Flip either flag on for the affected runs.
+
+| Env var                            | Default | Purpose                                          |
+|------------------------------------|---------|--------------------------------------------------|
+| `BROWSERBASE_ADVANCED_STEALTH`     | *(off)* | Send `browserSettings.advancedStealth: true`. Browserbase Scale-plan-gated — API errors on lower plans. |
+| `BROWSERBASE_PROXIES`              | *(off)* | Send `proxies: true`. Routes through Browserbase residential proxy pool. Incurs extra per-session cost. |
+
+Set `=1` (or `=true`) to enable. `proxies: true` alone clears most Cloudflare
+challenges; add `advancedStealth: true` on top when the target still blocks.
+The sidecar logs the resolved config at session create.
+
 ## Optional: session recording (rrweb + CDP screencast)
 
 Each browser session can be recorded two ways and uploaded to a consumer
