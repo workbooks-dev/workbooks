@@ -2,6 +2,7 @@ mod artifacts;
 mod atomic_io;
 mod callback;
 mod checkpoint;
+mod exit_codes;
 mod executor;
 mod output;
 mod parser;
@@ -420,7 +421,7 @@ fn run_folder(
     }
 
     if total_failed > 0 {
-        std::process::exit(1);
+        std::process::exit(exit_codes::EXIT_BLOCK_FAILED);
     }
 }
 
@@ -816,8 +817,12 @@ fn run_single(
     let block_count = workbook.code_block_count();
 
     if block_count == 0 {
-        eprintln!("no executable blocks in {}", file);
-        std::process::exit(0);
+        eprintln!(
+            "no executable blocks in {}. Known runtimes: bash, sh, zsh, python, node, ruby, perl, r, php, lua, swift, go. \
+             Check your fence language tags — `{{no-run}}` requires WB_EXPERIMENTAL_BLOCK_FLAGS=1.",
+            file
+        );
+        std::process::exit(exit_codes::EXIT_USAGE);
     }
 
     // Sandbox: if `requires` is present and we're not already inside a container,
@@ -828,7 +833,7 @@ fn run_single(
                 eprintln!(
                     "error: `requires` sandbox is experimental. Set WB_EXPERIMENTAL_SANDBOX=1 to enable."
                 );
-                std::process::exit(1);
+                std::process::exit(exit_codes::EXIT_SANDBOX_UNAVAILABLE);
             }
 
             let workbook_dir = std::path::Path::new(file)
@@ -841,7 +846,7 @@ fn run_single(
                 Ok(t) => t,
                 Err(e) => {
                     eprintln!("error: sandbox: {}", e);
-                    std::process::exit(1);
+                    std::process::exit(exit_codes::EXIT_SANDBOX_UNAVAILABLE);
                 }
             };
 
@@ -1013,7 +1018,7 @@ fn run_single(
                      refusing to run concurrently — last-writer-wins would lose state.",
                     id, e
                 );
-                std::process::exit(1);
+                std::process::exit(exit_codes::EXIT_CHECKPOINT_BUSY);
             }
         },
         None => None,
@@ -1878,7 +1883,7 @@ fn default_program(lang: &str) -> &str {
     }
 }
 
-const EXIT_PAUSED: i32 = 42;
+use exit_codes::EXIT_PAUSED;
 
 #[allow(clippy::too_many_arguments)]
 fn pause_for_signal(
@@ -2545,7 +2550,7 @@ fn cmd_resume(args: &[String]) {
                  refusing to resume concurrently.",
                 id, e
             );
-            std::process::exit(1);
+            std::process::exit(exit_codes::EXIT_CHECKPOINT_BUSY);
         }
     };
 
@@ -2570,7 +2575,7 @@ fn cmd_resume(args: &[String]) {
             "error: checkpoint '{}' is not paused (status: {:?})",
             id, ckpt.status
         );
-        std::process::exit(1);
+        std::process::exit(exit_codes::EXIT_WORKBOOK_INVALID);
     }
 
     let desc = match pending::load(id) {
@@ -2702,7 +2707,7 @@ fn cmd_resume(args: &[String]) {
         ckpt.mark_failed();
         let _ = checkpoint::save(id, &ckpt);
         let _ = pending::delete(id);
-        std::process::exit(1);
+        std::process::exit(exit_codes::EXIT_SIGNAL_TIMEOUT);
     }
 
     if expired && on_timeout == "skip" {
@@ -2774,7 +2779,7 @@ fn cmd_resume(args: &[String]) {
         ckpt.mark_failed();
         let _ = checkpoint::save(id, &ckpt);
         let _ = pending::delete(id);
-        std::process::exit(1);
+        std::process::exit(exit_codes::EXIT_SIGNAL_TIMEOUT);
     } else {
         // Collect values from --value, --signal file/stdin, or --set.
         if let Some(ref v) = cli.value {

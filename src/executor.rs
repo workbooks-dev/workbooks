@@ -541,6 +541,10 @@ fn spawn_persistent(
     // exec: { python: "uv run python" }  → uv run python -u -c <harness>
     let exec = resolve_exec(exec_config, lang);
     let mut cmd = build_command(exec.as_ref(), program);
+    let effective_program: String = match exec.as_ref() {
+        Some(ExecMode::Prefix(parts)) | Some(ExecMode::Replace(parts)) => parts[0].clone(),
+        None => program.to_string(),
+    };
     for arg in &args {
         cmd.arg(arg);
     }
@@ -554,7 +558,7 @@ fn spawn_persistent(
 
     let mut child = cmd
         .spawn()
-        .map_err(|e| format!("Failed to spawn {}: {}", program, e))?;
+        .map_err(|e| spawn_error_message(&effective_program, lang, &e))?;
 
     let stdin = BufWriter::new(child.stdin.take().unwrap());
     let stdout = child.stdout.take().unwrap();
@@ -710,6 +714,13 @@ pub fn execute_block_oneshot(
     let lang = normalize_language(&block.language, &ctx.default_runtime);
     let exec = resolve_exec(&ctx.exec_config, &lang);
     let mut cmd = build_command(exec.as_ref(), &program);
+    // Effective program name — the binary the OS will actually try to exec.
+    // When `exec:` is set this is the wrapper (e.g. `docker`, `uv`), not the
+    // language runtime. Preserves agent-actionable errors on ENOENT.
+    let effective_program: String = match exec.as_ref() {
+        Some(ExecMode::Prefix(parts)) | Some(ExecMode::Replace(parts)) => parts[0].clone(),
+        None => program.clone(),
+    };
     for arg in &args {
         cmd.arg(arg);
     }
@@ -808,10 +819,37 @@ pub fn execute_block_oneshot(
             block_index: index,
             language: block.language.clone(),
             stdout: String::new(),
-            stderr: format!("Failed to spawn {}: {}", program, e),
+            stderr: spawn_error_message(&effective_program, &block.language, &e),
             exit_code: 127,
             duration: start.elapsed(),
         },
+    }
+}
+
+/// Expand a spawn failure into an actionable message for agents. ENOENT is
+/// by far the most common and the most recoverable — surface it explicitly
+/// with install hints and the `exec:` escape hatch.
+fn spawn_error_message(program: &str, language: &str, err: &std::io::Error) -> String {
+    if err.kind() == std::io::ErrorKind::NotFound {
+        let install_hint = match language.to_lowercase().as_str() {
+            "python" | "python3" | "py" => "install Python (e.g. `brew install python` or `apt install python3`)",
+            "node" | "javascript" | "js" => "install Node.js (e.g. `brew install node` or via `nvm`)",
+            "ruby" | "rb" => "install Ruby (e.g. `brew install ruby` or via `rbenv`)",
+            "go" => "install Go (e.g. `brew install go`)",
+            "r" => "install R (e.g. `brew install r`)",
+            "swift" => "install Swift (macOS: Xcode command-line tools)",
+            "php" => "install PHP (e.g. `brew install php`)",
+            "lua" => "install Lua (e.g. `brew install lua`)",
+            "perl" => "Perl is usually preinstalled; check your PATH",
+            _ => "install the runtime or override with frontmatter `exec:` (e.g. `exec: docker exec my-container`)",
+        };
+        format!(
+            "`{}` not found on PATH — {}. Workbook block language: `{}`. \
+             To run inside a container instead, set frontmatter `exec:` — see `wb inspect` for resolution details.",
+            program, install_hint, language
+        )
+    } else {
+        format!("Failed to spawn {}: {}", program, err)
     }
 }
 
