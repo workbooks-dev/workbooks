@@ -210,7 +210,10 @@ fn dispatch(cli: Cli) {
     let cli_vars: std::collections::HashMap<String, String> = cli
         .set_vars
         .iter()
-        .filter_map(|s| s.split_once('=').map(|(k, v)| (k.to_string(), v.to_string())))
+        .filter_map(|s| {
+            s.split_once('=')
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+        })
         .collect();
 
     let p = Path::new(path);
@@ -543,27 +546,26 @@ fn run_single_collect(
             }
 
             let start = Instant::now();
-            let exit_code =
-                match sandbox::run_in_sandbox(&tag, file, &container_env, &extra_args) {
-                    Ok(code) => code,
-                    Err(e) => {
-                        return output::RunSummary {
-                            source_file: file.to_string(),
-                            total_blocks: block_count,
-                            passed: 0,
-                            failed: 1,
-                            total_duration: std::time::Duration::ZERO,
-                            results: vec![executor::BlockResult {
-                                block_index: 0,
-                                language: "sandbox".to_string(),
-                                stdout: String::new(),
-                                stderr: format!("sandbox run: {}", e),
-                                exit_code: 1,
-                                duration: std::time::Duration::ZERO,
-                            }],
-                        };
-                    }
-                };
+            let exit_code = match sandbox::run_in_sandbox(&tag, file, &container_env, &extra_args) {
+                Ok(code) => code,
+                Err(e) => {
+                    return output::RunSummary {
+                        source_file: file.to_string(),
+                        total_blocks: block_count,
+                        passed: 0,
+                        failed: 1,
+                        total_duration: std::time::Duration::ZERO,
+                        results: vec![executor::BlockResult {
+                            block_index: 0,
+                            language: "sandbox".to_string(),
+                            stdout: String::new(),
+                            stderr: format!("sandbox run: {}", e),
+                            exit_code: 1,
+                            duration: std::time::Duration::ZERO,
+                        }],
+                    };
+                }
+            };
 
             return output::RunSummary {
                 source_file: file.to_string(),
@@ -978,6 +980,24 @@ fn run_single(
             .map(|s| s.to_string_lossy().to_string())
     });
 
+    // Hold a session-long advisory lock on the checkpoint. Fails fast instead
+    // of silently clobbering if another `wb run` or `wb resume` is live for
+    // the same id. Dropped at end of function (including on panic).
+    let _checkpoint_lock = match checkpoint_id.as_ref() {
+        Some(id) => match atomic_io::try_lock_for(&checkpoint::checkpoint_path(id)) {
+            Ok(guard) => Some(guard),
+            Err(e) => {
+                eprintln!(
+                    "error: checkpoint '{}' is in use by another process ({}). \
+                     refusing to run concurrently — last-writer-wins would lose state.",
+                    id, e
+                );
+                std::process::exit(1);
+            }
+        },
+        None => None,
+    };
+
     // Load checkpoint if resuming
     let (replay_until, mut results, mut ckpt) = if let Some(ref id) = checkpoint_id {
         match checkpoint::load(id) {
@@ -1014,16 +1034,35 @@ fn run_single(
     };
 
     // Merge signal-bound vars from the checkpoint into ctx before spawning sessions.
+    // Second-line defense against a pre-validation-era checkpoint or a
+    // hand-edited state file sneaking a reserved name past parse-time checks.
     if let Some(ref c) = ckpt {
         if !c.bound_vars.is_empty() {
-            ctx.vars.extend(c.bound_vars.clone());
-            ctx.env.extend(c.bound_vars.clone());
+            let filtered: std::collections::HashMap<String, String> = c
+                .bound_vars
+                .iter()
+                .filter(|(k, _)| {
+                    if parser::reserved_bind_name(std::iter::once(k.as_str())).is_some() {
+                        eprintln!(
+                            "wb: refusing to apply bound_var '{}' — reserved env name. Skipping.",
+                            k
+                        );
+                        false
+                    } else {
+                        true
+                    }
+                })
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
+            ctx.vars.extend(filtered.clone());
+            ctx.env.extend(filtered);
         }
     }
 
     // Resolve callback config: CLI/env flags take priority, then env-file values
     let resolved_callback_url = callback_url.or_else(|| ctx.env.get("WB_CALLBACK_URL").cloned());
-    let resolved_callback_secret = callback_secret.or_else(|| ctx.env.get("WB_CALLBACK_SECRET").cloned());
+    let resolved_callback_secret =
+        callback_secret.or_else(|| ctx.env.get("WB_CALLBACK_SECRET").cloned());
     let resolved_callback_key = callback_key.or_else(|| ctx.env.get("WB_CALLBACK_KEY").cloned());
 
     let cb = resolved_callback_url.map(|url| callback::CallbackConfig {
@@ -1062,10 +1101,20 @@ fn run_single(
                             let current_hash = checkpoint::hash_code(&block.code);
                             if *saved_hash != current_hash {
                                 if !stale_warned {
-                                    eprintln!("{}", output::style_fail("warning: block source changed since last checkpoint:"));
+                                    eprintln!(
+                                        "{}",
+                                        output::style_fail(
+                                            "warning: block source changed since last checkpoint:"
+                                        )
+                                    );
                                     stale_warned = true;
                                 }
-                                eprintln!("  block {} [{}] L{}", check_idx + 1, block.language, block.line_number);
+                                eprintln!(
+                                    "  block {} [{}] L{}",
+                                    check_idx + 1,
+                                    block.language,
+                                    block.line_number
+                                );
                             }
                         }
                     }
@@ -1208,7 +1257,12 @@ fn run_single(
 
             if !quiet {
                 let preview = block.code.lines().next();
-                output::print_block_header(block_heading.as_deref(), &block.language, block.line_number, preview);
+                output::print_block_header(
+                    block_heading.as_deref(),
+                    &block.language,
+                    block.line_number,
+                    preview,
+                );
             }
 
             let result = session.execute_block(block, block_idx);
@@ -1251,7 +1305,15 @@ fn run_single(
                 // silent block still produces a checkpoint.failed event so
                 // agent orchestrators know a run needs intervention.
                 if let (Some(ref cb), Some(ref ckpt_id)) = (&cb, &checkpoint_id) {
-                    cb.checkpoint_failed(&result, block_idx, block_count, file, ckpt_id, block_heading.as_deref(), block.line_number);
+                    cb.checkpoint_failed(
+                        &result,
+                        block_idx,
+                        block_count,
+                        file,
+                        ckpt_id,
+                        block_heading.as_deref(),
+                        block.line_number,
+                    );
                 }
 
                 // Don't checkpoint the failed block — re-run it on resume
@@ -1265,7 +1327,12 @@ fn run_single(
 
             // Checkpoint after each successful block (or any block without bail)
             if let (Some(ref mut c), Some(ref ckpt_id)) = (&mut ckpt, &checkpoint_id) {
-                c.add_result(&result, block.line_number, block_heading.as_deref(), &block.code);
+                c.add_result(
+                    &result,
+                    block.line_number,
+                    block_heading.as_deref(),
+                    &block.code,
+                );
                 if let Err(e) = checkpoint::save(ckpt_id, c) {
                     eprintln!("warning: checkpoint: {}", e);
                 }
@@ -1408,7 +1475,12 @@ fn run_single(
             }
 
             if let (Some(ref mut c), Some(ref ckpt_id)) = (&mut ckpt, &checkpoint_id) {
-                c.add_result(&result, spec.line_number, block_heading.as_deref(), &spec.raw);
+                c.add_result(
+                    &result,
+                    spec.line_number,
+                    block_heading.as_deref(),
+                    &spec.raw,
+                );
                 if let Err(e) = checkpoint::save(ckpt_id, c) {
                     eprintln!("warning: checkpoint: {}", e);
                 }
@@ -1504,7 +1576,10 @@ fn inspect_workbook(file: &str) {
         println!("venv: {}", venv);
     }
     if let Some(ref vars) = workbook.frontmatter.vars {
-        println!("vars: {}", vars.keys().cloned().collect::<Vec<_>>().join(", "));
+        println!(
+            "vars: {}",
+            vars.keys().cloned().collect::<Vec<_>>().join(", ")
+        );
     }
     if let Some(ref redact) = workbook.frontmatter.redact {
         println!("redact: {}", redact.join(", "));
@@ -1734,10 +1809,7 @@ fn pause_for_signal(
     if let Some(ref to) = desc.timeout_at {
         eprintln!("   timeout_at: {}", to);
     }
-    eprintln!(
-        "   resume:  wb resume {} --signal <payload.json>",
-        id
-    );
+    eprintln!("   resume:  wb resume {} --signal <payload.json>", id);
 
     // Fire workbook.paused callback so agents know we're waiting.
     if let Some(cb) = cb {
@@ -1819,10 +1891,7 @@ fn pause_browser_slice(
     }
     let desc_path = pending::descriptor_path(id);
     eprintln!("   pending: {}", desc_path.display());
-    eprintln!(
-        "   resume:  wb resume {} [--signal <payload.json>]",
-        id
-    );
+    eprintln!("   resume:  wb resume {} [--signal <payload.json>]", id);
 
     // Backwards-compat: fire workbook.paused so consumers already subscribed
     // to that event see the run as paused.
@@ -1838,13 +1907,22 @@ fn pause_browser_slice(
         // granular detail (verb index, live-view URL, heading, etc.).
         let mut extra = serde_json::Map::new();
         if let Some(reason) = pause.reason.as_ref() {
-            extra.insert("reason".to_string(), serde_json::Value::String(reason.clone()));
+            extra.insert(
+                "reason".to_string(),
+                serde_json::Value::String(reason.clone()),
+            );
         }
         if let Some(url) = pause.resume_url.as_ref() {
-            extra.insert("resume_url".to_string(), serde_json::Value::String(url.clone()));
+            extra.insert(
+                "resume_url".to_string(),
+                serde_json::Value::String(url.clone()),
+            );
         }
         if let Some(vi) = pause.verb_index {
-            extra.insert("verb_index".to_string(), serde_json::Value::Number(vi.into()));
+            extra.insert(
+                "verb_index".to_string(),
+                serde_json::Value::Number(vi.into()),
+            );
         }
         cb.step_lifecycle(
             "step.paused",
@@ -2107,10 +2185,7 @@ fn cmd_containers_build(args: &[String]) {
     }
 
     eprintln!();
-    eprintln!(
-        "  {} built, {} cached, {} errors",
-        built, skipped, errors
-    );
+    eprintln!("  {} built, {} cached, {} errors", built, skipped, errors);
 
     if errors > 0 {
         std::process::exit(1);
@@ -2139,18 +2214,23 @@ fn cmd_containers_prune() {
 
 fn cmd_pending(args: &[String]) {
     let json_out = args.iter().any(|a| a == "--format=json" || a == "--json")
-        || args.windows(2).any(|w| w[0] == "--format" && w[1] == "json");
+        || args
+            .windows(2)
+            .any(|w| w[0] == "--format" && w[1] == "json");
 
     let descriptors = pending::list_all();
 
     if json_out {
-        let entries: Vec<serde_json::Value> = descriptors.iter().map(|(id, d)| {
-            let mut val = serde_json::to_value(d).unwrap_or(serde_json::Value::Null);
-            if let serde_json::Value::Object(ref mut map) = val {
-                map.insert("id".to_string(), serde_json::Value::String(id.clone()));
-            }
-            val
-        }).collect();
+        let entries: Vec<serde_json::Value> = descriptors
+            .iter()
+            .map(|(id, d)| {
+                let mut val = serde_json::to_value(d).unwrap_or(serde_json::Value::Null);
+                if let serde_json::Value::Object(ref mut map) = val {
+                    map.insert("id".to_string(), serde_json::Value::String(id.clone()));
+                }
+                val
+            })
+            .collect();
         match serde_json::to_string_pretty(&entries) {
             Ok(s) => println!("{}", s),
             Err(e) => {
@@ -2187,7 +2267,10 @@ fn cmd_cancel(id: &str) {
 }
 
 #[derive(Parser)]
-#[command(name = "wb resume", about = "Resume a paused workbook with a signal payload")]
+#[command(
+    name = "wb resume",
+    about = "Resume a paused workbook with a signal payload"
+)]
 struct ResumeCli {
     /// Checkpoint id to resume (omit to auto-detect from pending signals)
     id: Option<String>,
@@ -2253,9 +2336,7 @@ fn cmd_resume(args: &[String]) {
     let cli = ResumeCli::parse_from(parse_args);
 
     if std::env::var("WB_EXPERIMENTAL_WAIT").ok().as_deref() != Some("1") {
-        eprintln!(
-            "error: `wb resume` is experimental. Set WB_EXPERIMENTAL_WAIT=1 to enable."
-        );
+        eprintln!("error: `wb resume` is experimental. Set WB_EXPERIMENTAL_WAIT=1 to enable.");
         std::process::exit(1);
     }
 
@@ -2263,8 +2344,7 @@ fn cmd_resume(args: &[String]) {
     // resolve signal config when the user omits an id (auto-detect mode).
     // env-file paths are treated as cwd-relative here because the workbook
     // dir isn't known until after we resolve a checkpoint.
-    let mut env_for_signal: std::collections::HashMap<String, String> =
-        std::env::vars().collect();
+    let mut env_for_signal: std::collections::HashMap<String, String> = std::env::vars().collect();
     for path in &cli.env_files {
         match secrets::load_env_file(path) {
             Ok(env) => env_for_signal.extend(env),
@@ -2309,6 +2389,21 @@ fn cmd_resume(args: &[String]) {
             }
         };
     let id = id.as_str();
+
+    // Hold the same advisory lock `wb run` uses, so a concurrent run of the
+    // same id fails fast instead of racing on checkpoint state. Released
+    // explicitly before we re-enter `run_single`, which takes the lock itself.
+    let resume_lock = match atomic_io::try_lock_for(&checkpoint::checkpoint_path(id)) {
+        Ok(guard) => guard,
+        Err(e) => {
+            eprintln!(
+                "error: checkpoint '{}' is in use by another process ({}). \
+                 refusing to resume concurrently.",
+                id, e
+            );
+            std::process::exit(1);
+        }
+    };
 
     // Load the paused checkpoint.
     let mut ckpt = match checkpoint::load(id) {
@@ -2413,7 +2508,10 @@ fn cmd_resume(args: &[String]) {
         let cli_vars: std::collections::HashMap<String, String> = cli
             .set_vars
             .iter()
-            .filter_map(|s| s.split_once('=').map(|(k, v)| (k.to_string(), v.to_string())))
+            .filter_map(|s| {
+                s.split_once('=')
+                    .map(|(k, v)| (k.to_string(), v.to_string()))
+            })
             .collect();
 
         run_single(
@@ -2629,6 +2727,9 @@ fn cmd_resume(args: &[String]) {
 
     // Re-enter the normal run flow using the original workbook path.
     let workbook_file = ckpt.workbook.clone();
+    // Release the resume lock so run_single can take it; state is already
+    // persisted, further writes happen via run_single's own lock acquisition.
+    drop(resume_lock);
 
     let format_flag = if cli.json {
         Some(OutputFormat::Json)
@@ -2646,7 +2747,10 @@ fn cmd_resume(args: &[String]) {
     let cli_vars: std::collections::HashMap<String, String> = cli
         .set_vars
         .iter()
-        .filter_map(|s| s.split_once('=').map(|(k, v)| (k.to_string(), v.to_string())))
+        .filter_map(|s| {
+            s.split_once('=')
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+        })
         .collect();
 
     run_single(
@@ -2721,8 +2825,7 @@ mod tests {
 
     #[test]
     fn merge_signal_object_binds_matching_keys() {
-        let val: serde_json::Value =
-            serde_json::json!({"otp_code": "123456", "extra": "hello"});
+        let val: serde_json::Value = serde_json::json!({"otp_code": "123456", "extra": "hello"});
         let bind_names = vec!["otp_code".to_string()];
         let mut out = HashMap::new();
         merge_signal_into_vars(&val, &bind_names, &mut out);
@@ -2732,8 +2835,7 @@ mod tests {
 
     #[test]
     fn merge_signal_object_multi_bind() {
-        let val: serde_json::Value =
-            serde_json::json!({"code": "abc", "sender": "alice@test.com"});
+        let val: serde_json::Value = serde_json::json!({"code": "abc", "sender": "alice@test.com"});
         let bind_names = vec!["code".to_string(), "sender".to_string()];
         let mut out = HashMap::new();
         merge_signal_into_vars(&val, &bind_names, &mut out);
@@ -2867,10 +2969,7 @@ mod tests {
 
     #[test]
     fn scalar_object_returns_none() {
-        assert_eq!(
-            json_scalar_to_string(&serde_json::json!({"a": 1})),
-            None
-        );
+        assert_eq!(json_scalar_to_string(&serde_json::json!({"a": 1})), None);
     }
 
     // ─── checkpoint state transitions ────────────────────────────────
@@ -3015,8 +3114,7 @@ mod tests {
 
         let mut c = checkpoint::Checkpoint::new("roundtrip.md", 3);
         c.mark_paused();
-        c.bound_vars
-            .insert("token".to_string(), "abc".to_string());
+        c.bound_vars.insert("token".to_string(), "abc".to_string());
         c.complete_wait(4);
 
         checkpoint::save(id, &c).expect("save should succeed");
@@ -3219,7 +3317,8 @@ echo "step-2-got: $my_var"
 
         let exit_code = run_output.status.code().unwrap_or(-1);
         assert_eq!(
-            exit_code, 42,
+            exit_code,
+            42,
             "expected exit code 42 (paused), got {}.\nstderr: {}",
             exit_code,
             String::from_utf8_lossy(&run_output.stderr)
@@ -3247,19 +3346,15 @@ echo "step-2-got: $my_var"
         std::fs::write(&signal_path, r#"{"my_var": "hello-from-signal"}"#).unwrap();
 
         let resume_output = std::process::Command::new(&wb_bin)
-            .args([
-                "resume",
-                ckpt_id,
-                "--signal",
-                signal_path.to_str().unwrap(),
-            ])
+            .args(["resume", ckpt_id, "--signal", signal_path.to_str().unwrap()])
             .env("WB_EXPERIMENTAL_WAIT", "1")
             .output()
             .expect("wb resume should execute");
 
         let resume_exit = resume_output.status.code().unwrap_or(-1);
         assert_eq!(
-            resume_exit, 0,
+            resume_exit,
+            0,
             "expected exit code 0 after resume, got {}.\nstderr: {}\nstdout: {}",
             resume_exit,
             String::from_utf8_lossy(&resume_output.stderr),
