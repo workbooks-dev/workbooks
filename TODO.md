@@ -8,18 +8,18 @@ Status legend: `[ ]` not started · `[~]` in progress · `[x]` done · `[-]` dro
 
 ## 🚨 Fix first — silent data-loss risks
 
-- [~] **1. Atomic checkpoint + pending writes.** `src/checkpoint.rs:153-160` and `src/pending.rs:46-53` use `fs::write()` directly. SIGKILL mid-write corrupts JSON. Fix: write to `.tmp` + `rename()`, set `0o600` perms on Unix.
-- [~] **2. Remove `checkpoint_id.as_ref().unwrap()` panics.** `src/main.rs:1259, 1268, 1403, 1411, 1434`. Invariant holds today but is implicit. Combine the two `Option` matches.
-- [~] **3. File lock on concurrent checkpoint writes.** Two `wb run --checkpoint same-id` runs silently clobber each other. Add `flock()` in `checkpoint::save()`.
-- [~] **4. Reserved-name blocklist for bound_vars.** A `wait` block can `bind: PATH` (or `HOME`, `WB_*`) and replace env vars on resume. Reject at parse time with a clear error.
-- [~] **5. Verify signal-validation ordering.** Agent claimed malformed signal JSON wedges resume by mutating state before validation. `src/main.rs:2569-2575` looks OK — confirm fully and plug any leaks.
+- [x] **1. Atomic checkpoint + pending writes.** Shipped in `1fe0323` (write_secret_file with tmp+rename + 0o600 on Unix).
+- [x] **2. Remove `checkpoint_id.as_ref().unwrap()` panics.** Shipped in `f2e21b5` (zipped-Option matches).
+- [x] **3. File lock on concurrent checkpoint writes.** Shipped in `f2e21b5` (session-long flock in `run_single` + `cmd_resume`).
+- [x] **4. Reserved-name blocklist for bound_vars.** Shipped in `87d462a` + defense-in-depth env-apply filter in `f2e21b5`.
+- [x] **5. Verify signal-validation ordering.** Verified correct — validation happens before checkpoint mutation (`src/main.rs:2569-2586`). Bonus belt-and-braces via #4's env-apply filter.
 
 ## 🎯 Highest agent-leverage UX wins
 
 - [ ] **6. Structured error types in JSON output.** Add `error: { type, message, line, column }` to each block result in `src/output.rs`. Agents stop regex-parsing stderr.
 - [ ] **7. Real exit-code vocabulary.** Today it's `0 | 1 | 42`. Agents can't distinguish block failure vs parse error vs sidecar crash. Define the table, document it, update `src/main.rs` dispatch.
-- [ ] **8. `wb inspect --json`.** Emit `[{index, language, line, heading, flags}]` instead of human prose. `src/main.rs` inspect command.
-- [ ] **9. Trace-correlation field.** Propagate `TRIGGER_RUN_ID` / generated ULID into every callback payload, result file header, artifact upload. Single join key across a run.
+- [x] **8. `wb inspect --json`.** Shipped in `09a8d79` — stable `{source, frontmatter, blocks[]}` shape covering code/wait/browser sections.
+- [x] **9. Trace-correlation field.** Shipped in `09a8d79` — `run_id` threaded through `RunSummary`, `CallbackConfig`, and every callback payload. Resolution order: `WB_RECORDING_RUN_ID` → `TRIGGER_RUN_ID` → generated.
 - [ ] **10. Partial output capture on timeout/SIGKILL.** Ring-buffer stdout so killed blocks still report what they emitted, with `stdout_partial: true` flag.
 - [ ] **11. Line+column + "did-you-mean" on parse/runtime errors.** Bad YAML, unknown runtime, typo'd flag — each is an agent retry loop today.
 - [ ] **12. Callback `event_version` + retries/ordering.** Today it's fire-and-forget `curl`. Version the schema, queue in-order, retry 5xx.
