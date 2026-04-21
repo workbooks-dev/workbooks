@@ -682,9 +682,16 @@ async function runVerb(page, verb, index, ctx) {
       return `${selector} (${state})`;
     }
     case "screenshot": {
-      const path = a.path ?? `screenshot-${Date.now()}.png`;
-      await page.screenshot({ path, fullPage: !!a.full_page });
-      return `→ ${path}`;
+      // Relative paths resolve into $WB_ARTIFACTS_DIR so wb's main-loop
+      // `artifacts.sync()` picks them up and uploads to R2. Absolute paths
+      // are respected as-is (escape hatch for one-off local dumps).
+      const requested = a.path ?? `screenshot-${Date.now()}.png`;
+      const artifactsDir = (process.env.WB_ARTIFACTS_DIR || "").trim();
+      const full = path.isAbsolute(requested)
+        ? requested
+        : path.join(artifactsDir || ".", requested);
+      await page.screenshot({ path: full, fullPage: !!a.full_page });
+      return `→ ${requested}`;
     }
     case "extract": {
       // Pull structured rows out of the page. Each `field` entry is either:
