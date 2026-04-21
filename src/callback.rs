@@ -1,4 +1,5 @@
 use std::process::Command;
+use std::time::Duration;
 
 use chrono::Utc;
 use hmac::{Hmac, Mac};
@@ -10,6 +11,20 @@ use crate::executor::BlockResult;
 /// Hard cap on stdout/stderr bytes forwarded in callback payloads.
 /// Tail-biased truncation: we keep the end since failures usually surface there.
 const MAX_OUTPUT_BYTES: usize = 64 * 1024;
+
+/// Schema version for callback payloads. Bumped when the payload shape
+/// changes incompatibly so receivers can branch. Receivers should treat
+/// an unknown version as "newer than I handle" and either drop or log.
+const EVENT_VERSION: &str = "1";
+
+/// Exponential-ish backoff delays for HTTP callback retries.
+/// On 5xx or network error we retry; on 2xx/4xx we stop (4xx won't heal).
+/// Total wall time if all retries fire: ~1.2s plus the curl timeouts.
+const HTTP_RETRY_DELAYS: &[Duration] = &[
+    Duration::from_millis(0),
+    Duration::from_millis(200),
+    Duration::from_millis(1000),
+];
 
 /// Prepare a captured stdout/stderr string for inclusion in a callback payload.
 ///
@@ -51,6 +66,7 @@ fn build_step_complete_payload(
 ) -> serde_json::Value {
     json!({
         "event": "step.complete",
+            "event_version": EVENT_VERSION,
         "run_id": run_id,
         "checkpoint_id": checkpoint_id,
         "workbook": workbook,
@@ -125,6 +141,7 @@ impl CallbackConfig {
     ) {
         let payload = json!({
             "event": "checkpoint.failed",
+            "event_version": EVENT_VERSION,
             "run_id": &self.run_id,
             "checkpoint_id": checkpoint_id,
             "workbook": workbook,
@@ -157,6 +174,7 @@ impl CallbackConfig {
     ) {
         let payload = json!({
             "event": "workbook.paused",
+            "event_version": EVENT_VERSION,
             "run_id": &self.run_id,
             "checkpoint_id": checkpoint_id,
             "workbook": workbook,
@@ -191,6 +209,7 @@ impl CallbackConfig {
     ) {
         let mut payload = json!({
             "event": event,
+            "event_version": EVENT_VERSION,
             "run_id": &self.run_id,
             "checkpoint_id": checkpoint_id,
             "workbook": workbook,
@@ -227,6 +246,7 @@ impl CallbackConfig {
     ) {
         let payload = json!({
             "event": "run.complete",
+            "event_version": EVENT_VERSION,
             "run_id": &self.run_id,
             "checkpoint_id": checkpoint_id,
             "workbook": workbook,
@@ -252,47 +272,47 @@ impl CallbackConfig {
 
     fn send_http(&self, event: &str, payload: &str) {
         let event_header = format!("X-WB-Event: {}", event);
-        let sig_header;
-
-        let mut args = vec![
-            "-s",
-            "-o",
-            "/dev/null",
-            "-w",
-            "%{http_code}",
-            "--max-time",
-            "5",
-            "-X",
-            "POST",
-            "-H",
-            "Content-Type: application/json",
-            "-H",
-            &event_header,
-        ];
-
-        if let Some(ref secret) = self.secret {
-            sig_header = format!(
+        let sig_header = self.secret.as_ref().map(|s| {
+            format!(
                 "X-WB-Signature: sha256={}",
-                sign(payload.as_bytes(), secret.as_bytes())
-            );
-            args.push("-H");
-            args.push(&sig_header);
-        }
+                sign(payload.as_bytes(), s.as_bytes())
+            )
+        });
 
-        args.push("-d");
-        args.push(payload);
-        args.push(&self.url);
-
-        match Command::new("curl").args(&args).output() {
-            Ok(output) => {
-                let code = String::from_utf8_lossy(&output.stdout);
-                let code = code.trim();
-                if !code.starts_with('2') {
-                    eprintln!("warning: callback {} returned HTTP {}", event, code);
-                }
+        for (attempt, delay) in HTTP_RETRY_DELAYS.iter().enumerate() {
+            if *delay > Duration::ZERO {
+                std::thread::sleep(*delay);
             }
-            Err(e) => {
-                eprintln!("warning: callback failed: {}", e);
+            let is_last = attempt + 1 == HTTP_RETRY_DELAYS.len();
+            match try_send_http_once(&self.url, &event_header, sig_header.as_deref(), payload) {
+                HttpSendResult::Ok => return,
+                HttpSendResult::ClientError(code) => {
+                    // 4xx — receiver says we're wrong; retrying won't help.
+                    eprintln!(
+                        "warning: callback {} returned HTTP {} (not retrying)",
+                        event, code
+                    );
+                    return;
+                }
+                HttpSendResult::ServerError(code) if is_last => {
+                    eprintln!(
+                        "warning: callback {} failed after {} attempts: HTTP {}",
+                        event,
+                        HTTP_RETRY_DELAYS.len(),
+                        code
+                    );
+                }
+                HttpSendResult::NetworkError(err) if is_last => {
+                    eprintln!(
+                        "warning: callback {} failed after {} attempts: {}",
+                        event,
+                        HTTP_RETRY_DELAYS.len(),
+                        err
+                    );
+                }
+                HttpSendResult::ServerError(_) | HttpSendResult::NetworkError(_) => {
+                    // Non-terminal failure — loop will retry after the next backoff.
+                }
             }
         }
     }
@@ -312,8 +332,7 @@ impl CallbackConfig {
             }
         };
 
-        let mut conn = match client.get_connection_with_timeout(std::time::Duration::from_secs(5))
-        {
+        let mut conn = match client.get_connection_with_timeout(std::time::Duration::from_secs(5)) {
             Ok(c) => c,
             Err(e) => {
                 eprintln!("warning: redis callback connect: {}", e);
@@ -333,6 +352,68 @@ impl CallbackConfig {
         if let Err(e) = result {
             eprintln!("warning: redis callback XADD: {}", e);
         }
+    }
+}
+
+/// Outcome of a single curl HTTP callback attempt.
+enum HttpSendResult {
+    /// 2xx — delivered.
+    Ok,
+    /// 4xx — receiver rejected; no point retrying.
+    ClientError(String),
+    /// 5xx — transient server-side; safe to retry.
+    ServerError(String),
+    /// Curl itself failed (DNS, TLS, timeout, non-HTTP response).
+    NetworkError(String),
+}
+
+fn try_send_http_once(
+    url: &str,
+    event_header: &str,
+    sig_header: Option<&str>,
+    payload: &str,
+) -> HttpSendResult {
+    let mut args: Vec<&str> = vec![
+        "-s",
+        "-o",
+        "/dev/null",
+        "-w",
+        "%{http_code}",
+        "--max-time",
+        "5",
+        "-X",
+        "POST",
+        "-H",
+        "Content-Type: application/json",
+        "-H",
+        event_header,
+    ];
+
+    if let Some(sh) = sig_header {
+        args.push("-H");
+        args.push(sh);
+    }
+
+    args.push("-d");
+    args.push(payload);
+    args.push(url);
+
+    match Command::new("curl").args(&args).output() {
+        Ok(output) => {
+            let code = String::from_utf8_lossy(&output.stdout);
+            let code = code.trim().to_string();
+            if code.starts_with('2') {
+                HttpSendResult::Ok
+            } else if code.starts_with('4') {
+                HttpSendResult::ClientError(code)
+            } else if code.starts_with('5') {
+                HttpSendResult::ServerError(code)
+            } else {
+                // 000 (curl connection failure), 3xx without follow, etc.
+                HttpSendResult::NetworkError(format!("unexpected response code: {}", code))
+            }
+        }
+        Err(e) => HttpSendResult::NetworkError(format!("spawn curl: {}", e)),
     }
 }
 
@@ -488,6 +569,7 @@ mod tests {
             "run-abc",
         );
         assert_eq!(payload["event"], "step.complete");
+        assert_eq!(payload["event_version"], "1");
         assert_eq!(payload["run_id"], "run-abc");
         assert_eq!(payload["checkpoint_id"], "ckpt-1");
         assert_eq!(payload["workbook"], "health-check");
@@ -515,6 +597,7 @@ mod tests {
         });
         let mut payload = json!({
             "event": "step.paused",
+            "event_version": EVENT_VERSION,
             "checkpoint_id": "ckpt-1",
             "workbook": "airbase-login",
             "block": {
@@ -550,16 +633,7 @@ mod tests {
             duration: std::time::Duration::from_millis(5),
             error_type: None,
         };
-        let payload = build_step_complete_payload(
-            &result,
-            4,
-            10,
-            "wb",
-            None,
-            None,
-            0,
-            "",
-        );
+        let payload = build_step_complete_payload(&result, 4, 10, "wb", None, None, 0, "");
         let stdout = payload["block"]["stdout"].as_str().unwrap();
         assert!(stdout.contains("…[truncated 50 bytes]"));
         assert!(stdout.len() < huge.len());
