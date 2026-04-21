@@ -28,9 +28,15 @@ specific run.
 Verb arguments support two substitutions at dispatch time:
 
 - `{{ env.NAME }}` — reads `process.env.NAME`. Use for static secrets injected via Doppler / the agent's env.
-- `{{ artifacts.NAME }}` — reads `$WB_ARTIFACTS_DIR/NAME.txt` (falling back to `$WB_ARTIFACTS_DIR/NAME`). Use for dynamic values produced by an earlier bash cell — OTPs, magic-link URLs, export IDs, anything polled from an external system mid-run. Each read happens per-verb with no caching, so writes land immediately.
+- `{{ artifacts.NAME }}` — reads `$WB_ARTIFACTS_DIR/NAME.txt` (falling back to `$WB_ARTIFACTS_DIR/NAME`). Use for dynamic values produced by an earlier bash cell — OTPs, magic-link URLs, export IDs, anything polled from an external system mid-run. Reads are cached for the duration of one slice; a bash cell that runs *between* slices is always picked up by the next slice's verbs.
 
-Both forms are redacted in stdout summaries — only the verb name + selector make it into the log.
+Both forms are redacted in stdout summaries — only the verb name + selector make it into the log. Expanded values are also scrubbed from `verb.failed` / `slice.failed` error messages before they cross the stdio boundary.
+
+**Missing-value policy.** Set `WB_SUBSTITUTION_ON_MISSING` to choose how a missing `env.X` or `artifacts.X` is handled:
+
+- `warn` (default) — log a stderr warning and substitute an empty string; the verb continues.
+- `error` — throw, failing the slice. Use in CI so a missing OTP doesn't silently dispatch an empty selector.
+- `empty` — substitute empty silently (suppresses the warning).
 
 ## Optional: anti-detection
 
@@ -77,7 +83,7 @@ Each POST carries headers `Authorization: Bearer <secret>`,
 `step.recording.*` on the callback stream:
 
 - `step.recording.started` — once per session, payload includes `run_id`, `kinds`.
-- `step.recording.uploaded` — on 2xx PUT, payload includes `kind`, `bytes`.
+- `step.recording.uploaded` — on 2xx POST, payload includes `kind`, `bytes`.
 - `step.recording.failed` — on network/ffmpeg/upload error, payload includes `kind`, `status?`, `reason`. Non-fatal: the slice still completes.
 
 ## Usage

@@ -49,7 +49,7 @@ const SUPPORTS = [
 ];
 
 const BB_BASE = "https://api.browserbase.com";
-const VERSION = "0.5.3";
+const VERSION = "0.6.0";
 
 // --- Recording config -------------------------------------------------------
 //
@@ -94,11 +94,25 @@ function loadRecordingConfig() {
     (process.env.TRIGGER_RUN_ID || "").trim() ||
     `wb-${randomUUID()}`;
 
-  const fps =
+  // Clamp to ranges ffmpeg/libvpx-vp9 actually handles. Requesting fps=120
+  // silently blew up memory; quality=0 produced unwatchable garbage. Clamp
+  // + log so operators see the effective value.
+  const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v));
+  const rawFps =
     Number.parseInt(process.env.WB_RECORDING_SCREENCAST_FPS || "", 10) || 5;
-  const quality =
+  const rawQuality =
     Number.parseInt(process.env.WB_RECORDING_SCREENCAST_QUALITY || "", 10) ||
     60;
+  const fps = clamp(rawFps, 1, 30);
+  const quality = clamp(rawQuality, 10, 95);
+  if (fps !== rawFps) {
+    log(`[recording] fps=${rawFps} clamped to ${fps} (valid range 1..30)`);
+  }
+  if (quality !== rawQuality) {
+    log(
+      `[recording] quality=${rawQuality} clamped to ${quality} (valid range 10..95)`,
+    );
+  }
 
   const rrwebRequested = process.env.WB_RECORDING_RRWEB !== "0";
   const videoRequested = process.env.WB_RECORDING_VIDEO !== "0";
@@ -131,6 +145,10 @@ function loadRecordingConfig() {
     return { enabled: false, reason: "all-kinds-disabled" };
   }
 
+  const rrwebMaxEvents =
+    Number.parseInt(process.env.WB_RECORDING_RRWEB_MAX_EVENTS || "", 10) ||
+    50_000;
+
   return {
     enabled: true,
     uploadUrl,
@@ -140,6 +158,7 @@ function loadRecordingConfig() {
     quality,
     kinds,
     rrwebSource,
+    rrwebMaxEvents,
   };
 }
 
@@ -194,14 +213,18 @@ async function bbCreateSession() {
 
   log(`[bb] session create advancedStealth=${advancedStealth} proxies=${proxies}`);
 
-  const res = await fetch(`${BB_BASE}/v1/sessions`, {
-    method: "POST",
-    headers: {
-      "X-BB-API-Key": apiKey,
-      "Content-Type": "application/json",
+  const res = await retryableFetch(
+    `${BB_BASE}/v1/sessions`,
+    {
+      method: "POST",
+      headers: {
+        "X-BB-API-Key": apiKey,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(body),
     },
-    body: JSON.stringify(body),
-  });
+    "bb.create",
+  );
   if (!res.ok) {
     throw new Error(
       `Browserbase create failed (${res.status}): ${await safeText(res)}`,
@@ -212,9 +235,11 @@ async function bbCreateSession() {
 
 async function bbGetLiveUrl(sessionId) {
   const apiKey = process.env.BROWSERBASE_API_KEY;
-  const res = await fetch(`${BB_BASE}/v1/sessions/${sessionId}/debug`, {
-    headers: { "X-BB-API-Key": apiKey },
-  });
+  const res = await retryableFetch(
+    `${BB_BASE}/v1/sessions/${sessionId}/debug`,
+    { headers: { "X-BB-API-Key": apiKey } },
+    "bb.debug",
+  );
   if (!res.ok) {
     throw new Error(
       `Browserbase debug fetch failed (${res.status}): ${await safeText(res)}`,
@@ -228,11 +253,15 @@ async function bbReleaseSession(sessionId) {
   const apiKey = process.env.BROWSERBASE_API_KEY;
   const projectId = process.env.BROWSERBASE_PROJECT_ID;
   try {
-    await fetch(`${BB_BASE}/v1/sessions/${sessionId}`, {
-      method: "POST",
-      headers: { "X-BB-API-Key": apiKey, "Content-Type": "application/json" },
-      body: JSON.stringify({ projectId, status: "REQUEST_RELEASE" }),
-    });
+    await retryableFetch(
+      `${BB_BASE}/v1/sessions/${sessionId}`,
+      {
+        method: "POST",
+        headers: { "X-BB-API-Key": apiKey, "Content-Type": "application/json" },
+        body: JSON.stringify({ projectId, status: "REQUEST_RELEASE" }),
+      },
+      "bb.release",
+    );
   } catch (e) {
     log(`[shutdown] release session ${sessionId} failed: ${e.message}`);
   }
@@ -246,6 +275,44 @@ async function safeText(res) {
   }
 }
 
+// Retry transient network + 5xx/429 failures with short exponential backoff.
+// Each attempt gets its own AbortController + timeout; caller-passed signals
+// are not plumbed through since we don't have a cancellation story above this
+// layer. Non-retryable statuses (4xx except 429) are returned immediately for
+// the caller to handle.
+async function retryableFetch(url, opts = {}, label, { timeoutMs = 30_000 } = {}) {
+  const delays = [100, 500];
+  let lastErr = null;
+  let lastRes = null;
+  for (let attempt = 0; attempt <= delays.length; attempt++) {
+    if (attempt > 0) {
+      await new Promise((r) => setTimeout(r, delays[attempt - 1]));
+      const prev = lastRes
+        ? `status=${lastRes.status}`
+        : `err=${lastErr?.message || lastErr}`;
+      log(`[retry] ${label} attempt ${attempt + 1}/3 (${prev})`);
+    }
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const res = await fetch(url, { ...opts, signal: controller.signal });
+      if (res.ok) return res;
+      if (res.status === 429 || (res.status >= 500 && res.status < 600)) {
+        lastRes = res;
+        continue;
+      }
+      return res;
+    } catch (e) {
+      lastErr = e;
+      continue;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  if (lastRes) return lastRes;
+  throw lastErr;
+}
+
 // --- Session cache ----------------------------------------------------------
 
 const sessions = new Map(); // name -> { sid, browser, context, page, liveUrl, recording }
@@ -253,32 +320,48 @@ const sessions = new Map(); // name -> { sid, browser, context, page, liveUrl, r
 async function ensureSession(name) {
   if (sessions.has(name)) return sessions.get(name);
 
+  // Browserbase charges for the session the moment it's created; if anything
+  // after this point throws (debug URL, CDP connect, newContext, recording
+  // setup) we must release it explicitly or quota leaks until BB's idle
+  // timeout.
   const created = await bbCreateSession();
-  const liveUrl = await bbGetLiveUrl(created.id);
-  const browser = await chromium.connectOverCDP(created.connectUrl);
-  const context = browser.contexts()[0] ?? (await browser.newContext());
-  const page = context.pages()[0] ?? (await context.newPage());
+  let browser = null;
+  try {
+    const liveUrl = await bbGetLiveUrl(created.id);
+    browser = await chromium.connectOverCDP(created.connectUrl);
+    const context = browser.contexts()[0] ?? (await browser.newContext());
+    const page = context.pages()[0] ?? (await context.newPage());
 
-  const info = {
-    sid: created.id,
-    browser,
-    context,
-    page,
-    liveUrl,
-    recording: null,
-  };
-  sessions.set(name, info);
+    const info = {
+      sid: created.id,
+      browser,
+      context,
+      page,
+      liveUrl,
+      recording: null,
+    };
+    sessions.set(name, info);
 
-  send({
-    type: "slice.session_started",
-    session: name,
-    session_id: created.id,
-    live_url: liveUrl,
-    started_at: new Date().toISOString(),
-  });
+    send({
+      type: "slice.session_started",
+      session: name,
+      session_id: created.id,
+      live_url: liveUrl,
+      started_at: new Date().toISOString(),
+    });
 
-  await startRecording(info, name);
-  return info;
+    await startRecording(info, name);
+    return info;
+  } catch (e) {
+    if (browser) {
+      try {
+        await browser.close();
+      } catch {}
+    }
+    sessions.delete(name);
+    await bbReleaseSession(created.id);
+    throw e;
+  }
 }
 
 // --- Recording (rrweb + CDP screencast) ------------------------------------
@@ -301,6 +384,8 @@ async function startRecording(info, sessionName) {
   info.recording = {
     kinds: { ...RECORDING.kinds },
     rrwebEvents: [],
+    rrwebDropped: 0,
+    rrwebOverflowLogged: false,
     cdp: null,
     ffmpeg: null,
     ffmpegDone: null,
@@ -308,11 +393,28 @@ async function startRecording(info, sessionName) {
   };
   const rec = info.recording;
 
+  // Drop oldest events once the buffer exceeds the cap — keeps the tail of a
+  // long run (usually the interesting bit) rather than failing the upload or
+  // OOMing the sidecar. One warning per session so ops can spot it.
+  const pushRrweb = (e) => {
+    if (rec.rrwebEvents.length >= RECORDING.rrwebMaxEvents) {
+      rec.rrwebEvents.shift();
+      rec.rrwebDropped++;
+      if (!rec.rrwebOverflowLogged) {
+        rec.rrwebOverflowLogged = true;
+        log(
+          `[recording] rrweb buffer hit cap (${RECORDING.rrwebMaxEvents}); dropping oldest events`,
+        );
+      }
+    }
+    rec.rrwebEvents.push(e);
+  };
+
   if (rec.kinds.rrweb) {
     try {
       await info.context.exposeBinding("__wbRrwebFlush", (_src, batch) => {
         if (Array.isArray(batch)) {
-          for (const e of batch) rec.rrwebEvents.push(e);
+          for (const e of batch) pushRrweb(e);
         }
       });
       const bootstrap = `
@@ -397,10 +499,56 @@ async function startRecording(info, sessionName) {
 
       const cdp = await info.context.newCDPSession(info.page);
       rec.cdp = cdp;
+      // Dedup identical consecutive frames. CDP emits repeats when nothing
+      // changed on screen; encoding them as distinct frames bloats the WebM
+      // and mis-paces playback. Compare the base64 string directly — it's
+      // cheaper than hashing and equivalent for exact equality.
+      let lastFrameData = null;
+      let dedupCount = 0;
+      let dedupLogged = false;
+
       cdp.on("Page.screencastFrame", async (frame) => {
         try {
           if (ff.stdin.writable && !ff.killed) {
-            ff.stdin.write(Buffer.from(frame.data, "base64"));
+            if (frame.data === lastFrameData) {
+              dedupCount++;
+              if (!dedupLogged && dedupCount >= 100) {
+                dedupLogged = true;
+                log(
+                  `[recording] dedup active (${dedupCount} duplicate frames skipped so far)`,
+                );
+              }
+              // Still ack — Chrome needs it to keep streaming.
+              await cdp.send("Page.screencastFrameAck", {
+                sessionId: frame.sessionId,
+              });
+              return;
+            }
+            lastFrameData = frame.data;
+            const buf = Buffer.from(frame.data, "base64");
+            const ok = ff.stdin.write(buf);
+            // Backpressure: if ffmpeg's stdin buffer is full, wait for drain
+            // before acking so Chrome slows frame production instead of
+            // piling JPEG frames in Node heap. 5s fail-open so a wedged
+            // ffmpeg can't stall the protocol indefinitely.
+            if (!ok) {
+              await new Promise((resolve) => {
+                let fired = false;
+                const done = () => {
+                  if (fired) return;
+                  fired = true;
+                  ff.stdin.off("drain", done);
+                  ff.stdin.off("close", done);
+                  ff.stdin.off("error", done);
+                  clearTimeout(timer);
+                  resolve();
+                };
+                const timer = setTimeout(done, 5000);
+                ff.stdin.once("drain", done);
+                ff.stdin.once("close", done);
+                ff.stdin.once("error", done);
+              });
+            }
           }
           // Must ack each frame or Chrome stops streaming.
           await cdp.send("Page.screencastFrameAck", {
@@ -453,7 +601,13 @@ async function flushRecording(info, sessionName) {
         return out;
       });
       if (Array.isArray(tail)) {
-        for (const e of tail) rec.rrwebEvents.push(e);
+        for (const e of tail) {
+          if (rec.rrwebEvents.length >= RECORDING.rrwebMaxEvents) {
+            rec.rrwebEvents.shift();
+            rec.rrwebDropped++;
+          }
+          rec.rrwebEvents.push(e);
+        }
       }
     } catch (e) {
       log(`[recording] rrweb final drain failed: ${e.message}`);
@@ -464,6 +618,7 @@ async function flushRecording(info, sessionName) {
           run_id: RECORDING.runId,
           session: sessionName,
           event_count: rec.rrwebEvents.length,
+          dropped: rec.rrwebDropped,
           events: rec.rrwebEvents,
         });
         rrwebBody = await gzip(Buffer.from(json, "utf8"));
@@ -474,31 +629,46 @@ async function flushRecording(info, sessionName) {
   }
 
   let videoBody = null;
+  let videoFailure = null;
   if (rec.kinds.video && rec.cdp && rec.ffmpeg) {
     try {
       await rec.cdp.send("Page.stopScreencast");
     } catch {
       // Browser may already be tearing down.
     }
+    const timeoutMs =
+      Number.parseInt(process.env.WB_RECORDING_FFMPEG_TIMEOUT_MS || "", 10) ||
+      30_000;
     try {
       rec.ffmpeg.stdin.end();
       const settled = await Promise.race([
         rec.ffmpegDone,
-        new Promise((r) => setTimeout(() => r("timeout"), 15_000)),
+        new Promise((r) =>
+          setTimeout(() => r({ __timeout: true }), timeoutMs),
+        ),
       ]);
-      if (settled === "timeout") {
-        log("[recording] ffmpeg did not exit within 15s; killing");
+      if (settled && typeof settled === "object" && settled.__timeout) {
+        log(`[recording] ffmpeg did not exit within ${timeoutMs}ms; killing`);
         try {
           rec.ffmpeg.kill("SIGKILL");
         } catch {}
+        videoFailure = `ffmpeg_timeout_${timeoutMs}ms`;
+      } else if (typeof settled === "number" && settled !== 0) {
+        // ff.on('close') resolves with the exit code — non-zero means ffmpeg
+        // produced a corrupt/partial webm that we should not upload.
+        videoFailure = `ffmpeg_exit_code_${settled}`;
+        log(`[recording] ffmpeg exited with code ${settled}`);
+      }
+      if (!videoFailure && rec.videoPath && existsSync(rec.videoPath)) {
+        videoBody = await fsPromises.readFile(rec.videoPath);
       }
       if (rec.videoPath && existsSync(rec.videoPath)) {
-        videoBody = await fsPromises.readFile(rec.videoPath);
         try {
           await fsPromises.unlink(rec.videoPath);
         } catch {}
       }
     } catch (e) {
+      videoFailure = `finalize_error: ${e.message}`;
       log(`[recording] video finalize failed: ${e.message}`);
     }
   }
@@ -521,6 +691,16 @@ async function flushRecording(info, sessionName) {
         fps: RECORDING.fps,
       }),
     );
+  } else if (videoFailure) {
+    // Surface a terminal recording failure to the callback stream so the
+    // consumer knows the video was lost rather than silently missing.
+    send({
+      type: "slice.recording.failed",
+      session: sessionName,
+      run_id: RECORDING.runId,
+      kind: "video",
+      reason: videoFailure,
+    });
   }
   await Promise.allSettled(uploads);
 }
@@ -529,21 +709,23 @@ async function uploadArtifact(kind, body, contentType, sessionName, extra) {
   const url = RECORDING.uploadUrl
     .replace("{run_id}", encodeURIComponent(RECORDING.runId))
     .replace("{kind}", encodeURIComponent(kind));
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 30_000);
   try {
-    const res = await fetch(url, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${RECORDING.secret}`,
-        "Content-Type": contentType,
-        "X-WB-Run-Id": RECORDING.runId,
-        "X-WB-Recording-Kind": kind,
-        "X-WB-Session": sessionName,
+    const res = await retryableFetch(
+      url,
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${RECORDING.secret}`,
+          "Content-Type": contentType,
+          "X-WB-Run-Id": RECORDING.runId,
+          "X-WB-Recording-Kind": kind,
+          "X-WB-Session": sessionName,
+        },
+        body,
       },
-      body,
-      signal: controller.signal,
-    });
+      `upload.${kind}`,
+      { timeoutMs: 30_000 },
+    );
     if (!res.ok) {
       send({
         type: "slice.recording.failed",
@@ -571,8 +753,6 @@ async function uploadArtifact(kind, body, contentType, sessionName, extra) {
       kind,
       reason: e.name === "AbortError" ? "timeout" : e.message,
     });
-  } finally {
-    clearTimeout(timer);
   }
 }
 
@@ -583,49 +763,112 @@ function sanitize(s) {
 // --- {{ env.X }} / {{ artifacts.X }} substitution --------------------------
 
 const ENV_RE = /\{\{\s*env\.([A-Za-z_][A-Za-z0-9_]*)\s*\}\}/g;
-const ARTIFACT_RE = /\{\{\s*artifacts\.([A-Za-z_][A-Za-z0-9_.-]*)\s*\}\}/g;
+// Artifact names are bare identifiers — no dots, no slashes. Anything more
+// exotic would invite path traversal once composed with WB_ARTIFACTS_DIR.
+const ARTIFACT_RE = /\{\{\s*artifacts\.([A-Za-z_][A-Za-z0-9_-]*)\s*\}\}/g;
 
-function readArtifact(name) {
+function resolveInside(dir, candidate) {
+  const resolvedDir = path.resolve(dir);
+  const resolved = path.resolve(resolvedDir, candidate);
+  const rel = path.relative(resolvedDir, resolved);
+  if (rel === "" || rel.startsWith("..") || path.isAbsolute(rel)) return null;
+  return resolved;
+}
+
+// Resolved once at module load. `warn` matches historical behavior
+// (log + empty string, runbook continues). `error` throws so a missing OTP
+// or env var fails the slice instead of silently sending an empty value
+// into a Playwright action. `empty` is the silent variant.
+const ON_MISSING = (() => {
+  const raw = (process.env.WB_SUBSTITUTION_ON_MISSING || "warn")
+    .trim()
+    .toLowerCase();
+  if (raw === "error" || raw === "empty" || raw === "warn") return raw;
+  log(
+    `[warn] WB_SUBSTITUTION_ON_MISSING=${raw} is not valid (warn|error|empty); defaulting to warn`,
+  );
+  return "warn";
+})();
+
+function handleMissingSubstitution(kind, name) {
+  const msg = `${kind}.${name} is not set`;
+  if (ON_MISSING === "error") {
+    throw new Error(`substitution: ${msg}`);
+  }
+  if (ON_MISSING === "warn") {
+    log(`[warn] ${msg}; substituting empty string`);
+  }
+  return "";
+}
+
+function readArtifactRaw(name) {
   const dir = (process.env.WB_ARTIFACTS_DIR || "").trim();
   if (!dir) {
     log(`[warn] artifacts.${name} referenced but WB_ARTIFACTS_DIR is not set`);
-    return "";
+    return null;
   }
-  // Per-verb read (no cache) so a bash cell that writes the artifact between
-  // slices is always picked up by the next browser verb.
-  for (const p of [path.join(dir, `${name}.txt`), path.join(dir, name)]) {
+  for (const candidate of [`${name}.txt`, name]) {
+    const full = resolveInside(dir, candidate);
+    if (!full) continue;
     try {
-      return readFileSync(p, "utf8").trimEnd();
+      return readFileSync(full, "utf8").trimEnd();
     } catch {
       // try next candidate
     }
   }
-  log(`[warn] artifact ${name} not found in ${dir}; leaving placeholder`);
-  return "";
+  return null;
 }
 
-function expand(value) {
+function readArtifact(name, cache) {
+  if (cache && cache.has(name)) {
+    const hit = cache.get(name);
+    if (hit === null) return handleMissingSubstitution("artifacts", name);
+    return hit;
+  }
+  const v = readArtifactRaw(name);
+  if (cache) cache.set(name, v);
+  if (v === null) return handleMissingSubstitution("artifacts", name);
+  return v;
+}
+
+function expand(value, collected, artifactCache) {
   if (typeof value === "string") {
     return value
       .replace(ENV_RE, (_, name) => {
         const v = process.env[name];
-        if (v === undefined) {
-          // Leave the placeholder visible so failures surface in stderr
-          // summaries instead of silently turning into empty strings.
-          log(`[warn] env var ${name} is not set; leaving placeholder`);
-          return "";
-        }
+        if (v === undefined) return handleMissingSubstitution("env", name);
+        if (collected && v.length >= 3) collected.add(v);
         return v;
       })
-      .replace(ARTIFACT_RE, (_, name) => readArtifact(name));
+      .replace(ARTIFACT_RE, (_, name) => {
+        const v = readArtifact(name, artifactCache);
+        if (collected && v && v.length >= 3) collected.add(v);
+        return v;
+      });
   }
-  if (Array.isArray(value)) return value.map(expand);
+  if (Array.isArray(value))
+    return value.map((v) => expand(v, collected, artifactCache));
   if (value && typeof value === "object") {
     const out = {};
-    for (const [k, v] of Object.entries(value)) out[k] = expand(v);
+    for (const [k, v] of Object.entries(value))
+      out[k] = expand(v, collected, artifactCache);
     return out;
   }
   return value;
+}
+
+// Scrub any values that came from {{ env.X }} / {{ artifacts.X }} expansion
+// out of error messages before they cross the stdio boundary — Playwright and
+// fetch errors sometimes echo their inputs (URLs, script bodies, assertion
+// text) and those inputs may contain credentials.
+function scrubSecrets(msg, secrets) {
+  let out = String(msg == null ? "" : msg);
+  if (!secrets) return out;
+  for (const s of secrets) {
+    if (!s) continue;
+    out = out.split(s).join("«***»");
+  }
+  return out;
 }
 
 // --- Verb dispatch ----------------------------------------------------------
@@ -647,7 +890,11 @@ function arg(value, primaryKey) {
 async function runVerb(page, verb, index, ctx) {
   const name = verbName(verb);
   const raw = verb[name];
-  const a = expand(arg(raw, defaultKey(name)));
+  const a = expand(
+    arg(raw, defaultKey(name)),
+    ctx?.secrets,
+    ctx?.artifactCache,
+  );
 
   switch (name) {
     case "goto": {
@@ -682,15 +929,36 @@ async function runVerb(page, verb, index, ctx) {
       return `${selector} (${state})`;
     }
     case "screenshot": {
-      // Relative paths resolve into $WB_ARTIFACTS_DIR so wb's main-loop
-      // `artifacts.sync()` picks them up and uploads to R2. Absolute paths
-      // are respected as-is (escape hatch for one-off local dumps).
+      // Always resolve inside $WB_ARTIFACTS_DIR (or cwd when unset). Absolute
+      // paths and traversals are rejected — screenshots are controlled by
+      // runbook authors whose content we don't want to grant arbitrary-write.
       const requested = a.path ?? `screenshot-${Date.now()}.png`;
-      const artifactsDir = (process.env.WB_ARTIFACTS_DIR || "").trim();
-      const full = path.isAbsolute(requested)
-        ? requested
-        : path.join(artifactsDir || ".", requested);
-      await page.screenshot({ path: full, fullPage: !!a.full_page });
+      const artifactsDir = (process.env.WB_ARTIFACTS_DIR || "").trim() || ".";
+      if (path.isAbsolute(requested)) {
+        throw new Error(
+          `screenshot: absolute paths are not allowed (got ${requested})`,
+        );
+      }
+      const full = resolveInside(artifactsDir, requested);
+      if (!full) {
+        throw new Error(
+          `screenshot: path escapes artifacts dir (got ${requested})`,
+        );
+      }
+      await fsPromises.mkdir(path.dirname(full), { recursive: true });
+      // Write to a unique .tmp first, then atomically rename, so a crash
+      // mid-capture can't leave a truncated PNG that's already been announced
+      // via slice.artifact_saved and uploaded to R2.
+      const tmp = `${full}.${process.pid}.${randomUUID().slice(0, 8)}.tmp`;
+      try {
+        await page.screenshot({ path: tmp, fullPage: !!a.full_page });
+        await fsPromises.rename(tmp, full);
+      } catch (e) {
+        try {
+          await fsPromises.unlink(tmp);
+        } catch {}
+        throw e;
+      }
       return `→ ${requested}`;
     }
     case "extract": {
@@ -777,16 +1045,24 @@ async function runVerb(page, verb, index, ctx) {
       const filename = name.endsWith(".json") ? name : `${name}.json`;
       const full = path.join(artifactsDir, filename);
       await fsPromises.mkdir(artifactsDir, { recursive: true });
-      await fsPromises.writeFile(
-        full,
-        JSON.stringify(payload, null, 2),
-        "utf8",
-      );
+      // Atomic write: serialize to .tmp, then rename. Announce the artifact
+      // AFTER rename so a partial write can never be seen by wb's uploader.
+      const serialized = JSON.stringify(payload, null, 2);
+      const tmp = `${full}.${process.pid}.${randomUUID().slice(0, 8)}.tmp`;
+      try {
+        await fsPromises.writeFile(tmp, serialized, "utf8");
+        await fsPromises.rename(tmp, full);
+      } catch (e) {
+        try {
+          await fsPromises.unlink(tmp);
+        } catch {}
+        throw e;
+      }
       send({
         type: "slice.artifact_saved",
         filename,
         path: full,
-        bytes: Buffer.byteLength(JSON.stringify(payload)),
+        bytes: Buffer.byteLength(serialized),
       });
       return `→ ${filename}`;
     }
@@ -837,57 +1113,79 @@ function redact(value) {
 // --- Slice handler ----------------------------------------------------------
 
 async function handleSlice(msg) {
-  const verbs = Array.isArray(msg.verbs) ? msg.verbs : [];
-  const sessionName = msg.session || "default";
-  const restore = msg.restore || null;
-  const blockIndex =
-    typeof msg.block_index === "number" ? msg.block_index : null;
-
-  let session;
+  // Declared outside the inner try so the outer catch can scrub error
+  // messages using whatever secrets were collected before the throw.
+  const sliceCtx = {
+    lastResult: undefined,
+    blockIndex:
+      typeof msg?.block_index === "number" ? msg.block_index : null,
+    secrets: new Set(),
+    // Per-slice cache so `{{ artifacts.otp }}` referenced from 5 verbs
+    // hits disk once instead of 5× and doesn't block the event loop
+    // per-verb. Freshness across slices is preserved because the cache is
+    // scoped to one slice — a bash cell that rewrites the file between
+    // slices is seen on the next slice's first read.
+    artifactCache: new Map(),
+  };
+  // Top-level guard: any unhandled error must emit slice.failed so the Rust
+  // side sees a terminal frame instead of waiting out SLICE_EVENT_TIMEOUT.
   try {
-    session = await ensureSession(sessionName);
-  } catch (e) {
-    send({
-      type: "slice.failed",
-      error: `session start failed: ${e.message}`,
-    });
-    return;
-  }
+    const verbs = Array.isArray(msg.verbs) ? msg.verbs : [];
+    const sessionName = msg.session || "default";
+    const restore = msg.restore || null;
 
-  // Restore-from-pause is not implemented yet (no pause verb wired here).
-  // The sidecar protocol leaves room for it; when wait_for_mfa lands, this
-  // is where we'd jump to verbs[restore.state.verb_index].
-  const startAt = restore?.state?.verb_index ?? 0;
-
-  // Per-slice scratch so `save:` can capture the prior verb's JSON output.
-  const sliceCtx = { lastResult: undefined, blockIndex };
-
-  for (let i = startAt; i < verbs.length; i++) {
-    const v = verbs[i];
-    const name = verbName(v);
+    let session;
     try {
-      const summary = await runVerb(session.page, v, i, sliceCtx);
-      send({
-        type: "verb.complete",
-        verb: name,
-        verb_index: i,
-        summary,
-      });
+      session = await ensureSession(sessionName);
     } catch (e) {
       send({
-        type: "verb.failed",
-        verb: name,
-        verb_index: i,
-        error: e.message,
-      });
-      send({
         type: "slice.failed",
-        error: `verb ${name} (index ${i}): ${e.message}`,
+        error: `session start failed: ${scrubSecrets(e.message, sliceCtx.secrets)}`,
       });
       return;
     }
+
+    // Restore-from-pause is not implemented yet (no pause verb wired here).
+    // The sidecar protocol leaves room for it; when wait_for_mfa lands, this
+    // is where we'd jump to verbs[restore.state.verb_index].
+    const startAt = restore?.state?.verb_index ?? 0;
+
+    for (let i = startAt; i < verbs.length; i++) {
+      const v = verbs[i];
+      const name = verbName(v);
+      try {
+        const summary = await runVerb(session.page, v, i, sliceCtx);
+        send({
+          type: "verb.complete",
+          verb: name,
+          verb_index: i,
+          summary,
+        });
+      } catch (e) {
+        const clean = scrubSecrets(e.message, sliceCtx.secrets);
+        send({
+          type: "verb.failed",
+          verb: name,
+          verb_index: i,
+          error: clean,
+        });
+        send({
+          type: "slice.failed",
+          error: `verb ${name} (index ${i}): ${clean}`,
+        });
+        return;
+      }
+    }
+    send({ type: "slice.complete" });
+  } catch (e) {
+    log(`[slice] unhandled: ${e.stack || e.message}`);
+    try {
+      send({
+        type: "slice.failed",
+        error: `sidecar error: ${scrubSecrets(e.message, sliceCtx.secrets)}`,
+      });
+    } catch {}
   }
-  send({ type: "slice.complete" });
 }
 
 // --- Shutdown ---------------------------------------------------------------
@@ -927,8 +1225,17 @@ const rl = readline.createInterface({ input: process.stdin, terminal: false });
 // Serialize incoming messages — Playwright operations are async and we don't
 // want concurrent slice handlers stomping on the shared page.
 let chain = Promise.resolve();
-function enqueue(fn) {
-  chain = chain.then(fn).catch((e) => log(`[loop] ${e.message}`));
+function enqueue(fn, kind) {
+  chain = chain.then(fn).catch((e) => {
+    log(`[loop] ${e.stack || e.message}`);
+    // Last-resort terminal frame so a bug in the handler can never strand
+    // the Rust parent waiting for a slice to finish.
+    if (kind === "slice") {
+      try {
+        send({ type: "slice.failed", error: `sidecar loop error: ${e.message}` });
+      } catch {}
+    }
+  });
   return chain;
 }
 
@@ -954,7 +1261,7 @@ rl.on("line", (line) => {
       });
       break;
     case "slice":
-      enqueue(() => handleSlice(msg));
+      enqueue(() => handleSlice(msg), "slice");
       break;
     case "shutdown":
       enqueue(shutdown);
@@ -967,4 +1274,21 @@ rl.on("line", (line) => {
 rl.on("close", () => {
   // stdin closed — drain pending work then exit.
   enqueue(shutdown);
+});
+
+// If the Rust parent SIGTERMs us (timeout, abort, crash), Node's default is
+// to exit without running shutdown() — which leaves ffmpeg processes and
+// Browserbase sessions orphaned. Route signals through the same drain path.
+for (const sig of ["SIGTERM", "SIGINT", "SIGHUP"]) {
+  process.on(sig, () => {
+    log(`[shutdown] received ${sig}`);
+    enqueue(shutdown);
+  });
+}
+
+// Log unhandled rejections so a dropped promise doesn't exit the process
+// silently between slices. The top-level guards in handleSlice / enqueue
+// cover the hot paths; this catches background work (recording uploads, etc).
+process.on("unhandledRejection", (reason) => {
+  log(`[unhandledRejection] ${reason?.stack || reason}`);
 });
