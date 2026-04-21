@@ -22,7 +22,7 @@ Status legend: `[ ]` not started · `[~]` in progress · `[x]` done · `[-]` dro
 - [x] **9. Trace-correlation field.** Shipped in `09a8d79` — `run_id` threaded through `RunSummary`, `CallbackConfig`, and every callback payload. Resolution order: `WB_RECORDING_RUN_ID` → `TRIGGER_RUN_ID` → generated.
 - [ ] **10. Partial output capture on timeout/SIGKILL.** Ring-buffer stdout so killed blocks still report what they emitted, with `stdout_partial: true` flag.
 - [x] **11. Line+column + "did-you-mean" on parse/runtime errors.** Shipped in v0.9.7 — "no executable blocks" lists known runtimes + flags caveat; ENOENT on spawn now gives per-language install hints + `exec:` escape hatch. (Open follow-up: line/column for malformed frontmatter YAML.)
-- [ ] **12. Callback `event_version` + retries/ordering.** Today it's fire-and-forget `curl`. Version the schema, queue in-order, retry 5xx.
+- [x] **12. Callback `event_version` + retries.** Shipped in v0.9.9 — `event_version: "1"` on every payload, HTTP callbacks retry 5xx + network errors with 0ms/200ms/1000ms backoff, 4xx treated as terminal. (Ordering guarantees for HTTP stay best-effort; Redis XADD already orders.)
 
 ## 🧠 Strategic bets
 
