@@ -27,6 +27,13 @@ pub struct BlockResult {
     ///   `sandbox_failed`   — `requires:` sandbox setup or build failed
     ///   `read_error`       — workbook file unreadable (run_single_collect path)
     pub error_type: Option<String>,
+    /// Captured stdout may be truncated — block was killed by a timeout or
+    /// signal before the runtime emitted its completion sentinel. The buffer
+    /// still contains everything written up to the kill, which is often
+    /// enough to diagnose a hung block.
+    pub stdout_partial: bool,
+    /// Same as `stdout_partial` but for stderr.
+    pub stderr_partial: bool,
 }
 
 impl BlockResult {
@@ -36,9 +43,17 @@ impl BlockResult {
 
     /// Post-hoc classification: if the block failed and no specific
     /// `error_type` has been set (e.g. by a spawn-error path), infer one
-    /// from the exit code. Idempotent.
+    /// from the exit code. A partial-output flag pins it to `timeout` since
+    /// that's the only reason wb truncates its own collection. Idempotent.
     pub fn auto_classify(&mut self) {
-        if self.error_type.is_none() && self.exit_code != 0 {
+        if self.error_type.is_some() {
+            return;
+        }
+        if self.stdout_partial || self.stderr_partial {
+            self.error_type = Some("timeout".to_string());
+            return;
+        }
+        if self.exit_code != 0 {
             let kind = classify_exit(self.exit_code);
             if !kind.is_empty() {
                 self.error_type = Some(kind.to_string());
@@ -70,6 +85,10 @@ pub struct ExecutionContext {
     pub quiet: bool,
     pub vars: HashMap<String, String>,
     pub redact_values: Vec<String>,
+    /// Default timeout for one execution of a block. Per-block overrides live
+    /// in `Session::block_timeouts` (keyed by block index) and the session
+    /// applies them before calling `execute_block` by mutating this field.
+    pub block_timeout: Duration,
 }
 
 impl ExecutionContext {
@@ -95,6 +114,7 @@ impl ExecutionContext {
             quiet: false,
             vars: frontmatter.vars.clone().unwrap_or_default(),
             redact_values: Vec::new(),
+            block_timeout: DEFAULT_BLOCK_TIMEOUT,
         }
     }
 }
@@ -185,7 +205,7 @@ fn build_command(exec: Option<&ExecMode>, program: &str) -> Command {
 const SENTINEL_PREFIX: &str = "__WB_DONE_";
 const SENTINEL_SUFFIX: &str = "__";
 const CODE_END_MARKER: &str = "__WB_CODE_END__";
-const BLOCK_TIMEOUT: Duration = Duration::from_secs(300);
+pub const DEFAULT_BLOCK_TIMEOUT: Duration = Duration::from_secs(300);
 
 const PYTHON_HARNESS: &str = r#"import sys, traceback
 _wb_g = {'__builtins__': __builtins__, '__name__': '__main__'}
@@ -398,6 +418,8 @@ impl Session {
                         exit_code: 127,
                         duration: start.elapsed(),
                         error_type: Some(kind.to_string()),
+                        stdout_partial: false,
+                        stderr_partial: false,
                     };
                 }
             }
@@ -406,30 +428,43 @@ impl Session {
         // Send code and collect output (scoped to release process borrow)
         let quiet = self.ctx.quiet;
         let code = substitute_vars(&block.code, &self.ctx.vars);
-        let (ok, stdout, stderr, exit_code) = {
+        let timeout = self.ctx.block_timeout;
+        let (ok, out) = {
             let process = self.processes.get_mut(&lang).unwrap();
             match send_code(process, &lang, &code) {
                 Ok(()) => {
-                    let (stdout, stderr, exit_code) = collect_output(process, quiet);
-                    (true, stdout, stderr, exit_code)
+                    let collected = collect_output(process, quiet, timeout);
+                    (true, collected)
                 }
-                Err(e) => (false, String::new(), format!("Failed to send code: {}", e), 1),
+                Err(e) => (
+                    false,
+                    CollectedOutput {
+                        stdout: String::new(),
+                        stderr: format!("Failed to send code: {}", e),
+                        exit_code: 1,
+                        stdout_partial: false,
+                        stderr_partial: false,
+                    },
+                ),
             }
         };
 
-        // Remove dead processes
-        if !ok || exit_code == -1 {
+        // Remove dead processes — a timed-out child still owns the session stdin,
+        // so subsequent blocks would deadlock. Drop triggers kill() via Drop impl.
+        if !ok || out.exit_code == -1 || out.stdout_partial || out.stderr_partial {
             self.processes.remove(&lang);
         }
 
         let mut result = BlockResult {
             block_index: index,
             language: block.language.clone(),
-            stdout: redact_output(&stdout, &self.ctx.redact_values),
-            stderr: redact_output(&stderr, &self.ctx.redact_values),
-            exit_code,
+            stdout: redact_output(&out.stdout, &self.ctx.redact_values),
+            stderr: redact_output(&out.stderr, &self.ctx.redact_values),
+            exit_code: out.exit_code,
             duration: start.elapsed(),
             error_type: None,
+            stdout_partial: out.stdout_partial,
+            stderr_partial: out.stderr_partial,
         };
         result.auto_classify();
         result
@@ -465,6 +500,8 @@ impl Session {
                             exit_code: 127,
                             duration: start.elapsed(),
                             error_type: Some("spawn_not_found".to_string()),
+                            stdout_partial: false,
+                            stderr_partial: false,
                         },
                         None,
                     );
@@ -486,6 +523,8 @@ impl Session {
             exit_code: outcome.exit_code,
             duration: start.elapsed(),
             error_type: None,
+            stdout_partial: false,
+            stderr_partial: false,
         };
         block.auto_classify();
         (block, outcome.pause)
@@ -661,28 +700,61 @@ fn send_code(
     Ok(())
 }
 
-fn collect_output(process: &PersistentProcess, quiet: bool) -> (String, String, i32) {
+/// Collected streams plus flags indicating whether each was truncated by a
+/// timeout rather than a clean sentinel. Both partial flags imply the child
+/// is probably still running and will be killed when the session drops.
+struct CollectedOutput {
+    stdout: String,
+    stderr: String,
+    exit_code: i32,
+    stdout_partial: bool,
+    stderr_partial: bool,
+}
+
+fn collect_output(process: &PersistentProcess, quiet: bool, timeout: Duration) -> CollectedOutput {
     // Read stdout first, then stderr. Safe because the child writes
     // stdout sentinel before stderr sentinel. If stderr fills during
     // stdout reading, the child blocks AFTER writing stdout sentinel.
     // Once we drain stderr, the child unblocks and writes stderr sentinel.
-    let (stdout, stdout_code) = collect_until_sentinel(&process.stdout_rx, quiet, false);
-    let (stderr, stderr_code) = collect_until_sentinel(&process.stderr_rx, quiet, true);
+    let (stdout, stdout_code, stdout_timed_out) =
+        collect_until_sentinel(&process.stdout_rx, quiet, false, timeout);
+    // If stdout timed out, there's no point waiting the full timeout again
+    // for the stderr sentinel — the child is already considered dead. Fall
+    // through with a near-zero window so we drain anything already buffered.
+    let stderr_timeout = if stdout_timed_out {
+        Duration::from_millis(100)
+    } else {
+        timeout
+    };
+    let (stderr, stderr_code, stderr_timed_out) =
+        collect_until_sentinel(&process.stderr_rx, quiet, true, stderr_timeout);
 
     let exit_code = stdout_code.or(stderr_code).unwrap_or(0);
-    (stdout, stderr, exit_code)
+    CollectedOutput {
+        stdout,
+        stderr,
+        exit_code,
+        stdout_partial: stdout_timed_out,
+        stderr_partial: stderr_timed_out,
+    }
 }
 
+/// Returns (buffered_lines, exit_code_if_sentinel_seen, timed_out).
+/// `timed_out` is true iff we gave up waiting for a line without ever seeing
+/// the sentinel — i.e. the buffer is partial, not the terminal state of the
+/// block.
 fn collect_until_sentinel(
     rx: &Receiver<String>,
     quiet: bool,
     is_stderr: bool,
-) -> (String, Option<i32>) {
+    timeout: Duration,
+) -> (String, Option<i32>, bool) {
     let mut lines = Vec::new();
     let exit_code;
+    let mut timed_out = false;
 
     loop {
-        match rx.recv_timeout(BLOCK_TIMEOUT) {
+        match rx.recv_timeout(timeout) {
             Ok(line) => {
                 if let Some(code) = parse_sentinel(&line) {
                     exit_code = Some(code);
@@ -700,6 +772,7 @@ fn collect_until_sentinel(
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 lines.push("[wb: block timed out]".to_string());
                 exit_code = Some(-1);
+                timed_out = true;
                 break;
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => {
@@ -714,7 +787,7 @@ fn collect_until_sentinel(
         lines.pop();
     }
 
-    (lines.join("\n"), exit_code)
+    (lines.join("\n"), exit_code, timed_out)
 }
 
 fn parse_sentinel(line: &str) -> Option<i32> {
@@ -842,6 +915,8 @@ pub fn execute_block_oneshot(
                 exit_code,
                 duration: start.elapsed(),
                 error_type: None,
+                stdout_partial: false,
+                stderr_partial: false,
             };
             r.auto_classify();
             r
@@ -860,6 +935,8 @@ pub fn execute_block_oneshot(
                 exit_code: 127,
                 duration: start.elapsed(),
                 error_type: Some(kind.to_string()),
+                stdout_partial: false,
+                stderr_partial: false,
             }
         }
     }
@@ -975,6 +1052,7 @@ fn resolve_runtime(
                         quiet: ctx.quiet,
                         vars: ctx.vars.clone(),
                         redact_values: ctx.redact_values.clone(),
+                        block_timeout: ctx.block_timeout,
                     },
                 )
             } else {
@@ -1048,6 +1126,7 @@ mod tests {
             quiet: true,
             vars: HashMap::new(),
             redact_values: Vec::new(),
+            block_timeout: DEFAULT_BLOCK_TIMEOUT,
         }
     }
 
@@ -1095,5 +1174,49 @@ mod tests {
         let r2 = session.execute_block(&code_block("echo alive"), 1);
         assert_eq!(r2.exit_code, 0);
         assert_eq!(r2.stdout.trim(), "alive");
+    }
+
+    #[test]
+    fn test_partial_output_on_timeout() {
+        // Block prints a line, flushes, then sleeps past the timeout. We
+        // should see "before-sleep" preserved in stdout, both partial flags
+        // set (timeout aborts both streams), and error_type=timeout.
+        let mut ctx = bash_ctx();
+        ctx.block_timeout = Duration::from_millis(500);
+        let mut session = Session::new(ctx);
+        let code = "echo before-sleep; sleep 5; echo after-sleep";
+        let r = session.execute_block(&code_block(code), 0);
+        assert!(
+            r.stdout.contains("before-sleep"),
+            "partial stdout should retain output emitted before the timeout, got: {:?}",
+            r.stdout
+        );
+        assert!(
+            !r.stdout.contains("after-sleep"),
+            "stdout after the timeout must not appear, got: {:?}",
+            r.stdout
+        );
+        assert!(r.stdout_partial, "stdout_partial should be true on timeout");
+        assert!(r.stderr_partial, "stderr_partial should be true on timeout");
+        assert_eq!(r.error_type.as_deref(), Some("timeout"));
+    }
+
+    #[test]
+    fn test_auto_classify_partial_sets_timeout_over_exit_code() {
+        // A block that timed out (partial) + nonzero exit should be classified
+        // as `timeout`, not `nonzero_exit`. Partial is the stronger signal.
+        let mut r = BlockResult {
+            block_index: 0,
+            language: "bash".to_string(),
+            stdout: "partial".to_string(),
+            stderr: String::new(),
+            exit_code: 1,
+            duration: Duration::from_millis(10),
+            error_type: None,
+            stdout_partial: true,
+            stderr_partial: false,
+        };
+        r.auto_classify();
+        assert_eq!(r.error_type.as_deref(), Some("timeout"));
     }
 }

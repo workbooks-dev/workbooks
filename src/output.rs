@@ -139,6 +139,13 @@ struct JsonBlockResult {
     /// Machine-readable failure category; omitted on success.
     #[serde(skip_serializing_if = "Option::is_none")]
     error_type: Option<String>,
+    /// True when stdout was truncated by a block-level timeout before the
+    /// runtime finished. Omitted from output when false so successful runs
+    /// stay visually clean.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    stdout_partial: bool,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    stderr_partial: bool,
 }
 
 /// Format results in the requested format
@@ -198,6 +205,8 @@ fn build_json_output(workbook: &Workbook, summary: &RunSummary) -> JsonOutput {
                 stdout: r.stdout.clone(),
                 stderr: r.stderr.clone(),
                 error_type: r.error_type.clone(),
+                stdout_partial: r.stdout_partial,
+                stderr_partial: r.stderr_partial,
             }
         })
         .collect();
@@ -400,6 +409,8 @@ fn build_batch_output(summaries: &[RunSummary], dir: &str, total_duration: Durat
                     stdout: r.stdout.clone(),
                     stderr: r.stderr.clone(),
                     error_type: r.error_type.clone(),
+                    stdout_partial: r.stdout_partial,
+                    stderr_partial: r.stderr_partial,
                 })
                 .collect();
 

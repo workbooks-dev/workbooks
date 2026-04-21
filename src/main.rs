@@ -462,6 +462,8 @@ fn run_single_collect(
                     exit_code: 1,
                     duration: std::time::Duration::ZERO,
                     error_type: Some("read_error".to_string()),
+                    stdout_partial: false,
+                    stderr_partial: false,
                 }],
             };
         }
@@ -500,6 +502,8 @@ fn run_single_collect(
                             exit_code: 1,
                             duration: std::time::Duration::ZERO,
                             error_type: Some("sandbox_failed".to_string()),
+                            stdout_partial: false,
+                            stderr_partial: false,
                         }],
                     };
                 }
@@ -562,6 +566,8 @@ fn run_single_collect(
                             exit_code: 1,
                             duration: std::time::Duration::ZERO,
                             error_type: Some("sandbox_failed".to_string()),
+                            stdout_partial: false,
+                            stderr_partial: false,
                         }],
                     };
                 }
@@ -582,6 +588,8 @@ fn run_single_collect(
                     exit_code,
                     duration: start.elapsed(),
                     error_type: Some("sandbox_failed".to_string()),
+                    stdout_partial: false,
+                    stderr_partial: false,
                 }],
             };
         }
@@ -631,6 +639,8 @@ fn run_single_collect(
                         exit_code: 1,
                         duration: std::time::Duration::ZERO,
                         error_type: Some("env_file_failed".to_string()),
+                        stdout_partial: false,
+                        stderr_partial: false,
                     }],
                 };
             }
@@ -672,6 +682,8 @@ fn run_single_collect(
                         exit_code: 1,
                         duration: std::time::Duration::ZERO,
                         error_type: Some("setup_failed".to_string()),
+                        stdout_partial: false,
+                        stderr_partial: false,
                     }],
                 };
             }
@@ -730,6 +742,8 @@ fn run_single_collect(
                         exit_code: 1,
                         duration: result.duration,
                         error_type: Some("pause_without_checkpoint".to_string()),
+                        stdout_partial: false,
+                        stderr_partial: false,
                     });
                     break;
                 }
@@ -748,6 +762,8 @@ fn run_single_collect(
                     exit_code: 1,
                     duration: std::time::Duration::ZERO,
                     error_type: Some("wait_without_checkpoint".to_string()),
+                    stdout_partial: false,
+                    stderr_partial: false,
                 });
                 break;
             }
@@ -3119,6 +3135,8 @@ mod tests {
             exit_code: 0,
             duration: std::time::Duration::from_millis(50),
             error_type: None,
+            stdout_partial: false,
+            stderr_partial: false,
         };
         c.add_result(&result, 10, Some("Setup"), "echo ok");
         assert_eq!(c.next_block, 1);
@@ -3190,6 +3208,8 @@ mod tests {
             exit_code: 0,
             duration: std::time::Duration::from_millis(120),
             error_type: None,
+            stdout_partial: false,
+            stderr_partial: false,
         };
         let r2 = executor::BlockResult {
             block_index: 1,
@@ -3199,6 +3219,8 @@ mod tests {
             exit_code: 0,
             duration: std::time::Duration::from_millis(300),
             error_type: None,
+            stdout_partial: false,
+            stderr_partial: false,
         };
         c.add_result(&r1, 5, None, "echo hello");
         c.add_result(&r2, 15, Some("Compute"), "print(42)");
@@ -3224,6 +3246,8 @@ mod tests {
             exit_code: 0,
             duration: std::time::Duration::ZERO,
             error_type: None,
+            stdout_partial: false,
+            stderr_partial: false,
         };
         c.add_result(&r, 5, None, "echo hello");
         let hash = c.results[0].code_hash.as_ref().unwrap();

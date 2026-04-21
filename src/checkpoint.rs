@@ -123,6 +123,8 @@ impl Checkpoint {
                 exit_code: r.exit_code,
                 duration: Duration::from_millis(r.duration_ms),
                 error_type: None,
+                stdout_partial: false,
+                stderr_partial: false,
             })
             .collect()
     }

@@ -79,6 +79,8 @@ fn build_step_complete_payload(
             "duration_ms": result.duration.as_millis() as u64,
             "stdout": truncate_for_callback(&result.stdout),
             "stderr": truncate_for_callback(&result.stderr),
+            "stdout_partial": result.stdout_partial,
+            "stderr_partial": result.stderr_partial,
             "error_type": result.error_type,
         },
         "progress": {
@@ -152,6 +154,8 @@ impl CallbackConfig {
                 "line_number": line_number,
                 "exit_code": result.exit_code,
                 "stderr": &result.stderr,
+                "stdout_partial": result.stdout_partial,
+                "stderr_partial": result.stderr_partial,
                 "error_type": result.error_type,
             },
             "progress": {
@@ -557,6 +561,8 @@ mod tests {
             exit_code: 0,
             duration: std::time::Duration::from_millis(16),
             error_type: None,
+            stdout_partial: false,
+            stderr_partial: false,
         };
         let payload = build_step_complete_payload(
             &result,
@@ -632,6 +638,8 @@ mod tests {
             exit_code: 1,
             duration: std::time::Duration::from_millis(5),
             error_type: None,
+            stdout_partial: false,
+            stderr_partial: false,
         };
         let payload = build_step_complete_payload(&result, 4, 10, "wb", None, None, 0, "");
         let stdout = payload["block"]["stdout"].as_str().unwrap();
