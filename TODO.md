@@ -17,11 +17,11 @@ Status legend: `[ ]` not started · `[~]` in progress · `[x]` done · `[-]` dro
 ## 🎯 Highest agent-leverage UX wins
 
 - [ ] **6. Structured error types in JSON output.** Add `error: { type, message, line, column }` to each block result in `src/output.rs`. Agents stop regex-parsing stderr.
-- [ ] **7. Real exit-code vocabulary.** Today it's `0 | 1 | 42`. Agents can't distinguish block failure vs parse error vs sidecar crash. Define the table, document it, update `src/main.rs` dispatch.
+- [x] **7. Real exit-code vocabulary.** Shipped in v0.9.7 — `src/exit_codes.rs` with documented table (0 success, 1 block-failed, 2 usage, 3 workbook-invalid, 5 sandbox-unavailable, 6 checkpoint-busy, 7 signal-timeout, 42 paused).
 - [x] **8. `wb inspect --json`.** Shipped in `09a8d79` — stable `{source, frontmatter, blocks[]}` shape covering code/wait/browser sections.
 - [x] **9. Trace-correlation field.** Shipped in `09a8d79` — `run_id` threaded through `RunSummary`, `CallbackConfig`, and every callback payload. Resolution order: `WB_RECORDING_RUN_ID` → `TRIGGER_RUN_ID` → generated.
 - [ ] **10. Partial output capture on timeout/SIGKILL.** Ring-buffer stdout so killed blocks still report what they emitted, with `stdout_partial: true` flag.
-- [ ] **11. Line+column + "did-you-mean" on parse/runtime errors.** Bad YAML, unknown runtime, typo'd flag — each is an agent retry loop today.
+- [x] **11. Line+column + "did-you-mean" on parse/runtime errors.** Shipped in v0.9.7 — "no executable blocks" lists known runtimes + flags caveat; ENOENT on spawn now gives per-language install hints + `exec:` escape hatch. (Open follow-up: line/column for malformed frontmatter YAML.)
 - [ ] **12. Callback `event_version` + retries/ordering.** Today it's fire-and-forget `curl`. Version the schema, queue in-order, retry 5xx.
 
 ## 🧠 Strategic bets
