@@ -20,7 +20,7 @@ Status legend: `[ ]` not started · `[~]` in progress · `[x]` done · `[-]` dro
 - [x] **7. Real exit-code vocabulary.** Shipped in v0.9.7 — `src/exit_codes.rs` with documented table (0 success, 1 block-failed, 2 usage, 3 workbook-invalid, 5 sandbox-unavailable, 6 checkpoint-busy, 7 signal-timeout, 42 paused).
 - [x] **8. `wb inspect --json`.** Shipped in `09a8d79` — stable `{source, frontmatter, blocks[]}` shape covering code/wait/browser sections.
 - [x] **9. Trace-correlation field.** Shipped in `09a8d79` — `run_id` threaded through `RunSummary`, `CallbackConfig`, and every callback payload. Resolution order: `WB_RECORDING_RUN_ID` → `TRIGGER_RUN_ID` → generated.
-- [ ] **10. Partial output capture on timeout/SIGKILL.** Ring-buffer stdout so killed blocks still report what they emitted, with `stdout_partial: true` flag.
+- [x] **10. Partial output capture on timeout/SIGKILL.** Shipped in v0.9.10 — `stdout_partial`/`stderr_partial` flags on `BlockResult`, JSON output, and callback `step.complete`/`checkpoint.failed` payloads. Timed-out blocks retain everything emitted before the kill; `error_type: "timeout"` pins them apart from clean nonzero exits. `BLOCK_TIMEOUT` is now `ExecutionContext.block_timeout` so #15's per-block timeouts can override without touching collection.
 - [x] **11. Line+column + "did-you-mean" on parse/runtime errors.** Shipped in v0.9.7 — "no executable blocks" lists known runtimes + flags caveat; ENOENT on spawn now gives per-language install hints + `exec:` escape hatch. (Open follow-up: line/column for malformed frontmatter YAML.)
 - [x] **12. Callback `event_version` + retries.** Shipped in v0.9.9 — `event_version: "1"` on every payload, HTTP callbacks retry 5xx + network errors with 0ms/200ms/1000ms backoff, 4xx treated as terminal. (Ordering guarantees for HTTP stay best-effort; Redis XADD already orders.)
 
@@ -28,7 +28,7 @@ Status legend: `[ ]` not started · `[~]` in progress · `[x]` done · `[-]` dro
 
 - [ ] **13. Pandoc-style fence attrs** — ``` ```python {#step-3 .retryable timeout=30s} ```. Canonical home for ALL future per-block config. Do this early — items 6/7/14/15 slot in cheaply afterward.
 - [ ] **14. Parameterized runs.** `wb run deploy.md --param region=us-east-1`. Frontmatter declares defaults + types. Param hash feeds into checkpoint identity.
-- [ ] **15. Per-block `timeout`, `retry`, `continue-on-error`.** Agents currently wrap every block in shell conditionals for this.
+- [x] **15. Per-block `timeout`, `retry`, `continue-on-error`.** Shipped in v0.9.10 via frontmatter maps keyed by 1-based block number: `timeouts: {3: 2m}`, `retries: {3: 2}`, `continue_on_error: [4]`. Retries run with a 500ms backoff between attempts; a timeout on retry spawns a fresh session (state reset). `continue_on_error` lets a single block fail without tripping `--bail`. When fence attrs (#13) land, these same maps can grow to accept attribute ids alongside ints.
 - [ ] **16. Inline `expect` / `assert` fences.** Turn runbooks into test suites. `expect exit 0`, `expect stdout contains "ok"`.
 - [ ] **17. Pending-wait timeout reaper.** `on_timeout: abort` never fires until a human manually resumes. Background reaper (or auto-fire on next `wb pending`).
 - [ ] **18. Source-hash execution cache.** Skip blocks whose source + env + inputs haven't changed. Massive for iterative agent re-runs.

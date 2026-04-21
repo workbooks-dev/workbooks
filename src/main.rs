@@ -14,7 +14,53 @@ mod signal;
 mod update;
 
 use std::path::Path;
-use std::time::Instant;
+use std::time::{Duration, Instant};
+
+/// Delay between retry attempts for per-block `retries:`. Short enough to
+/// not feel sluggish, long enough to let a transient HTTP/API blip clear.
+const RETRY_DELAY: Duration = Duration::from_millis(500);
+
+/// Execute a code block once, applying the per-block timeout override if
+/// set, and retrying on failure up to `policy.retries` times with a small
+/// delay between attempts. Returns the result of the final attempt.
+///
+/// The session's block_timeout is always set before each attempt (to either
+/// the per-block override or the run-wide default) so state can't leak
+/// across blocks with different timeouts.
+fn execute_block_with_policy(
+    session: &mut executor::Session,
+    block: &parser::CodeBlock,
+    block_idx: usize,
+    policy: parser::BlockPolicy,
+    default_timeout: Duration,
+    quiet: bool,
+) -> executor::BlockResult {
+    let timeout = policy
+        .timeout_secs
+        .map(Duration::from_secs)
+        .unwrap_or(default_timeout);
+    session.set_block_timeout(timeout);
+
+    let mut attempt: u32 = 0;
+    let total_attempts = 1 + policy.retries;
+    loop {
+        let result = session.execute_block(block, block_idx);
+        attempt += 1;
+        if result.success() || attempt >= total_attempts {
+            return result;
+        }
+        if !quiet {
+            eprintln!(
+                "  ↻ retry {}/{} after exit {} — {}ms backoff",
+                attempt,
+                policy.retries,
+                result.exit_code,
+                RETRY_DELAY.as_millis()
+            );
+        }
+        std::thread::sleep(RETRY_DELAY);
+    }
+}
 
 use clap::Parser;
 use output::OutputFormat;
@@ -707,7 +753,17 @@ fn run_single_collect(
                 if block.skip_execution {
                     continue;
                 }
-                let result = session.execute_block(block, block_idx);
+                let policy = workbook
+                    .frontmatter
+                    .block_policy((block_idx + 1) as u32);
+                let result = execute_block_with_policy(
+                    &mut session,
+                    block,
+                    block_idx,
+                    policy,
+                    executor::DEFAULT_BLOCK_TIMEOUT,
+                    quiet,
+                );
                 artifacts.sync();
                 results.push(result);
                 block_idx += 1;
@@ -1293,7 +1349,17 @@ fn run_single(
                 );
             }
 
-            let result = session.execute_block(block, block_idx);
+            let policy = workbook
+                .frontmatter
+                .block_policy((block_idx + 1) as u32);
+            let result = execute_block_with_policy(
+                &mut session,
+                block,
+                block_idx,
+                policy,
+                executor::DEFAULT_BLOCK_TIMEOUT,
+                quiet,
+            );
             artifacts.sync();
             let success = result.success();
 
@@ -1327,7 +1393,7 @@ fn run_single(
                 }
             }
 
-            if bail && !success {
+            if bail && !success && !policy.continue_on_error {
                 // Callback: checkpoint failed (when checkpointing is active).
                 // `{silent}` only gates step.complete/step.failed — a failed
                 // silent block still produces a checkpoint.failed event so
@@ -1351,6 +1417,13 @@ fn run_single(
                 }
                 results.push(result);
                 break;
+            }
+
+            if !success && policy.continue_on_error && !quiet {
+                eprintln!(
+                    "  ⚠ block {} failed but continue_on_error set — moving on",
+                    block_idx + 1
+                );
             }
 
             // Checkpoint after each successful block (or any block without bail)
@@ -3611,5 +3684,150 @@ echo "pin=$pin"
 
         let _ = checkpoint::delete(ckpt_id);
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    // ─── per-block policy: timeouts, retries, continue_on_error ──────
+
+    fn quiet_bash_session() -> executor::Session {
+        let ctx = executor::ExecutionContext {
+            env: HashMap::new(),
+            working_dir: ".".to_string(),
+            venv: None,
+            default_runtime: Some("bash".to_string()),
+            exec_config: None,
+            dir_config: None,
+            quiet: true,
+            vars: HashMap::new(),
+            redact_values: Vec::new(),
+            block_timeout: executor::DEFAULT_BLOCK_TIMEOUT,
+        };
+        executor::Session::new(ctx)
+    }
+
+    fn bash_block(code: &str) -> parser::CodeBlock {
+        parser::CodeBlock {
+            language: "bash".to_string(),
+            code: code.to_string(),
+            line_number: 0,
+            skip_execution: false,
+            silent: false,
+        }
+    }
+
+    #[test]
+    fn test_retry_runs_n_plus_1_attempts_on_persistent_failure() {
+        let marker = std::env::temp_dir().join(format!(
+            "wb-retry-persist-{}-{}.txt",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_file(&marker);
+        let path_str = marker.to_string_lossy().to_string();
+
+        let mut session = quiet_bash_session();
+        // `false` sets $? to 1 without terminating the persistent bash
+        // session (unlike `exit 1` in a `{ ... }` brace group, which would
+        // kill the shell and break subsequent retries).
+        let block = bash_block(&format!("echo x >> '{}'; false", path_str));
+        let policy = parser::BlockPolicy {
+            timeout_secs: None,
+            retries: 2,
+            continue_on_error: false,
+        };
+        let result = execute_block_with_policy(
+            &mut session,
+            &block,
+            0,
+            policy,
+            executor::DEFAULT_BLOCK_TIMEOUT,
+            true,
+        );
+        assert_eq!(result.exit_code, 1);
+        let content = std::fs::read_to_string(&marker).expect("marker file should exist");
+        assert_eq!(
+            content.lines().count(),
+            3,
+            "expected 1 initial + 2 retries = 3 attempts; marker was: {:?}",
+            content
+        );
+        let _ = std::fs::remove_file(&marker);
+    }
+
+    #[test]
+    fn test_retry_stops_on_first_success() {
+        // Uses a shell-level counter: the block "succeeds" on the second
+        // attempt by bumping a file-backed counter. Proves the retry loop
+        // breaks as soon as a run passes.
+        let marker = std::env::temp_dir().join(format!(
+            "wb-retry-success-{}-{}.txt",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_file(&marker);
+        let path_str = marker.to_string_lossy().to_string();
+
+        let mut session = quiet_bash_session();
+        let code = format!(
+            "echo x >> '{p}'; n=$(wc -l < '{p}' | tr -d ' '); if [ \"$n\" -ge 2 ]; then true; else false; fi",
+            p = path_str
+        );
+        let block = bash_block(&code);
+        let policy = parser::BlockPolicy {
+            timeout_secs: None,
+            retries: 5,
+            continue_on_error: false,
+        };
+        let result = execute_block_with_policy(
+            &mut session,
+            &block,
+            0,
+            policy,
+            executor::DEFAULT_BLOCK_TIMEOUT,
+            true,
+        );
+        assert_eq!(result.exit_code, 0, "should succeed on 2nd attempt");
+        let content = std::fs::read_to_string(&marker).expect("marker file should exist");
+        assert_eq!(
+            content.lines().count(),
+            2,
+            "should stop retrying once the attempt succeeded; marker was: {:?}",
+            content
+        );
+        let _ = std::fs::remove_file(&marker);
+    }
+
+    #[test]
+    fn test_per_block_timeout_override_triggers_partial() {
+        // Short per-block timeout should fire and mark stdout_partial,
+        // matching #10's behavior but via the policy path instead of a
+        // hand-set ctx.block_timeout.
+        let mut session = quiet_bash_session();
+        let block = bash_block("echo before-sleep; sleep 5; echo after-sleep");
+        let policy = parser::BlockPolicy {
+            timeout_secs: Some(1),
+            retries: 0,
+            continue_on_error: false,
+        };
+        let result = execute_block_with_policy(
+            &mut session,
+            &block,
+            0,
+            policy,
+            executor::DEFAULT_BLOCK_TIMEOUT,
+            true,
+        );
+        assert!(result.stdout_partial, "timeout_secs=1 should trigger partial");
+        assert_eq!(result.error_type.as_deref(), Some("timeout"));
+        assert!(
+            result.stdout.contains("before-sleep"),
+            "pre-timeout stdout should be preserved, got: {:?}",
+            result.stdout
+        );
     }
 }

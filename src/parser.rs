@@ -14,6 +14,20 @@ pub struct Frontmatter {
     pub exec: Option<ExecConfig>,
     pub working_dir: Option<DirConfig>,
     pub requires: Option<RequiresConfig>,
+    /// Per-block timeout map, keyed by 1-based block number. Values are
+    /// duration strings ("30s", "5m", "2h") — bare integers are seconds.
+    /// Missing keys fall back to the 300s default.
+    pub timeouts: Option<HashMap<u32, String>>,
+    /// Per-block retry count, keyed by 1-based block number. Value is the
+    /// number of extra attempts after the first failure; `0`/missing = no
+    /// retry. Retries run with a 500ms delay between attempts. If a retry
+    /// is triggered by a timeout (which kills the session child), later
+    /// attempts will execute in a fresh language session.
+    pub retries: Option<HashMap<u32, u32>>,
+    /// Block numbers (1-based) whose failure should not halt a `--bail`
+    /// run. The block's failure is still recorded and emitted via
+    /// callbacks; execution just continues to the next block.
+    pub continue_on_error: Option<Vec<u32>>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -464,6 +478,56 @@ fn extract_sections(body: &str) -> Vec<Section> {
     sections
 }
 
+/// Effective per-block policy resolved from `timeouts`, `retries`, and
+/// `continue_on_error` frontmatter maps. `block_number` is 1-based.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BlockPolicy {
+    /// Timeout for a single execution of this block. `None` = use the
+    /// run-wide default (ExecutionContext::block_timeout).
+    pub timeout_secs: Option<u64>,
+    /// Retries *after* the first failure. `0` = run once.
+    pub retries: u32,
+    /// If true, a failure of this block does NOT trigger `--bail`.
+    pub continue_on_error: bool,
+}
+
+impl Frontmatter {
+    /// Resolve the per-block policy for a given 1-based block number.
+    /// Unknown numbers return the all-default policy.
+    pub fn block_policy(&self, block_number: u32) -> BlockPolicy {
+        let timeout_secs = self
+            .timeouts
+            .as_ref()
+            .and_then(|m| m.get(&block_number))
+            .and_then(|s| match parse_duration_secs(s) {
+                Ok(n) => Some(n),
+                Err(e) => {
+                    eprintln!(
+                        "wb: ignoring invalid timeouts[{}]='{}': {}",
+                        block_number, s, e
+                    );
+                    None
+                }
+            });
+        let retries = self
+            .retries
+            .as_ref()
+            .and_then(|m| m.get(&block_number))
+            .copied()
+            .unwrap_or(0);
+        let continue_on_error = self
+            .continue_on_error
+            .as_ref()
+            .map(|v| v.contains(&block_number))
+            .unwrap_or(false);
+        BlockPolicy {
+            timeout_secs,
+            retries,
+            continue_on_error,
+        }
+    }
+}
+
 /// Parse durations like "30s", "5m", "2h", "1d" into seconds.
 /// Bare integers are treated as seconds.
 pub fn parse_duration_secs(s: &str) -> Result<u64, String> {
@@ -784,6 +848,85 @@ verbs:
         assert_eq!(b.verbs.len(), 4);
         assert!(b.line_number > 0);
         assert!(!b.raw.is_empty());
+    }
+
+    #[test]
+    fn test_block_policy_defaults_when_unset() {
+        let fm = Frontmatter::default();
+        let p = fm.block_policy(1);
+        assert_eq!(p.timeout_secs, None);
+        assert_eq!(p.retries, 0);
+        assert!(!p.continue_on_error);
+    }
+
+    #[test]
+    fn test_block_policy_timeouts_retries_continue_on_error() {
+        let input = r#"---
+timeouts:
+  1: 30s
+  3: 2m
+retries:
+  3: 2
+continue_on_error: [4]
+---
+
+```bash
+echo one
+```
+
+```bash
+echo two
+```
+
+```bash
+echo three
+```
+
+```bash
+echo four
+```
+"#;
+        let wb = parse(input);
+        // Block 1: custom timeout, no retries, not ignoring failures.
+        let p1 = wb.frontmatter.block_policy(1);
+        assert_eq!(p1.timeout_secs, Some(30));
+        assert_eq!(p1.retries, 0);
+        assert!(!p1.continue_on_error);
+
+        // Block 2: nothing set — all defaults.
+        let p2 = wb.frontmatter.block_policy(2);
+        assert_eq!(p2.timeout_secs, None);
+        assert_eq!(p2.retries, 0);
+        assert!(!p2.continue_on_error);
+
+        // Block 3: timeout + retries, not in continue_on_error list.
+        let p3 = wb.frontmatter.block_policy(3);
+        assert_eq!(p3.timeout_secs, Some(120));
+        assert_eq!(p3.retries, 2);
+        assert!(!p3.continue_on_error);
+
+        // Block 4: only continue_on_error flagged.
+        let p4 = wb.frontmatter.block_policy(4);
+        assert_eq!(p4.timeout_secs, None);
+        assert_eq!(p4.retries, 0);
+        assert!(p4.continue_on_error);
+    }
+
+    #[test]
+    fn test_block_policy_bad_duration_falls_back_to_default() {
+        let input = r#"---
+timeouts:
+  1: "not-a-duration"
+---
+
+```bash
+echo one
+```
+"#;
+        let wb = parse(input);
+        // Bad duration is dropped with a warning; falls through to default.
+        let p = wb.frontmatter.block_policy(1);
+        assert_eq!(p.timeout_secs, None);
     }
 
     #[test]

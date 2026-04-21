@@ -70,6 +70,27 @@ print("runs in python")
 - Code block language tag determines which runtime executes it
 - Non-executable blocks (yaml, json, etc.) are preserved as documentation
 
+## Per-block timeouts, retries, and continue-on-error
+
+Frontmatter maps keyed by **1-based block number** (matching the `[N/total]` UI):
+
+```yaml
+---
+timeouts:
+  1: 30s              # override block 1's timeout (default 300s)
+  3: 2m
+retries:
+  3: 2                # retry block 3 up to 2 more times on failure
+continue_on_error: [4] # block 4 failure doesn't trigger --bail
+---
+```
+
+- **`timeouts`** — values are duration strings (`30s`, `5m`, `2h`, bare int = seconds). A timed-out block gets `error_type: "timeout"` and `stdout_partial: true` / `stderr_partial: true` in JSON output and callback payloads — partial output is preserved so agents can diagnose hung blocks. A timeout kills the language session child; a later retry or block will spawn a fresh session (state reset).
+- **`retries`** — number of *additional* attempts after the first failure (`0`/missing = no retry). Retries run with a 500ms delay between attempts. Useful for flaky HTTP calls; combine with `timeouts:` to cap individual attempts.
+- **`continue_on_error`** — block numbers whose failure should not halt a `--bail` run. The block's failure is still recorded and emitted via callbacks; execution just continues to the next block.
+
+Callback payloads (`step.complete`, `checkpoint.failed`) include `stdout_partial` / `stderr_partial` fields so downstream agents can distinguish "block failed" from "block was cut off mid-run".
+
 ## CLI Usage
 
 ```bash

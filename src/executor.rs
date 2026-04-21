@@ -316,6 +316,13 @@ impl Session {
         self.ctx.quiet = quiet;
     }
 
+    /// Override the per-block timeout for the *next* `execute_block` call.
+    /// The caller is expected to reset it back to the default after the
+    /// block finishes, since the session object is long-lived.
+    pub fn set_block_timeout(&mut self, timeout: Duration) {
+        self.ctx.block_timeout = timeout;
+    }
+
     pub fn set_env(&mut self, key: String, value: String) {
         self.ctx.env.insert(key, value);
     }
