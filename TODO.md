@@ -16,7 +16,7 @@ Status legend: `[ ]` not started · `[~]` in progress · `[x]` done · `[-]` dro
 
 ## 🎯 Highest agent-leverage UX wins
 
-- [ ] **6. Structured error types in JSON output.** Add `error: { type, message, line, column }` to each block result in `src/output.rs`. Agents stop regex-parsing stderr.
+- [x] **6. Structured error types in JSON output.** Shipped in v0.9.8 — `error_type` on `BlockResult`, JSON output, and callback `step.complete`/`checkpoint.failed` payloads. Stable tokens: `spawn_not_found`, `spawn_failed`, `nonzero_exit`, `signal_killed`, `sandbox_failed`, `read_error`, `setup_failed`, `env_file_failed`, `wait_without_checkpoint`, `pause_without_checkpoint`.
 - [x] **7. Real exit-code vocabulary.** Shipped in v0.9.7 — `src/exit_codes.rs` with documented table (0 success, 1 block-failed, 2 usage, 3 workbook-invalid, 5 sandbox-unavailable, 6 checkpoint-busy, 7 signal-timeout, 42 paused).
 - [x] **8. `wb inspect --json`.** Shipped in `09a8d79` — stable `{source, frontmatter, blocks[]}` shape covering code/wait/browser sections.
 - [x] **9. Trace-correlation field.** Shipped in `09a8d79` — `run_id` threaded through `RunSummary`, `CallbackConfig`, and every callback payload. Resolution order: `WB_RECORDING_RUN_ID` → `TRIGGER_RUN_ID` → generated.
@@ -63,3 +63,4 @@ Status legend: `[ ]` not started · `[~]` in progress · `[x]` done · `[-]` dro
 - Silent/no-run flags were flagged as half-implemented by one audit; verified **fully wired** in `src/parser.rs` + `src/main.rs:1234, 1375`. No action needed.
 - SIGKILL-on-shutdown race in sidecar was already fixed in commit `fee72a3`.
 - `features-request.md` at repo root holds longer-form specs for fence-flags and browser recording — keep as canonical reference, this file is the checklist.
+- v0.9.8 promoted four experimental flags to stable — `WB_EXPERIMENTAL_BLOCK_FLAGS`, `WB_EXPERIMENTAL_WAIT`, `WB_EXPERIMENTAL_SANDBOX`, `WB_EXPERIMENTAL_BROWSER` all removed. `{no-run}`/`{silent}`, `wait`/`resume`, sandbox, and browser blocks now work without opt-in env vars.
