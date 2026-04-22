@@ -50,9 +50,13 @@ Synthesis of a 7-agent review of `runtimes/browser/bin/wb-browser-runtime.js` (9
 
 ## Medium
 
-- [ ] **Monolithic 970-line dispatch** — the 144-line switch will balloon with roadmap verbs (`act:`, `wait_for_mfa`, `wait_for_email_otp`). Extract `runtimes/browser/verbs/*.js` (each exports `{ name, primaryKey, execute }`), a `SessionManager`, and a `RecordingManager` with explicit lifecycle (`start/capture/pause/flush/abort`). **This unblocks the two items below.**
+- [x] **Monolithic 970-line dispatch** — *shipped*
+  - Extracted `runtimes/browser/verbs/*.js` — one file per verb, each exporting `{ name, primaryKey, execute(page, args, ctx) }`. Registry in `verbs/index.js` builds `SUPPORTS` + default-key lookup + dispatch from the module list automatically. Entry point shrank from 1394 → 498 LOC.
+  - Extracted `runtimes/browser/lib/session-manager.js` — owns the name→SessionInfo cache, adds in-flight-create dedup (two concurrent `ensure("x")` calls share one bbCreateSession), and provides per-session dispatch chains (`enqueueOn`) + global drain (`drainAll`) for shutdown.
+  - Extracted `runtimes/browser/lib/recording-manager.js` — full rrweb + screencast lifecycle (`start`/`flush`) with the config as a constructor-scoped object and `loadRecordingConfig()` exported separately. Per-session state still lives on `info.recording` so SessionManager stays a plain Map.
+  - Extracted `runtimes/browser/lib/http.js` (retryableFetch + safeText, shared between Browserbase REST and recording uploads), `lib/io.js` (send + log), `lib/util.js` (resolveInside + redact + artifact-name helpers).
 
-- [ ] **`SUPPORTS` array drifts from implementation** — blocked on the refactor above. Without handler introspection the best we can do is a third hand-maintained list, which just moves the drift problem. Revisit once verb modules land.
+- [x] **`SUPPORTS` array drifts from implementation** — *shipped*. `SUPPORTS` is now `VERBS.map(v => v.name)` in `verbs/index.js`. Adding a verb = dropping a new file + adding one import-and-array-entry line. No third list.
 
 - [x] **Missing `{{ env.X }}` / `{{ artifacts.X }}` becomes empty string** — *shipped*
   - New `WB_SUBSTITUTION_ON_MISSING` env var (`warn` | `error` | `empty`, default `warn` for back-compat). Strict `error` mode throws a clean `substitution: env.X is not set` / `substitution: artifacts.X is not set` inside `runVerb`'s try, which flows through the existing `verb.failed` / `slice.failed` path with scrubbed messages.
@@ -66,7 +70,10 @@ Synthesis of a 7-agent review of `runtimes/browser/bin/wb-browser-runtime.js` (9
   - `WB_RECORDING_SCREENCAST_FPS` clamped to [1,30], `WB_RECORDING_SCREENCAST_QUALITY` clamped to [10,95]; one-shot log on boot if the operator asked for an out-of-range value.
   - `Page.screencastFrame` handler compares `frame.data` (base64 string) to the previous frame and skips the `ff.stdin.write` + bookkeeping when they match (still acking so Chrome keeps streaming). One-shot `[recording] dedup active` log after 100 skipped frames. Reduces WebM bloat and fixes playback pacing on static pages.
 
-- [ ] **Sequential global chain serializes unrelated sessions** — blocked on `SessionManager` from the refactor above. A per-session chain `Map<name, Promise>` alone isn't safe: two concurrent slices for the same session name would both race `bbCreateSession`. The fix needs both per-session chains AND an in-flight-create dedup via `Map<name, Promise<SessionInfo>>`, which is what `SessionManager` provides.
+- [x] **Sequential global chain serializes unrelated sessions** — *shipped*
+  - Main loop's `enqueue` replaced with `SessionManager.enqueueOn(name, fn)` — a `Map<name, Promise>` keyed by slice `session` name. Slices against distinct sessions now run in parallel; same-session slices still serialize.
+  - Safety: `SessionManager.ensure()` dedups in-flight creates so two concurrent ensures for the same name share one `bbCreateSession` instead of racing to burn two Browserbase sessions. Dedup shipped in Phase 2 ahead of the chain change so the per-session dispatch was a single-site swap rather than a surgery.
+  - `drainAndShutdown()` awaits `sessions.drainAll()` (Promise.allSettled across every current chain) before closing browsers — signal/stdin-close paths still reach `shutdown()` cleanly. Verified with a SIGTERM probe: `[shutdown] received SIGTERM` → exit 0.
 
 - [x] **Artifact reads are per-verb + sync** — *shipped*
   - Per-slice `Map<name, string|null>` on `sliceCtx` threaded through `expand()` → `readArtifact(name, cache)`. First read hits disk, subsequent verbs in the same slice hit the cache. `null` sentinel distinguishes "cached miss" from "never looked up" so the missing-value policy still fires.
@@ -77,19 +84,35 @@ Synthesis of a 7-agent review of `runtimes/browser/bin/wb-browser-runtime.js` (9
 
 ## Low / hygiene
 
-- [ ] **No tests** — highest-ROI addition: `--stub-mode` / `WB_STUB_MODE=1` with an in-memory fake `Page` (~150 LOC in `runtimes/browser/lib/stub-page.js`) + `runtimes/browser/test/verbs.test.js` using Node's built-in test runner. Unlocks `npm test` without Browserbase credentials.
+- [x] **No tests** — *shipped*
+  - `runtimes/browser/lib/stub-page.js` — in-memory fake `Page` (~90 LOC) that records every method call and returns canned responses (screenshot Buffer, extract rows, eval result, $ handles). Also exports `captureSendFrames()` to intercept JSON frames written by `lib/io.js` `send` during a test.
+  - `runtimes/browser/test/verbs.test.js` — 34 tests covering the registry shape (SUPPORTS ordering, every verb exports `{name, primaryKey, execute}`, `defaultKey`/`verbName`/`arg` helpers) and every verb end-to-end. Screenshot + save tests use real tmpdirs and assert atomic-write semantics (no leftover `.tmp`) and the emitted `slice.artifact_saved` frame shape.
+  - `runtimes/browser/test/session-manager.test.js` — 11 tests for the cache, in-flight create dedup (two concurrent `ensure("x")` calls share one createFn), retry-after-failed-create (no poisoned entry), per-session `enqueueOn` parallelism across distinct names, `drainAll` allSettled semantics, Map-like iteration.
+  - Wired `npm test` → `node --test` (auto-discovery). 45/45 passing under Node 24.15.0. No Browserbase credentials, no network, <100ms total.
 
-- [ ] **No per-verb timing / structured logging / log levels** — add `WB_LOG_LEVEL` (trace|debug|info|warn|error), emit `duration_ms` on `verb.complete`, attach session-lifecycle milestones (`allocated`, `connected`, `page_ready`).
+- [x] **Per-verb timing / structured logging / log levels** — *shipped*
+  - `WB_LOG_LEVEL` (trace|debug|info|warn|error, default `info`) filters stderr output. `lib/io.js` exports `logTrace` / `logDebug` / `log` / `logWarn` / `logError`; `log()` stays info-level so existing call sites need no reclassification. Invalid values fall back to `info` with a one-shot warning. 6 tests in `test/io.test.js` verify each level's inclusion boundary.
+  - `verb.complete` and `verb.failed` frames include `duration_ms` (Date.now() delta around `runVerb`).
+  - `slice.session_started` gained a `timings` object: `allocate_ms` (bbCreateSession), `connect_ms` (bbGetLiveUrl + connectOverCDP), `page_ready_ms` (newContext/newPage), `total_ms`. Chose a single frame with breakdown over three separate milestone frames — cleaner for consumers and avoids growing the slice.session_* namespace inconsistently.
+  - README documents WB_LOG_LEVEL, duration_ms, and the timings shape.
 
 - [ ] **rrweb `maskAllInputs` masks values only** — labels, placeholders, aria-labels, and DOM structure are still captured. README's "mask all inputs for PII" overclaims. Document honestly; expose a `maskCustom` hook for known-sensitive selectors.
 
 - [ ] **Protocol v1 has no capability negotiation or escape syntax** — `wb-sidecar/1` is cosmetic. Add `minProtocolVersion` + a `supports` feature list in `ready`, and reserve `\{\{` for literal template braces.
 
-- [ ] **gzip + upload buffer the whole payload** (~469, 535–544) — use `zlib.createGzip()` streamed into a fetch body; keep-alive is automatic on modern fetch.
+- [x] **Video upload buffers the whole payload** — *shipped*
+  - `uploadArtifact` now accepts either a Buffer (rrweb path, unchanged) or a `{ factory, bytes, cleanup }` descriptor. Video flow passes a factory that returns `fs.createReadStream(videoPath)` per attempt, so a multi-hundred-MB WebM streams straight from disk into fetch instead of being slurped into a Buffer.
+  - `retryableFetch` learned a `bodyFactory` option — required because the first attempt drains the stream, so retries need a fresh one. Sets `duplex: "half"` (undici requirement for streaming bodies).
+  - Video file unlink moved to `uploadArtifact`'s `finally` so we keep the source until upload settles (success or failure). If no upload path (ffmpeg failure, etc.), `flushRecording` still cleans up eagerly.
+  - rrweb kept buffered: the retry-safe streaming variant would require holding the source JSON to re-gzip on retry — same memory footprint, more code.
 
-- [ ] **Silent `flushRecording()` failures on shutdown** (~903–906) — errors hit stderr but no frame is emitted, so Rust executor still reports `slice.complete`. Track kind-level success; emit `slice.recording.failed` before the terminal frame if any kind dropped.
+- [x] **Silent `flushRecording()` failures on shutdown** — *shipped*
+  - rrweb pre-upload failures (final drain / gzip) now set `rrwebFailure` and emit `slice.recording.failed { kind: "rrweb", reason }` when no body is produced. Matches the existing video-failure symmetry.
+  - `shutdown()`'s `flushRecording` catch now emits a `slice.recording.failed { reason: "finalize_error: ..." }` frame in addition to stderr logging, so consumers see loss instead of silently missing uploaded events.
 
-- [ ] **`wait_for` has no global per-slice deadline** (~678) — 25 × 15s waits exceed Rust's 300s `SLICE_EVENT_TIMEOUT`; sidecar keeps running after timeout. Add a configurable per-slice cap (e.g. 60–120s) that aborts remaining verbs.
+- [x] **`wait_for` has no global per-slice deadline** — *shipped*
+  - New `WB_SLICE_DEADLINE_MS` (default 120_000). `handleSlice` computes `sliceDeadline` and checks it at the top of each verb iteration; on breach, emits `slice.failed` with an abort message naming the verb index that was skipped. Rust's `SLICE_EVENT_TIMEOUT` is per-event (resets on every `verb.complete`), so a chain of `wait_for`s that each emit within 15s would otherwise run unbounded — this is the sidecar's own total-time cap. Documented in `runtimes/browser/README.md`.
+  - NOT clamping per-verb timeouts to remaining deadline: a single verb with `timeout: > sliceDeadline` still runs to completion before the next iteration's check. That's an operator-configuration edge case, not the common failure mode this fixes.
 
 ## Suggested sequencing
 

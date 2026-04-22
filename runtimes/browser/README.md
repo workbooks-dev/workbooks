@@ -38,6 +38,12 @@ Both forms are redacted in stdout summaries — only the verb name + selector ma
 - `error` — throw, failing the slice. Use in CI so a missing OTP doesn't silently dispatch an empty selector.
 - `empty` — substitute empty silently (suppresses the warning).
 
+**Slice wall-clock cap.** `WB_SLICE_DEADLINE_MS` (default `120000` = 2 min) aborts a slice if aggregate verb time exceeds it. This is an independent bound from each verb's own `timeout:` — a chain of 25 × 15s `wait_for`s all emitting events would never trip `wb`'s 300s per-event sidecar timeout, so the sidecar applies its own total-time cap. Set higher for legitimately long slices (long polling across multiple `wait_for`s).
+
+**Log level.** `WB_LOG_LEVEL` (`trace` | `debug` | `info` | `warn` | `error`, default `info`) filters stderr diagnostic output. Existing `[recording]` / `[retry]` / `[shutdown]` lines are info-level; unknown values fall back to info with a one-shot warning.
+
+**Per-verb + session timings.** `verb.complete` and `verb.failed` frames include `duration_ms`. `slice.session_started` includes a `timings` object with `allocate_ms` (bbCreateSession), `connect_ms` (bbGetLiveUrl + CDP connect), `page_ready_ms` (context/page setup), and `total_ms`. Graph these to see where slow sessions spend time — usually `connect_ms` on a cold Browserbase region.
+
 ## Optional: anti-detection
 
 Targets behind Cloudflare / Kasada / DataDome (e.g. Airbase) will reject the
