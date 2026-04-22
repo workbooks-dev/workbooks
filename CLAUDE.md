@@ -91,6 +91,40 @@ continue_on_error: [4] # block 4 failure doesn't trigger --bail
 
 Callback payloads (`step.complete`, `checkpoint.failed`) include `stdout_partial` / `stderr_partial` fields so downstream agents can distinguish "block failed" from "block was cut off mid-run".
 
+## Composing workbooks with `include:`
+
+Factor out repeated setup (logins, env priming, health pre-flights) into its own
+workbook and pull it into others via an `include:` fence:
+
+```markdown
+```include
+path: ./login.md
+```
+```
+
+The target workbook's blocks are spliced into the parent's block list as if they'd
+been written there, inheriting the parent's env + `$WB_ARTIFACTS_DIR`, so any
+session/token/file the login writes is visible to downstream blocks. The included
+workbook can still be run and tested on its own — `wb run login.md`.
+
+- **Path resolution** — relative to the including workbook's directory, not the CWD.
+  `./login.md` means "next to me". An included workbook that itself includes `./c.md`
+  resolves `c.md` relative to *its own* directory.
+- **Frontmatter precedence** — the included workbook's frontmatter is ignored. The
+  parent's runtime/secrets/env/venv/timeouts/retries control the run. (Keep shared
+  config in the parent; login workbooks only need blocks.)
+- **Progress + checkpoints** — included blocks count toward the parent's `[N/total]`.
+  Checkpoints save the parent's file + block count; if either changes (including by
+  editing the included file), the run starts fresh.
+- **Cycle detection** — `A → B → A` fails at load time with exit code 3. The same
+  target included twice at different positions is allowed.
+- **Errors** — missing target, circular include, or malformed `include:` YAML all
+  exit with `EXIT_WORKBOOK_INVALID` (3) before any block runs.
+
+See `examples/include-demo.md` + `examples/include-login.md` for a minimal example.
+Passing parameters into an included workbook (beyond env vars the parent exports) is
+scoped for a later milestone.
+
 ## CLI Usage
 
 ```bash

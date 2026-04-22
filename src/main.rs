@@ -20,6 +20,22 @@ use std::time::{Duration, Instant};
 /// not feel sluggish, long enough to let a transient HTTP/API blip clear.
 const RETRY_DELAY: Duration = Duration::from_millis(500);
 
+/// Parse workbook content and expand any ```include``` fences. Exits with
+/// `EXIT_WORKBOOK_INVALID` on any include resolution failure (missing target,
+/// cycle, unreadable file). Every codepath that consumes a workbook for
+/// execution, inspection, or transformation must go through this — downstream
+/// dispatch panics on `Section::Include`.
+fn parse_and_resolve(content: &str, file: &str) -> parser::Workbook {
+    let wb = parser::parse(content);
+    match parser::resolve_includes(wb, Path::new(file)) {
+        Ok(resolved) => resolved,
+        Err(e) => {
+            eprintln!("wb: {}", e);
+            std::process::exit(exit_codes::EXIT_WORKBOOK_INVALID);
+        }
+    }
+}
+
 /// Execute a code block once, applying the per-block timeout override if
 /// set, and retrying on failure up to `policy.retries` times with a small
 /// delay between attempts. Returns the result of the final attempt.
@@ -515,7 +531,7 @@ fn run_single_collect(
         }
     };
 
-    let workbook = parser::parse(&content);
+    let workbook = parse_and_resolve(&content, file);
     let block_count = workbook.code_block_count();
 
     // Sandbox: if `requires` is present and we're not inside a container,
@@ -824,6 +840,11 @@ fn run_single_collect(
                 break;
             }
             parser::Section::Text(_) => {}
+            parser::Section::Include(_) => {
+                unreachable!(
+                    "Section::Include must be resolved by parser::resolve_includes before execution"
+                )
+            }
         }
     }
 
@@ -876,7 +897,7 @@ fn run_single(
         }
     };
 
-    let workbook = parser::parse(&content);
+    let workbook = parse_and_resolve(&content, file);
     let block_count = workbook.code_block_count();
 
     if block_count == 0 {
@@ -1666,7 +1687,7 @@ fn inspect_workbook(file: &str) {
         }
     };
 
-    let workbook = parser::parse(&content);
+    let workbook = parse_and_resolve(&content, file);
 
     if let Some(ref title) = workbook.frontmatter.title {
         println!("title: {}", title);
@@ -1822,7 +1843,7 @@ fn inspect_workbook_json(file: &str) {
             std::process::exit(1);
         }
     };
-    let workbook = parser::parse(&content);
+    let workbook = parse_and_resolve(&content, file);
 
     let fm = &workbook.frontmatter;
     let sandbox_obj = fm.requires.as_ref().map(|req| {
@@ -1900,6 +1921,11 @@ fn inspect_workbook_json(file: &str) {
                 }));
             }
             parser::Section::Text(_) => {}
+            parser::Section::Include(_) => {
+                unreachable!(
+                    "Section::Include must be resolved by parser::resolve_includes before inspect"
+                )
+            }
         }
     }
 
@@ -2223,7 +2249,7 @@ fn transform_workbook(file: &str) {
         }
     };
 
-    let workbook = parser::parse(&content);
+    let workbook = parse_and_resolve(&content, file);
     let existing_vars = workbook.frontmatter.vars.clone().unwrap_or_default();
 
     // Scan code blocks for {{key}} patterns
@@ -2361,7 +2387,7 @@ fn cmd_containers_build(args: &[String]) {
             }
         };
 
-        let workbook = parser::parse(&content);
+        let workbook = parse_and_resolve(&content, file);
         let requires = match workbook.frontmatter.requires {
             Some(ref r) => r,
             None => {

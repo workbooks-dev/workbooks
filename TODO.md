@@ -1,37 +1,19 @@
 # TODO — wb improvements
 
-Generated 2026-04-20 from a multi-agent audit. Items are grouped by theme, not priority within a theme. See the "Sequencing" section at the bottom for recommended order.
+Originally generated 2026-04-20 from a multi-agent audit. Waves 1 (data-loss fixes) and 2 (agent-UX wins) shipped — see git log for `1fe0323`, `f2e21b5`, `87d462a`, `09a8d79`, and the v0.9.7–v0.9.11 releases. This file is what's left.
 
 Status legend: `[ ]` not started · `[~]` in progress · `[x]` done · `[-]` dropped
 
 ---
 
-## 🚨 Fix first — silent data-loss risks
-
-- [x] **1. Atomic checkpoint + pending writes.** Shipped in `1fe0323` (write_secret_file with tmp+rename + 0o600 on Unix).
-- [x] **2. Remove `checkpoint_id.as_ref().unwrap()` panics.** Shipped in `f2e21b5` (zipped-Option matches).
-- [x] **3. File lock on concurrent checkpoint writes.** Shipped in `f2e21b5` (session-long flock in `run_single` + `cmd_resume`).
-- [x] **4. Reserved-name blocklist for bound_vars.** Shipped in `87d462a` + defense-in-depth env-apply filter in `f2e21b5`.
-- [x] **5. Verify signal-validation ordering.** Verified correct — validation happens before checkpoint mutation (`src/main.rs:2569-2586`). Bonus belt-and-braces via #4's env-apply filter.
-
-## 🎯 Highest agent-leverage UX wins
-
-- [x] **6. Structured error types in JSON output.** Shipped in v0.9.8 — `error_type` on `BlockResult`, JSON output, and callback `step.complete`/`checkpoint.failed` payloads. Stable tokens: `spawn_not_found`, `spawn_failed`, `nonzero_exit`, `signal_killed`, `sandbox_failed`, `read_error`, `setup_failed`, `env_file_failed`, `wait_without_checkpoint`, `pause_without_checkpoint`.
-- [x] **7. Real exit-code vocabulary.** Shipped in v0.9.7 — `src/exit_codes.rs` with documented table (0 success, 1 block-failed, 2 usage, 3 workbook-invalid, 5 sandbox-unavailable, 6 checkpoint-busy, 7 signal-timeout, 42 paused).
-- [x] **8. `wb inspect --json`.** Shipped in `09a8d79` — stable `{source, frontmatter, blocks[]}` shape covering code/wait/browser sections.
-- [x] **9. Trace-correlation field.** Shipped in `09a8d79` — `run_id` threaded through `RunSummary`, `CallbackConfig`, and every callback payload. Resolution order: `WB_RECORDING_RUN_ID` → `TRIGGER_RUN_ID` → generated.
-- [x] **10. Partial output capture on timeout/SIGKILL.** Shipped in v0.9.10 — `stdout_partial`/`stderr_partial` flags on `BlockResult`, JSON output, and callback `step.complete`/`checkpoint.failed` payloads. Timed-out blocks retain everything emitted before the kill; `error_type: "timeout"` pins them apart from clean nonzero exits. `BLOCK_TIMEOUT` is now `ExecutionContext.block_timeout` so #15's per-block timeouts can override without touching collection.
-- [x] **11. Line+column + "did-you-mean" on parse/runtime errors.** Shipped in v0.9.7 — "no executable blocks" lists known runtimes + flags caveat; ENOENT on spawn now gives per-language install hints + `exec:` escape hatch. (Open follow-up: line/column for malformed frontmatter YAML.)
-- [x] **12. Callback `event_version` + retries.** Shipped in v0.9.9 — `event_version: "1"` on every payload, HTTP callbacks retry 5xx + network errors with 0ms/200ms/1000ms backoff, 4xx treated as terminal. (Ordering guarantees for HTTP stay best-effort; Redis XADD already orders.)
-
 ## 🧠 Strategic bets
 
-- [ ] **13. Pandoc-style fence attrs** — ``` ```python {#step-3 .retryable timeout=30s} ```. Canonical home for ALL future per-block config. Do this early — items 6/7/14/15 slot in cheaply afterward.
+- [ ] **13. Pandoc-style fence attrs** — ``` ```python {#step-3 .retryable timeout=30s} ```. Canonical home for ALL future per-block config. Do this early — #14 and #16 slot in cheaply afterward, and #15's block-number-keyed maps can grow to accept attribute ids.
 - [ ] **14. Parameterized runs.** `wb run deploy.md --param region=us-east-1`. Frontmatter declares defaults + types. Param hash feeds into checkpoint identity.
-- [x] **15. Per-block `timeout`, `retry`, `continue-on-error`.** Shipped in v0.9.10 via frontmatter maps keyed by 1-based block number: `timeouts: {3: 2m}`, `retries: {3: 2}`, `continue_on_error: [4]`. Retries run with a 500ms backoff between attempts; a timeout on retry spawns a fresh session (state reset). `continue_on_error` lets a single block fail without tripping `--bail`. When fence attrs (#13) land, these same maps can grow to accept attribute ids alongside ints.
 - [ ] **16. Inline `expect` / `assert` fences.** Turn runbooks into test suites. `expect exit 0`, `expect stdout contains "ok"`.
-- [ ] **17. Pending-wait timeout reaper.** `on_timeout: abort` never fires until a human manually resumes. Background reaper (or auto-fire on next `wb pending`).
 - [ ] **18. Source-hash execution cache.** Skip blocks whose source + env + inputs haven't changed. Massive for iterative agent re-runs.
+- [x] **27. `include:` fence — workbook composition.** Shipped — `Section::Include` + parse-time expansion via `parser::resolve_includes`. Target workbook's blocks splice into the parent's section list, inheriting env + `$WB_ARTIFACTS_DIR`. Cycle detection + missing-file errors exit with code 3 at load time. Target frontmatter is ignored (parent controls runtime/secrets/env). Params still scoped for #14. Example: `examples/include-demo.md` + `examples/include-login.md`.
+- [ ] **28. `required:` frontmatter — declarative prerequisites** *(long-term; depends on #27)*. Sugar for "prepend these workbooks as `include` blocks at position 0; bail if any fail." Shape mirrors GitHub Actions `needs:`. Example: `required: [login.md, warm-cache.md]`. Same execution path as #27 — different ergonomics (order-independent, declarative vs positional fence).
 
 ## 🌐 Browser runtime
 
@@ -43,24 +25,26 @@ Status legend: `[ ]` not started · `[~]` in progress · `[x]` done · `[-]` dro
 
 ## 🧹 Code-health (do alongside, not instead)
 
-- [ ] **24. Extract `run_single()`** (`src/main.rs:761-1455` — 700 lines, 13 params). Will become painful as 6/7/13/14/15 all touch execution dispatch.
-- [ ] **25. Unified error type** (thiserror) — before all the new structured-error work multiplies the current `anyhow`/`String`/`unwrap` mix.
+- [ ] **24. Extract `run_single()`** (`src/main.rs:761-1455` — 700 lines, 13 params). Will become painful as #13/14 touch execution dispatch. Strongly consider doing this *before* #13.
+- [ ] **25. Unified error type** (thiserror) — before more structured-error work multiplies the current `anyhow`/`String`/`unwrap` mix.
 - [ ] **26. Type the sidecar↔checkpoint↔pending state** instead of opaque `serde_yaml::Value` — will otherwise become a scavenger hunt once browser recording metadata needs to survive pause/resume.
+
+## Open follow-ups from shipped work
+
+- [ ] Line/column for malformed frontmatter YAML parse errors (follow-up to #11).
+- [ ] Pending-wait descriptors should persist the original run's `--callback` URL so timeout reaping can emit `checkpoint.failed` callbacks (follow-up to #17).
+- [ ] HTTP callback ordering guarantees (currently best-effort; Redis XADD side already orders — follow-up to #12).
 
 ---
 
 ## Sequencing
 
-- **Wave 1 — foundation (this session):** 1, 2, 3, 4, 5. All small, independent, no structural changes.
-- **Wave 2 — agent-UX wins:** 6, 7, 8, 9 (then 10, 11, 12 as capacity allows).
-- **Wave 3 — fence-attr foundation:** 13 first, then 6/7 refinements.
-- **Wave 4 — power-ups:** 14 (params), 15 (retry/timeout), 16 (assertions).
-- **Parallel track — browser:** 19-23 in any order; independent of core.
-- **Health track:** 24-26 interleave with whichever wave touches the same files.
+- **Next — fence-attr foundation:** #24 (extract `run_single`) → #13 (fence attrs). Do #24 before #13 because #13+#14+#15 together will make dispatch untenable; doing #24 while it's still 700 lines is cheaper than after three more additions.
+- **Then — power-ups:** #14 (params — lets includes pass values, not just env), #16 (assertions). Both want fence attrs as substrate.
+- **Parallel track — browser:** #19-23 in any order; independent of core.
+- **Health track:** #25, #26 interleave with whichever change touches the same files.
+- **Long-term:** #28 (`required:` sugar) after #27 has baked. #18 (execution cache) once fence attrs give us stable block identity — pairs well with #27 to cache login-style includes.
 
 ## Notes
 
-- Silent/no-run flags were flagged as half-implemented by one audit; verified **fully wired** in `src/parser.rs` + `src/main.rs:1234, 1375`. No action needed.
-- SIGKILL-on-shutdown race in sidecar was already fixed in commit `fee72a3`.
 - `features-request.md` at repo root holds longer-form specs for fence-flags and browser recording — keep as canonical reference, this file is the checklist.
-- v0.9.8 promoted four experimental flags to stable — `WB_EXPERIMENTAL_BLOCK_FLAGS`, `WB_EXPERIMENTAL_WAIT`, `WB_EXPERIMENTAL_SANDBOX`, `WB_EXPERIMENTAL_BROWSER` all removed. `{no-run}`/`{silent}`, `wait`/`resume`, sandbox, and browser blocks now work without opt-in env vars.

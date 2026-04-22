@@ -183,6 +183,11 @@ fn build_json_output(workbook: &Workbook, summary: &RunSummary) -> JsonOutput {
             }
             Section::Wait(_) => {}
             Section::Browser(_) => {}
+            Section::Include(_) => {
+                unreachable!(
+                    "Section::Include must be resolved by parser::resolve_includes before output"
+                )
+            }
         }
     }
 
@@ -329,6 +334,11 @@ fn format_markdown(workbook: &Workbook, summary: &RunSummary) -> String {
                     out.push_str(&yaml);
                 }
                 out.push_str("```\n\n");
+            }
+            Section::Include(_) => {
+                unreachable!(
+                    "Section::Include must be resolved by parser::resolve_includes before output"
+                )
             }
         }
     }

@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::fs;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Deserialize, Default, Clone)]
 pub struct Frontmatter {
@@ -235,12 +237,25 @@ pub struct BrowserSliceSpec {
     pub silent: bool,
 }
 
+/// Workbook-composition fence (```include ```). Body is YAML with a `path:`
+/// pointing at another workbook. Resolved away before execution via
+/// `resolve_includes` — downstream code never sees `Section::Include`.
+#[derive(Debug, Deserialize, Serialize, Clone, Default)]
+pub struct IncludeSpec {
+    pub path: String,
+    #[serde(skip, default)]
+    pub line_number: usize,
+    #[serde(skip, default)]
+    pub section_index: usize,
+}
+
 #[derive(Debug)]
 pub enum Section {
     Text(String),
     Code(CodeBlock),
     Wait(WaitSpec),
     Browser(BrowserSliceSpec),
+    Include(IncludeSpec),
 }
 
 #[derive(Debug)]
@@ -274,6 +289,85 @@ pub fn parse(input: &str) -> Workbook {
         frontmatter,
         sections,
     }
+}
+
+/// Expand any ```include``` fences by splicing the target workbook's sections
+/// into place. Target frontmatter is intentionally ignored — the parent
+/// workbook's runtime/secrets/env/venv control the run. Target paths resolve
+/// relative to the directory of the including workbook, not the CWD.
+///
+/// Cycle detection tracks canonical paths of ancestors currently being
+/// resolved, so `A → B → A` is caught but `A → B, A → B` (same target included
+/// twice at different positions) is allowed.
+pub fn resolve_includes(wb: Workbook, parent_path: &Path) -> Result<Workbook, String> {
+    let parent_canonical = parent_path.canonicalize().map_err(|e| {
+        format!(
+            "cannot resolve workbook path {}: {}",
+            parent_path.display(),
+            e
+        )
+    })?;
+    let mut visiting = HashSet::new();
+    visiting.insert(parent_canonical.clone());
+    let base_dir = parent_canonical
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| PathBuf::from("."));
+    let resolved = resolve_sections(wb.sections, &base_dir, &mut visiting)?;
+    Ok(Workbook {
+        frontmatter: wb.frontmatter,
+        sections: resolved,
+    })
+}
+
+fn resolve_sections(
+    sections: Vec<Section>,
+    base_dir: &Path,
+    visiting: &mut HashSet<PathBuf>,
+) -> Result<Vec<Section>, String> {
+    let mut out = Vec::new();
+    for section in sections {
+        match section {
+            Section::Include(spec) => {
+                let target = base_dir.join(&spec.path);
+                let target_canonical = target.canonicalize().map_err(|e| {
+                    format!(
+                        "include at L{}: cannot resolve path '{}' (relative to {}): {}",
+                        spec.line_number,
+                        spec.path,
+                        base_dir.display(),
+                        e
+                    )
+                })?;
+                if visiting.contains(&target_canonical) {
+                    return Err(format!(
+                        "include at L{}: circular include of '{}' (already being resolved)",
+                        spec.line_number,
+                        target_canonical.display()
+                    ));
+                }
+                let content = fs::read_to_string(&target_canonical).map_err(|e| {
+                    format!(
+                        "include at L{}: cannot read '{}': {}",
+                        spec.line_number,
+                        target_canonical.display(),
+                        e
+                    )
+                })?;
+                let inner = parse(&content);
+                let inner_base = target_canonical
+                    .parent()
+                    .map(|p| p.to_path_buf())
+                    .unwrap_or_else(|| PathBuf::from("."));
+                visiting.insert(target_canonical.clone());
+                let inner_resolved = resolve_sections(inner.sections, &inner_base, visiting)?;
+                visiting.remove(&target_canonical);
+                out.extend(inner_resolved);
+            }
+            other => out.push(other),
+        }
+    }
+    Ok(out)
 }
 
 fn extract_frontmatter(input: &str) -> (Frontmatter, String) {
@@ -393,6 +487,39 @@ fn extract_sections(body: &str) -> Vec<Section> {
                 spec.line_number = line_num + 1;
                 spec.section_index = sections.len();
                 sections.push(Section::Wait(spec));
+                continue;
+            }
+
+            // Include fence: YAML body with `path:` pointing at another workbook.
+            // Resolved away by `resolve_includes` before execution — execution-time
+            // dispatch never sees these.
+            if language.eq_ignore_ascii_case("include") {
+                if !current_text.is_empty() {
+                    sections.push(Section::Text(current_text.clone()));
+                    current_text.clear();
+                }
+                let mut body_lines = Vec::new();
+                for (_ln, body_line) in lines.by_ref() {
+                    if body_line.trim() == "```" {
+                        break;
+                    }
+                    body_lines.push(body_line);
+                }
+                let yaml = body_lines.join("\n");
+                let mut spec: IncludeSpec = match serde_yaml::from_str(&yaml) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        eprintln!(
+                            "wb: include block parse error at L{}: {}",
+                            line_num + 1,
+                            e
+                        );
+                        IncludeSpec::default()
+                    }
+                };
+                spec.line_number = line_num + 1;
+                spec.section_index = sections.len();
+                sections.push(Section::Include(spec));
                 continue;
             }
 
@@ -1178,5 +1305,213 @@ verbs:
         assert_eq!(browsers.len(), 1);
         assert!(browsers[0].skip_execution);
         assert_eq!(wb.code_block_count(), 0);
+    }
+
+    // --- Include fence + resolve_includes --------------------------------
+
+    use std::io::Write;
+
+    /// Write `content` to a temp file rooted at `dir` and return the path.
+    fn write_temp(dir: &Path, name: &str, content: &str) -> PathBuf {
+        let p = dir.join(name);
+        let mut f = std::fs::File::create(&p).expect("create temp");
+        f.write_all(content.as_bytes()).expect("write temp");
+        p
+    }
+
+    /// Fresh unique temp dir per test to avoid collisions across parallel runs.
+    fn fresh_tempdir(prefix: &str) -> PathBuf {
+        let base = std::env::temp_dir().join(format!(
+            "wb-include-test-{}-{}-{}",
+            prefix,
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos(),
+        ));
+        std::fs::create_dir_all(&base).expect("create tempdir");
+        base
+    }
+
+    #[test]
+    fn test_include_fence_parsed_as_section() {
+        let input = r#"```include
+path: ./login.md
+```
+
+```bash
+echo ok
+```
+"#;
+        let wb = parse(input);
+        let has_include = wb
+            .sections
+            .iter()
+            .any(|s| matches!(s, Section::Include(spec) if spec.path == "./login.md"));
+        assert!(has_include, "include fence should parse into Section::Include");
+        // Include does not contribute to code_block_count (it expands away).
+        assert_eq!(wb.code_block_count(), 1);
+    }
+
+    #[test]
+    fn test_resolve_includes_splices_target_sections() {
+        let dir = fresh_tempdir("basic");
+        write_temp(
+            &dir,
+            "login.md",
+            r#"```bash
+echo "logged in"
+```
+
+```python
+print("checked session")
+```
+"#,
+        );
+        let parent_path = write_temp(
+            &dir,
+            "deploy.md",
+            r#"```bash
+echo "before login"
+```
+
+```include
+path: ./login.md
+```
+
+```bash
+echo "after login"
+```
+"#,
+        );
+        let wb = parse(&std::fs::read_to_string(&parent_path).unwrap());
+        let resolved = resolve_includes(wb, &parent_path).expect("resolve");
+
+        let code_langs: Vec<&str> = resolved
+            .sections
+            .iter()
+            .filter_map(|s| match s {
+                Section::Code(b) => Some(b.language.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(code_langs, vec!["bash", "bash", "python", "bash"]);
+        assert!(
+            resolved
+                .sections
+                .iter()
+                .all(|s| !matches!(s, Section::Include(_))),
+            "no unresolved includes should remain"
+        );
+        assert_eq!(resolved.code_block_count(), 4);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_resolve_includes_nested() {
+        // A includes B, B includes C. All three should flatten.
+        let dir = fresh_tempdir("nested");
+        write_temp(&dir, "c.md", "```bash\necho C\n```\n");
+        write_temp(
+            &dir,
+            "b.md",
+            "```bash\necho B\n```\n\n```include\npath: ./c.md\n```\n",
+        );
+        let a = write_temp(
+            &dir,
+            "a.md",
+            "```bash\necho A\n```\n\n```include\npath: ./b.md\n```\n",
+        );
+        let wb = parse(&std::fs::read_to_string(&a).unwrap());
+        let resolved = resolve_includes(wb, &a).expect("nested resolve");
+        assert_eq!(resolved.code_block_count(), 3);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_resolve_includes_detects_cycle() {
+        // A → B → A: resolution must fail, not loop.
+        let dir = fresh_tempdir("cycle");
+        let a = write_temp(
+            &dir,
+            "a.md",
+            "```include\npath: ./b.md\n```\n",
+        );
+        write_temp(
+            &dir,
+            "b.md",
+            "```include\npath: ./a.md\n```\n",
+        );
+        let wb = parse(&std::fs::read_to_string(&a).unwrap());
+        let err = resolve_includes(wb, &a).expect_err("should detect cycle");
+        assert!(
+            err.contains("circular include"),
+            "expected cycle error, got: {}",
+            err
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_resolve_includes_missing_file() {
+        let dir = fresh_tempdir("missing");
+        let parent = write_temp(
+            &dir,
+            "a.md",
+            "```include\npath: ./does-not-exist.md\n```\n",
+        );
+        let wb = parse(&std::fs::read_to_string(&parent).unwrap());
+        let err = resolve_includes(wb, &parent).expect_err("should fail on missing file");
+        assert!(
+            err.contains("cannot resolve path"),
+            "expected resolution error, got: {}",
+            err
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_resolve_includes_same_target_twice_is_allowed() {
+        // Including the same file twice at different positions is not a cycle —
+        // the ancestor set is pruned after each recursive return.
+        let dir = fresh_tempdir("dup");
+        write_temp(&dir, "shared.md", "```bash\necho shared\n```\n");
+        let parent = write_temp(
+            &dir,
+            "main.md",
+            r#"```include
+path: ./shared.md
+```
+
+```bash
+echo middle
+```
+
+```include
+path: ./shared.md
+```
+"#,
+        );
+        let wb = parse(&std::fs::read_to_string(&parent).unwrap());
+        let resolved = resolve_includes(wb, &parent).expect("dup include ok");
+        assert_eq!(resolved.code_block_count(), 3);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_resolve_includes_target_path_relative_to_includer_not_cwd() {
+        // An included workbook B in dir/ that itself includes ./c.md must
+        // resolve c.md relative to dir/, not the parent's dir or CWD.
+        let dir = fresh_tempdir("reldir");
+        let sub = dir.join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+        write_temp(&sub, "c.md", "```bash\necho C\n```\n");
+        write_temp(&sub, "b.md", "```include\npath: ./c.md\n```\n");
+        let a = write_temp(&dir, "a.md", "```include\npath: ./sub/b.md\n```\n");
+        let wb = parse(&std::fs::read_to_string(&a).unwrap());
+        let resolved = resolve_includes(wb, &a).expect("nested-dir resolve");
+        assert_eq!(resolved.code_block_count(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
