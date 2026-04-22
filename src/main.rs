@@ -4314,13 +4314,21 @@ echo "pin=$pin"
     // --- write_pause_result (F1) ----------------------------------------------
 
     fn make_pause_tempdir() -> std::path::PathBuf {
+        // Counter + pid + nanos beats pure time-based uniqueness: `cargo test`
+        // runs tests on multiple threads and nano-resolution isn't enough on
+        // some platforms (macOS in particular). A sibling test's cleanup
+        // otherwise races our read and trips serde with "EOF while parsing".
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static COUNTER: AtomicUsize = AtomicUsize::new(0);
+        let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
         let dir = std::env::temp_dir().join(format!(
-            "wb-pause-test-{}-{}",
+            "wb-pause-test-{}-{}-{}",
             std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_nanos())
-                .unwrap_or(0)
+                .unwrap_or(0),
+            seq,
         ));
         std::fs::create_dir_all(&dir).unwrap();
         dir
