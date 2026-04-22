@@ -36,7 +36,7 @@ import {
 import { getProvider } from "../lib/providers/index.js";
 import { SUPPORTS, runVerb, verbName } from "../verbs/index.js";
 
-const VERSION = "0.7.0";
+const VERSION = "0.8.0";
 const provider = getProvider();
 log(`[provider] ${provider.name}`);
 
