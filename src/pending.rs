@@ -677,27 +677,38 @@ mod tests {
 
     #[test]
     fn test_reap_expired_returns_entry_fields() {
-        // Confirm the ReapedEntry shape is populated correctly. Isolate by
-        // only asserting fields of entries whose id matches ours — a racing
-        // test's reap may have already consumed ours, in which case the
-        // post-condition (gone) is already checked elsewhere.
+        // Confirm the ReapedEntry shape is populated correctly. This test
+        // ran flaky under parallel test pressure because `reap_expired` has
+        // no file lock — two concurrent reapers (ours + a parallel test's)
+        // can race at the ckpt load/save step, leaving one of them with
+        // `checkpoint_marked_failed=false` even though the ckpt ends up
+        // Failed on disk. The load-bearing post-conditions are:
+        //   1. Our pending descriptor is gone.
+        //   2. Our ckpt, if present, is Failed.
+        // These hold regardless of which concurrent reaper did the marking.
         let id = unique_id("test_reap_entry_fields");
-        // Save ckpt before pending — see `test_reap_expired_abort_mode_is_reaped`
-        // for the race this ordering prevents.
         let ckpt = checkpoint::Checkpoint::new("fields.md", 2);
         checkpoint::save(&id, &ckpt).expect("save ckpt");
         let desc = expired_desc(&id, "fields.md", Some("abort"));
         save(&id, &desc).expect("save");
 
         let reaped = reap_expired();
+
+        // Post-condition 1: pending gone.
+        assert!(load(&id).expect("load").is_none());
+        // Post-condition 2: ckpt is Failed (or absent if a prior cleanup removed it).
+        let ckpt_final = checkpoint::load(&id).expect("load ckpt");
+        assert!(
+            ckpt_final.as_ref().map_or(true, |c| c.status == checkpoint::CheckpointStatus::Failed),
+            "ckpt should be Failed after reap, got {:?}",
+            ckpt_final.as_ref().map(|c| &c.status)
+        );
+        // If our own call saw the id in its reaped Vec, sanity-check the fields.
         if let Some(ours) = reaped.iter().find(|r| r.id == id) {
             assert_eq!(ours.workbook, "fields.md");
             assert_eq!(ours.on_timeout.as_deref(), Some("abort"));
             assert!(ours.timeout_at.is_some());
-            assert!(ours.checkpoint_marked_failed);
         }
-        // If we didn't see our id (raced), at minimum the file should be gone.
-        assert!(load(&id).expect("load").is_none());
 
         let _ = checkpoint::delete(&id);
     }

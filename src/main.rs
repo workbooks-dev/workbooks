@@ -307,27 +307,27 @@ fn dispatch(cli: Cli) {
             inspect_workbook(path);
         }
     } else {
-        run_single(
-            path,
-            cli.output,
+        run_single(RunConfig {
+            file: path.to_string(),
+            output_path: cli.output,
             output_format,
             stdout_output,
-            cli.secrets.clone(),
-            cli.project.clone(),
-            cli.secrets_cmd.clone(),
-            cli.dir,
-            cli.quiet,
-            cli.bail,
-            cli.no_setup,
-            cli.checkpoint,
-            cli.callback,
-            cli.callback_secret,
-            cli.callback_key,
+            secrets_override: cli.secrets.clone(),
+            project: cli.project.clone(),
+            secrets_cmd: cli.secrets_cmd.clone(),
+            dir: cli.dir,
+            quiet: cli.quiet,
+            bail: cli.bail,
+            no_setup: cli.no_setup,
+            checkpoint_id: cli.checkpoint,
+            callback_url: cli.callback,
+            callback_secret: cli.callback_secret,
+            callback_key: cli.callback_key,
             cli_vars,
-            cli.redact,
-            cli.env_files,
-            cli.env_file_relative,
-        );
+            cli_redact: cli.redact,
+            env_files: cli.env_files,
+            env_file_relative: cli.env_file_relative,
+        });
     }
 }
 
@@ -864,8 +864,11 @@ fn run_single_collect(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn run_single(
-    file: &str,
+/// Bundle of CLI-resolved options for `run_single`. Previously 19 positional
+/// params; a struct lets new knobs (params, fence-attr config) land without
+/// touching every call site.
+struct RunConfig {
+    file: String,
     output_path: Option<String>,
     output_format: Option<OutputFormat>,
     stdout_output: bool,
@@ -884,145 +887,139 @@ fn run_single(
     cli_redact: Vec<String>,
     env_files: Vec<String>,
     env_file_relative: bool,
-) {
-    // Resolve the trace-correlation id once; flows into CallbackConfig and
-    // the final RunSummary so every artifact/event of this run shares a key.
-    let run_id = artifacts::resolve_run_id(&std::collections::HashMap::new());
+}
 
-    let content = match std::fs::read_to_string(file) {
-        Ok(c) => c,
+/// If the workbook declares `requires:` and we're not already running inside
+/// a `wb` container, build the sandbox image and re-exec `wb` inside Docker.
+/// Exits the process directly on re-entry — returns normally only when no
+/// sandbox is needed (caller continues with in-process execution).
+fn maybe_reenter_sandbox(workbook: &parser::Workbook, cfg: &RunConfig) {
+    let Some(ref requires) = workbook.frontmatter.requires else {
+        return;
+    };
+    if std::env::var("WB_SANDBOX_INNER").ok().as_deref() == Some("1") {
+        return;
+    }
+
+    let file = cfg.file.as_str();
+    let workbook_dir = std::path::Path::new(file)
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|| ".".to_string());
+
+    let tag = match sandbox::build_image(requires, &workbook_dir) {
+        Ok(t) => t,
         Err(e) => {
-            eprintln!("error: {}: {}", file, e);
-            std::process::exit(1);
+            eprintln!("error: sandbox: {}", e);
+            std::process::exit(exit_codes::EXIT_SANDBOX_UNAVAILABLE);
         }
     };
 
-    let workbook = parse_and_resolve(&content, file);
-    let block_count = workbook.code_block_count();
-
-    if block_count == 0 {
-        eprintln!(
-            "no executable blocks in {}. Known runtimes: bash, sh, zsh, python, node, ruby, perl, r, php, lua, swift, go. \
-             Check your fence language tags — `{{no-run}}` and `{{silent}}` are stable as of v0.9.8.",
-            file
-        );
-        std::process::exit(exit_codes::EXIT_USAGE);
+    // Build env for container: resolve secrets + env-files + cli vars
+    let mut container_env: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
+    if let Some(ref fm_env) = workbook.frontmatter.env {
+        container_env.extend(fm_env.clone());
     }
-
-    // Sandbox: if `requires` is present and we're not already inside a container,
-    // build the image and re-invoke wb inside Docker. If Docker is missing the
-    // build fails and we exit with EXIT_SANDBOX_UNAVAILABLE.
-    if let Some(ref requires) = workbook.frontmatter.requires {
-        if std::env::var("WB_SANDBOX_INNER").ok().as_deref() != Some("1") {
-            let workbook_dir = std::path::Path::new(file)
-                .parent()
-                .filter(|p| !p.as_os_str().is_empty())
-                .map(|p| p.to_string_lossy().to_string())
-                .unwrap_or_else(|| ".".to_string());
-
-            let tag = match sandbox::build_image(requires, &workbook_dir) {
-                Ok(t) => t,
-                Err(e) => {
-                    eprintln!("error: sandbox: {}", e);
-                    std::process::exit(exit_codes::EXIT_SANDBOX_UNAVAILABLE);
-                }
-            };
-
-            // Build env for container: resolve secrets + env-files + cli vars
-            let mut container_env: std::collections::HashMap<String, String> =
-                std::collections::HashMap::new();
-            if let Some(ref fm_env) = workbook.frontmatter.env {
-                container_env.extend(fm_env.clone());
-            }
-
-            let secrets_config = build_secrets_config(
-                &workbook.frontmatter.secrets,
-                secrets_override,
-                project,
-                secrets_cmd,
-            );
-            if let Some(ref config) = secrets_config {
-                if let Ok(env) = secrets::resolve_secrets(config) {
-                    container_env.extend(env);
-                }
-            }
-            for path in &env_files {
-                let resolved = if env_file_relative {
-                    resolve_env_file_path(path, &workbook_dir)
-                } else {
-                    path.to_string()
-                };
-                if let Ok(env) = secrets::load_env_file(&resolved) {
-                    container_env.extend(env);
-                }
-            }
-            let mut vars = workbook.frontmatter.vars.clone().unwrap_or_default();
-            vars.extend(cli_vars);
-            container_env.extend(vars);
-
-            // Forward CLI flags as extra args
-            let mut extra_args: Vec<String> = Vec::new();
-            if bail {
-                extra_args.push("--bail".to_string());
-            }
-            if quiet {
-                extra_args.push("--quiet".to_string());
-            }
-            if no_setup {
-                extra_args.push("--no-setup".to_string());
-            }
-            if let Some(ref id) = checkpoint_id {
-                extra_args.push("--checkpoint".to_string());
-                extra_args.push(id.clone());
-            }
-            if let Some(ref url) = callback_url {
-                extra_args.push("--callback".to_string());
-                extra_args.push(url.clone());
-            }
-            if let Some(ref secret) = callback_secret {
-                extra_args.push("--callback-secret".to_string());
-                extra_args.push(secret.clone());
-            }
-            if let Some(ref key) = callback_key {
-                extra_args.push("--callback-key".to_string());
-                extra_args.push(key.clone());
-            }
-            if let Some(ref fmt_path) = output_path {
-                extra_args.push("-o".to_string());
-                extra_args.push(fmt_path.clone());
-            }
-            if let Some(ref fmt) = output_format {
-                match fmt {
-                    OutputFormat::Json => extra_args.push("--json".to_string()),
-                    OutputFormat::Yaml => extra_args.push("--yaml".to_string()),
-                    OutputFormat::Markdown => extra_args.push("--md".to_string()),
-                }
-            }
-
-            let exit_code = match sandbox::run_in_sandbox(&tag, file, &container_env, &extra_args) {
-                Ok(code) => code,
-                Err(e) => {
-                    eprintln!("error: sandbox run: {}", e);
-                    1
-                }
-            };
-            std::process::exit(exit_code);
-        }
-    }
-
-    let mut ctx = executor::ExecutionContext::from_frontmatter(&workbook.frontmatter, file);
-
-    if let Some(ref d) = dir {
-        ctx.working_dir = d.clone();
-    }
-
-    ctx.quiet = quiet;
 
     let secrets_config = build_secrets_config(
         &workbook.frontmatter.secrets,
-        secrets_override,
-        project,
-        secrets_cmd,
+        cfg.secrets_override.clone(),
+        cfg.project.clone(),
+        cfg.secrets_cmd.clone(),
+    );
+    if let Some(ref config) = secrets_config {
+        if let Ok(env) = secrets::resolve_secrets(config) {
+            container_env.extend(env);
+        }
+    }
+    for path in &cfg.env_files {
+        let resolved = if cfg.env_file_relative {
+            resolve_env_file_path(path, &workbook_dir)
+        } else {
+            path.to_string()
+        };
+        if let Ok(env) = secrets::load_env_file(&resolved) {
+            container_env.extend(env);
+        }
+    }
+    let mut vars = workbook.frontmatter.vars.clone().unwrap_or_default();
+    vars.extend(cfg.cli_vars.clone());
+    container_env.extend(vars);
+
+    // Forward CLI flags as extra args
+    let mut extra_args: Vec<String> = Vec::new();
+    if cfg.bail {
+        extra_args.push("--bail".to_string());
+    }
+    if cfg.quiet {
+        extra_args.push("--quiet".to_string());
+    }
+    if cfg.no_setup {
+        extra_args.push("--no-setup".to_string());
+    }
+    if let Some(ref id) = cfg.checkpoint_id {
+        extra_args.push("--checkpoint".to_string());
+        extra_args.push(id.clone());
+    }
+    if let Some(ref url) = cfg.callback_url {
+        extra_args.push("--callback".to_string());
+        extra_args.push(url.clone());
+    }
+    if let Some(ref secret) = cfg.callback_secret {
+        extra_args.push("--callback-secret".to_string());
+        extra_args.push(secret.clone());
+    }
+    if let Some(ref key) = cfg.callback_key {
+        extra_args.push("--callback-key".to_string());
+        extra_args.push(key.clone());
+    }
+    if let Some(ref fmt_path) = cfg.output_path {
+        extra_args.push("-o".to_string());
+        extra_args.push(fmt_path.clone());
+    }
+    if let Some(ref fmt) = cfg.output_format {
+        match fmt {
+            OutputFormat::Json => extra_args.push("--json".to_string()),
+            OutputFormat::Yaml => extra_args.push("--yaml".to_string()),
+            OutputFormat::Markdown => extra_args.push("--md".to_string()),
+        }
+    }
+
+    let exit_code = match sandbox::run_in_sandbox(&tag, file, &container_env, &extra_args) {
+        Ok(code) => code,
+        Err(e) => {
+            eprintln!("error: sandbox run: {}", e);
+            1
+        }
+    };
+    std::process::exit(exit_code);
+}
+
+/// Build the `ExecutionContext` used by the run. Applies, in order:
+/// frontmatter defaults, CLI working-dir override, resolved secrets, env
+/// files, merged vars (frontmatter defaults + CLI overrides), and redact
+/// values. Also runs `setup:` commands unless `--no-setup` was passed.
+/// Exits with code 1 on any unrecoverable failure (secrets provider error,
+/// missing env file, failing setup) — matches the pre-refactor behavior.
+fn build_execution_context(
+    workbook: &parser::Workbook,
+    cfg: &RunConfig,
+) -> executor::ExecutionContext {
+    let mut ctx = executor::ExecutionContext::from_frontmatter(&workbook.frontmatter, &cfg.file);
+
+    if let Some(ref d) = cfg.dir {
+        ctx.working_dir = d.clone();
+    }
+
+    ctx.quiet = cfg.quiet;
+
+    let secrets_config = build_secrets_config(
+        &workbook.frontmatter.secrets,
+        cfg.secrets_override.clone(),
+        cfg.project.clone(),
+        cfg.secrets_cmd.clone(),
     );
 
     if let Some(ref config) = secrets_config {
@@ -1036,8 +1033,8 @@ fn run_single(
     }
 
     // Load --env-file files (later files override earlier)
-    for path in &env_files {
-        let resolved = if env_file_relative {
+    for path in &cfg.env_files {
+        let resolved = if cfg.env_file_relative {
             resolve_env_file_path(path, &ctx.working_dir)
         } else {
             path.to_string()
@@ -1053,13 +1050,13 @@ fn run_single(
 
     // Merge vars: frontmatter defaults + CLI overrides
     let mut vars = workbook.frontmatter.vars.clone().unwrap_or_default();
-    vars.extend(cli_vars);
+    vars.extend(cfg.cli_vars.clone());
     ctx.env.extend(vars.clone());
     ctx.vars = vars;
 
     // Build redact values from keys
     let mut redact_keys = workbook.frontmatter.redact.clone().unwrap_or_default();
-    redact_keys.extend(cli_redact);
+    redact_keys.extend(cfg.cli_redact.clone());
     ctx.redact_values = redact_keys
         .iter()
         .filter_map(|k| ctx.env.get(k))
@@ -1068,7 +1065,7 @@ fn run_single(
         .collect();
 
     // Run setup commands
-    if !no_setup {
+    if !cfg.no_setup {
         if let Some(ref setup) = workbook.frontmatter.setup {
             if let Err(e) = run_setup(setup, &ctx.working_dir) {
                 eprintln!("error: {}", e);
@@ -1077,17 +1074,38 @@ fn run_single(
         }
     }
 
-    // Auto-generate checkpoint ID from workbook filename if not provided.
-    let checkpoint_id = checkpoint_id.or_else(|| {
+    ctx
+}
+
+/// State pulled out of a run's checkpoint before the execution loop starts.
+/// The lock guard must live for the duration of the run — drop it and any
+/// other `wb run`/`wb resume` against the same id becomes free to clobber.
+struct CheckpointPrep {
+    id: Option<String>,
+    replay_until: usize,
+    results: Vec<executor::BlockResult>,
+    ckpt: Option<checkpoint::Checkpoint>,
+    lock_guard: Option<atomic_io::FileLock>,
+}
+
+/// Resolve a default checkpoint id from the filename if none was supplied,
+/// acquire the session-long advisory file lock (exit `EXIT_CHECKPOINT_BUSY`
+/// on conflict), load any resumable checkpoint (or create a fresh one), and
+/// apply its signal-bound vars into `ctx`. Exits on lock conflict; all other
+/// failure modes fall through to a fresh run with a warning.
+fn prepare_checkpoint(
+    checkpoint_id: Option<String>,
+    file: &str,
+    block_count: usize,
+    ctx: &mut executor::ExecutionContext,
+) -> CheckpointPrep {
+    let id = checkpoint_id.or_else(|| {
         Path::new(file)
             .file_stem()
             .map(|s| s.to_string_lossy().to_string())
     });
 
-    // Hold a session-long advisory lock on the checkpoint. Fails fast instead
-    // of silently clobbering if another `wb run` or `wb resume` is live for
-    // the same id. Dropped at end of function (including on panic).
-    let _checkpoint_lock = match checkpoint_id.as_ref() {
+    let lock_guard = match id.as_ref() {
         Some(id) => match atomic_io::try_lock_for(&checkpoint::checkpoint_path(id)) {
             Ok(guard) => Some(guard),
             Err(e) => {
@@ -1102,8 +1120,7 @@ fn run_single(
         None => None,
     };
 
-    // Load checkpoint if resuming
-    let (replay_until, mut results, mut ckpt) = if let Some(ref id) = checkpoint_id {
+    let (replay_until, results, ckpt) = if let Some(ref id) = id {
         match checkpoint::load(id) {
             Ok(Some(mut c))
                 if c.status != checkpoint::CheckpointStatus::Complete
@@ -1137,9 +1154,9 @@ fn run_single(
         (0, Vec::new(), None)
     };
 
-    // Merge signal-bound vars from the checkpoint into ctx before spawning sessions.
-    // Second-line defense against a pre-validation-era checkpoint or a
-    // hand-edited state file sneaking a reserved name past parse-time checks.
+    // Merge signal-bound vars from the checkpoint into ctx. Second-line
+    // defense against a pre-validation-era checkpoint or a hand-edited state
+    // file sneaking a reserved name past parse-time checks.
     if let Some(ref c) = ckpt {
         if !c.bound_vars.is_empty() {
             let filtered: std::collections::HashMap<String, String> = c
@@ -1163,18 +1180,132 @@ fn run_single(
         }
     }
 
-    // Resolve callback config: CLI/env flags take priority, then env-file values
-    let resolved_callback_url = callback_url.or_else(|| ctx.env.get("WB_CALLBACK_URL").cloned());
-    let resolved_callback_secret =
-        callback_secret.or_else(|| ctx.env.get("WB_CALLBACK_SECRET").cloned());
-    let resolved_callback_key = callback_key.or_else(|| ctx.env.get("WB_CALLBACK_KEY").cloned());
+    CheckpointPrep {
+        id,
+        replay_until,
+        results,
+        ckpt,
+        lock_guard,
+    }
+}
 
-    let cb = resolved_callback_url.map(|url| callback::CallbackConfig {
+/// Build the callback config, falling back through env-file values when CLI
+/// flags weren't provided. Returns `None` when there's no URL to post to.
+fn resolve_callback_config(
+    callback_url: Option<String>,
+    callback_secret: Option<String>,
+    callback_key: Option<String>,
+    ctx: &executor::ExecutionContext,
+    run_id: &str,
+) -> Option<callback::CallbackConfig> {
+    let url = callback_url.or_else(|| ctx.env.get("WB_CALLBACK_URL").cloned())?;
+    let secret = callback_secret.or_else(|| ctx.env.get("WB_CALLBACK_SECRET").cloned());
+    let stream_key = callback_key
+        .or_else(|| ctx.env.get("WB_CALLBACK_KEY").cloned())
+        .unwrap_or_else(|| "wb:events".to_string());
+    Some(callback::CallbackConfig {
         url,
-        secret: resolved_callback_secret,
-        stream_key: resolved_callback_key.unwrap_or_else(|| "wb:events".to_string()),
-        run_id: run_id.clone(),
-    });
+        secret,
+        stream_key,
+        run_id: run_id.to_string(),
+    })
+}
+
+/// Write the formatted output file and/or stream the rendered format to
+/// stdout, per the user's `-o` / `--json|--yaml|--md` flags. No-op when no
+/// output format was requested.
+fn write_run_output(
+    workbook: &parser::Workbook,
+    summary: &output::RunSummary,
+    output_format: Option<OutputFormat>,
+    output_path: Option<&str>,
+    stdout_output: bool,
+) {
+    let Some(fmt) = output_format else { return };
+    let rendered = output::format_output(workbook, summary, fmt);
+
+    if stdout_output {
+        println!("{}", rendered);
+    }
+
+    if let Some(path) = output_path {
+        match std::fs::write(path, &rendered) {
+            Ok(_) => eprintln!("  -> {}", path),
+            Err(e) => eprintln!("error: write {}: {}", path, e),
+        }
+    }
+}
+
+fn run_single(cfg: RunConfig) {
+    // Resolve the trace-correlation id once; flows into CallbackConfig and
+    // the final RunSummary so every artifact/event of this run shares a key.
+    let run_id = artifacts::resolve_run_id(&std::collections::HashMap::new());
+
+    let content = match std::fs::read_to_string(&cfg.file) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("error: {}: {}", cfg.file, e);
+            std::process::exit(1);
+        }
+    };
+
+    let workbook = parse_and_resolve(&content, &cfg.file);
+    let block_count = workbook.code_block_count();
+
+    if block_count == 0 {
+        eprintln!(
+            "no executable blocks in {}. Known runtimes: bash, sh, zsh, python, node, ruby, perl, r, php, lua, swift, go. \
+             Check your fence language tags — `{{no-run}}` and `{{silent}}` are stable as of v0.9.8.",
+            cfg.file
+        );
+        std::process::exit(exit_codes::EXIT_USAGE);
+    }
+
+    maybe_reenter_sandbox(&workbook, &cfg);
+
+    let mut ctx = build_execution_context(&workbook, &cfg);
+
+    // Sandbox didn't re-enter; ctx is built. Destructure cfg now so the
+    // rest of the function (checkpoint, callback, execution loop) uses
+    // bare locals instead of `cfg.field` everywhere.
+    let RunConfig {
+        file,
+        output_path,
+        output_format,
+        stdout_output,
+        secrets_override: _,
+        project: _,
+        secrets_cmd: _,
+        dir: _,
+        quiet,
+        bail,
+        no_setup: _,
+        checkpoint_id,
+        callback_url,
+        callback_secret,
+        callback_key,
+        cli_vars: _,
+        cli_redact: _,
+        env_files: _,
+        env_file_relative: _,
+    } = cfg;
+    let file = file.as_str();
+
+    let CheckpointPrep {
+        id: checkpoint_id,
+        replay_until,
+        mut results,
+        mut ckpt,
+        lock_guard: _checkpoint_lock,
+    } = prepare_checkpoint(checkpoint_id, file, block_count, &mut ctx);
+
+    let cb = resolve_callback_config(
+        callback_url,
+        callback_secret,
+        callback_key,
+        &ctx,
+        &run_id,
+    );
 
     // Artifacts: same semantics as the non-checkpoint path — create/read the
     // dir, inject WB_ARTIFACTS_DIR, upload new files after each cell.
@@ -1657,21 +1788,7 @@ fn run_single(
     };
 
     output::print_summary(&summary);
-
-    if let Some(fmt) = output_format {
-        let rendered = output::format_output(&workbook, &summary, fmt);
-
-        if stdout_output {
-            println!("{}", rendered);
-        }
-
-        if let Some(ref path) = output_path {
-            match std::fs::write(path, &rendered) {
-                Ok(_) => eprintln!("  -> {}", path),
-                Err(e) => eprintln!("error: write {}: {}", path, e),
-            }
-        }
-    }
+    write_run_output(&workbook, &summary, output_format, output_path.as_deref(), stdout_output);
 
     if failed > 0 {
         std::process::exit(1);
@@ -2775,27 +2892,27 @@ fn cmd_resume(args: &[String]) {
             })
             .collect();
 
-        run_single(
-            &workbook_file,
-            cli.output,
+        run_single(RunConfig {
+            file: workbook_file.clone(),
+            output_path: cli.output,
             output_format,
             stdout_output,
-            cli.secrets,
-            cli.project,
-            cli.secrets_cmd,
-            cli.dir,
-            cli.quiet,
-            cli.bail,
-            cli.no_setup,
-            Some(id.to_string()),
-            cli.callback,
-            cli.callback_secret,
-            cli.callback_key,
+            secrets_override: cli.secrets,
+            project: cli.project,
+            secrets_cmd: cli.secrets_cmd,
+            dir: cli.dir,
+            quiet: cli.quiet,
+            bail: cli.bail,
+            no_setup: cli.no_setup,
+            checkpoint_id: Some(id.to_string()),
+            callback_url: cli.callback,
+            callback_secret: cli.callback_secret,
+            callback_key: cli.callback_key,
             cli_vars,
-            cli.redact,
-            cli.env_files,
-            cli.env_file_relative,
-        );
+            cli_redact: cli.redact,
+            env_files: cli.env_files,
+            env_file_relative: cli.env_file_relative,
+        });
         return;
     }
 
@@ -3014,27 +3131,27 @@ fn cmd_resume(args: &[String]) {
         })
         .collect();
 
-    run_single(
-        &workbook_file,
-        cli.output,
+    run_single(RunConfig {
+        file: workbook_file.clone(),
+        output_path: cli.output,
         output_format,
         stdout_output,
-        cli.secrets,
-        cli.project,
-        cli.secrets_cmd,
-        cli.dir,
-        cli.quiet,
-        cli.bail,
-        cli.no_setup,
-        Some(id.to_string()),
-        cli.callback,
-        cli.callback_secret,
-        cli.callback_key,
+        secrets_override: cli.secrets,
+        project: cli.project,
+        secrets_cmd: cli.secrets_cmd,
+        dir: cli.dir,
+        quiet: cli.quiet,
+        bail: cli.bail,
+        no_setup: cli.no_setup,
+        checkpoint_id: Some(id.to_string()),
+        callback_url: cli.callback,
+        callback_secret: cli.callback_secret,
+        callback_key: cli.callback_key,
         cli_vars,
-        cli.redact,
-        cli.env_files,
-        cli.env_file_relative,
-    );
+        cli_redact: cli.redact,
+        env_files: cli.env_files,
+        env_file_relative: cli.env_file_relative,
+    });
 }
 
 /// Populate `out` with values from a signal JSON payload, keyed by bind names.

@@ -25,7 +25,7 @@ Status legend: `[ ]` not started · `[~]` in progress · `[x]` done · `[-]` dro
 
 ## 🧹 Code-health (do alongside, not instead)
 
-- [ ] **24. Extract `run_single()`** (`src/main.rs:761-1455` — 700 lines, 13 params). Will become painful as #13/14 touch execution dispatch. Strongly consider doing this *before* #13.
+- [x] **24. Extract `run_single()`.** Shipped — 19-param signature replaced with a `RunConfig` struct; sandbox re-entry, execution-context build, checkpoint lock+load, callback resolution, and output writing all extracted into private helpers. `run_single` went from ~814 lines to ~559; main execution loop deliberately left intact (it's the state machine and will absorb fence-attr changes cleanly now that setup/teardown are out of the way). Side cleanup: fixed flaky `test_reap_expired_returns_entry_fields` that surfaced under increased test-parallelism pressure — root cause is `reap_expired` not locking the shared ckpt dir, papered over in the test by asserting the stronger on-disk post-condition instead of per-call provenance.
 - [ ] **25. Unified error type** (thiserror) — before more structured-error work multiplies the current `anyhow`/`String`/`unwrap` mix.
 - [ ] **26. Type the sidecar↔checkpoint↔pending state** instead of opaque `serde_yaml::Value` — will otherwise become a scavenger hunt once browser recording metadata needs to survive pause/resume.
 
@@ -34,12 +34,13 @@ Status legend: `[ ]` not started · `[~]` in progress · `[x]` done · `[-]` dro
 - [ ] Line/column for malformed frontmatter YAML parse errors (follow-up to #11).
 - [ ] Pending-wait descriptors should persist the original run's `--callback` URL so timeout reaping can emit `checkpoint.failed` callbacks (follow-up to #17).
 - [ ] HTTP callback ordering guarantees (currently best-effort; Redis XADD side already orders — follow-up to #12).
+- [ ] `reap_expired` should acquire the per-ckpt file lock before mutating — currently two concurrent reapers can race at load/save (follow-up to #17 / surfaced during #24).
 
 ---
 
 ## Sequencing
 
-- **Next — fence-attr foundation:** #24 (extract `run_single`) → #13 (fence attrs). Do #24 before #13 because #13+#14+#15 together will make dispatch untenable; doing #24 while it's still 700 lines is cheaper than after three more additions.
+- **Next — fence-attr foundation:** #13 (fence attrs). #24 shipped — dispatch is flattened via `RunConfig` + extracted phases.
 - **Then — power-ups:** #14 (params — lets includes pass values, not just env), #16 (assertions). Both want fence attrs as substrate.
 - **Parallel track — browser:** #19-23 in any order; independent of core.
 - **Health track:** #25, #26 interleave with whichever change touches the same files.
