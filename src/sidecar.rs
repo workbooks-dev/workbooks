@@ -38,15 +38,37 @@ const SLICE_EVENT_TIMEOUT: Duration = Duration::from_secs(300);
 /// Overridable via `WB_SIDECAR_SHUTDOWN_TIMEOUT_SECS` for test harnesses.
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(45);
 
-/// Info captured when a slice pauses for a human-in-the-loop action
-/// (MFA, OTP, etc.). Returned up to the executor + main so `wb` can write a
-/// pending descriptor and exit 42.
-#[derive(Debug, Clone)]
+/// Info captured when a slice pauses for a human-in-the-loop action.
+/// Generalized from the original MFA-only shape to carry the full
+/// `pause_for_human` payload so the run page can render operator-facing
+/// affordances (message, deep-link, action buttons) from a single event.
+/// Returned up to the executor + main so `wb` can write a pending
+/// descriptor and exit 42.
+#[derive(Debug, Clone, Default)]
 pub struct PauseInfo {
     pub sidecar_state: Option<serde_yaml::Value>,
     pub reason: Option<String>,
     pub resume_url: Option<String>,
     pub verb_index: Option<usize>,
+    /// Operator-facing message (e.g. "Drop this month's receipts, then
+    /// resume"). Rendered as the primary prompt on the run page.
+    pub message: Option<String>,
+    /// Deep-link the operator clicks to take the required off-band action
+    /// (MFA page, Drive folder, approval console, ...). Optional — some
+    /// pauses are pure wait-for-ack notifications.
+    pub context_url: Option<String>,
+    /// One of "operator_click" | "poll" | "timeout". The run page picks
+    /// its UI + auto-resume behavior from this.
+    pub resume_on: Option<String>,
+    /// Duration string forwarded from the verb args (e.g. "1h", "5m"). wb
+    /// doesn't parse it here — the descriptor's `timeout_at` is the
+    /// authoritative wall-clock deadline; this field is for display.
+    pub timeout: Option<String>,
+    /// Operator button set. Empty vec (or missing) is rendered as a single
+    /// "Resume" button; a non-empty list becomes a branching choice whose
+    /// selected value ends up in `$WB_ARTIFACTS_DIR/pause_result.json`
+    /// via the resume path.
+    pub actions: Vec<serde_json::Value>,
 }
 
 /// Result of running one `browser` slice through the sidecar.
@@ -71,6 +93,11 @@ pub struct SliceCallbackContext<'a> {
     pub line_number: usize,
     pub completed: usize,
     pub total: usize,
+    /// Snapshot of active include frames (outermost → innermost) at the time
+    /// this browser slice executes. Forwarded on `step.paused` / `step.resumed`
+    /// / `step.recovered` events so consumers can correlate mid-slice
+    /// lifecycle with the operator-visible step timeline.
+    pub include_chain: &'a [crate::parser::IncludeFrame],
 }
 
 /// Extra payload sent to the sidecar to resume a previously-paused slice.
@@ -447,6 +474,7 @@ fn fire_lifecycle(ctx: &SliceCallbackContext, event: &str, sidecar_msg: &Value) 
         ctx.completed,
         ctx.total,
         extra,
+        ctx.include_chain,
     );
 }
 
@@ -466,11 +494,41 @@ fn extract_pause_info(msg: &Value) -> PauseInfo {
         .get("verb_index")
         .and_then(|v| v.as_u64())
         .map(|n| n as usize);
+    let message = msg
+        .get("message")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let context_url = msg
+        .get("context_url")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let resume_on = msg
+        .get("resume_on")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let timeout = msg
+        .get("timeout")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    // `actions` is forwarded verbatim. Anything non-array (or missing) is
+    // treated as "no custom actions" — the run page will render a single
+    // default Resume button. We keep the list opaque so sidecar-side schema
+    // evolution (e.g. adding icon/hint fields) doesn't need a wb release.
+    let actions = msg
+        .get("actions")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
     PauseInfo {
         sidecar_state,
         reason,
         resume_url,
         verb_index,
+        message,
+        context_url,
+        resume_on,
+        timeout,
+        actions,
     }
 }
 
@@ -571,6 +629,57 @@ mod tests {
         assert_eq!(info.resume_url.as_deref(), Some("https://browserbase/live/xyz"));
         assert_eq!(info.verb_index, Some(7));
         assert!(info.sidecar_state.is_some());
+    }
+
+    #[test]
+    fn extract_pause_info_parses_pause_for_human_fields() {
+        let msg = json!({
+            "type": "slice.paused",
+            "reason": "pause_for_human",
+            "message": "Drop this month's receipts in the folder below",
+            "context_url": "https://drive.google.com/drive/folders/abc",
+            "resume_on": "operator_click",
+            "timeout": "1h",
+            "actions": [
+                { "label": "Approved", "value": "approved" },
+                { "label": "Denied", "value": "denied" }
+            ],
+            "verb_index": 0,
+            "sidecar_state": { "verb_index": 0 }
+        });
+        let info = extract_pause_info(&msg);
+        assert_eq!(info.reason.as_deref(), Some("pause_for_human"));
+        assert_eq!(
+            info.message.as_deref(),
+            Some("Drop this month's receipts in the folder below")
+        );
+        assert_eq!(
+            info.context_url.as_deref(),
+            Some("https://drive.google.com/drive/folders/abc")
+        );
+        assert_eq!(info.resume_on.as_deref(), Some("operator_click"));
+        assert_eq!(info.timeout.as_deref(), Some("1h"));
+        assert_eq!(info.actions.len(), 2);
+        assert_eq!(info.actions[0]["label"], "Approved");
+        assert_eq!(info.actions[1]["value"], "denied");
+    }
+
+    #[test]
+    fn extract_pause_info_defaults_missing_pause_for_human_fields() {
+        // Existing wait_for_mfa-style pauses that don't carry the new fields
+        // must still parse cleanly — PauseInfo fields default to None / [].
+        let msg = json!({
+            "type": "slice.paused",
+            "reason": "legacy_mfa",
+            "verb_index": 3
+        });
+        let info = extract_pause_info(&msg);
+        assert_eq!(info.reason.as_deref(), Some("legacy_mfa"));
+        assert!(info.message.is_none());
+        assert!(info.context_url.is_none());
+        assert!(info.resume_on.is_none());
+        assert!(info.timeout.is_none());
+        assert!(info.actions.is_empty());
     }
 
     #[test]

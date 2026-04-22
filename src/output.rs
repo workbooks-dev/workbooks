@@ -188,6 +188,7 @@ fn build_json_output(workbook: &Workbook, summary: &RunSummary) -> JsonOutput {
                     "Section::Include must be resolved by parser::resolve_includes before output"
                 )
             }
+            Section::IncludeEnter(_) | Section::IncludeExit(_) => {}
         }
     }
 
@@ -340,6 +341,7 @@ fn format_markdown(workbook: &Workbook, summary: &RunSummary) -> String {
                     "Section::Include must be resolved by parser::resolve_includes before output"
                 )
             }
+            Section::IncludeEnter(_) | Section::IncludeExit(_) => {}
         }
     }
 

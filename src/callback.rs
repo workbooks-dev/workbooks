@@ -7,6 +7,24 @@ use serde_json::json;
 use sha2::Sha256;
 
 use crate::executor::BlockResult;
+use crate::parser::IncludeFrame;
+
+/// Serialize an include chain (stack of active IncludeFrames, outermost first)
+/// into the JSON array shape emitted in callback payloads. Empty chain becomes
+/// an empty array, not null — consumers can iterate without a null check.
+fn chain_to_json(chain: &[IncludeFrame]) -> serde_json::Value {
+    serde_json::Value::Array(
+        chain
+            .iter()
+            .map(|f| {
+                json!({
+                    "step_id": &f.id,
+                    "step_title": &f.title,
+                })
+            })
+            .collect(),
+    )
+}
 
 /// Hard cap on stdout/stderr bytes forwarded in callback payloads.
 /// Tail-biased truncation: we keep the end since failures usually surface there.
@@ -63,6 +81,7 @@ fn build_step_complete_payload(
     heading: Option<&str>,
     line_number: usize,
     run_id: &str,
+    include_chain: &[IncludeFrame],
 ) -> serde_json::Value {
     json!({
         "event": "step.complete",
@@ -87,6 +106,54 @@ fn build_step_complete_payload(
             "completed": completed,
             "total": total,
         },
+        "include_chain": chain_to_json(include_chain),
+        "timestamp": Utc::now().to_rfc3339(),
+    })
+}
+
+fn build_step_started_payload(
+    workbook: &str,
+    checkpoint_id: Option<&str>,
+    frame: &IncludeFrame,
+    parent_step_id: Option<&str>,
+    run_id: &str,
+) -> serde_json::Value {
+    json!({
+        "event": "step.started",
+        "event_version": EVENT_VERSION,
+        "run_id": run_id,
+        "checkpoint_id": checkpoint_id,
+        "workbook": workbook,
+        "step_kind": "include",
+        "step_id": &frame.id,
+        "step_title": &frame.title,
+        "parent_step_id": parent_step_id,
+        "timestamp": Utc::now().to_rfc3339(),
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_step_finished_payload(
+    workbook: &str,
+    checkpoint_id: Option<&str>,
+    frame: &IncludeFrame,
+    parent_step_id: Option<&str>,
+    duration_ms: u64,
+    outcome: &str,
+    run_id: &str,
+) -> serde_json::Value {
+    json!({
+        "event": "step.finished",
+        "event_version": EVENT_VERSION,
+        "run_id": run_id,
+        "checkpoint_id": checkpoint_id,
+        "workbook": workbook,
+        "step_kind": "include",
+        "step_id": &frame.id,
+        "step_title": &frame.title,
+        "parent_step_id": parent_step_id,
+        "duration_ms": duration_ms,
+        "outcome": outcome,
         "timestamp": Utc::now().to_rfc3339(),
     })
 }
@@ -107,6 +174,7 @@ impl CallbackConfig {
     }
 
     /// Fired after each block finishes executing (pass or fail)
+    #[allow(clippy::too_many_arguments)]
     pub fn step_complete(
         &self,
         result: &BlockResult,
@@ -116,6 +184,7 @@ impl CallbackConfig {
         checkpoint_id: Option<&str>,
         heading: Option<&str>,
         line_number: usize,
+        include_chain: &[IncludeFrame],
     ) {
         let payload = build_step_complete_payload(
             result,
@@ -126,11 +195,13 @@ impl CallbackConfig {
             heading,
             line_number,
             &self.run_id,
+            include_chain,
         );
         self.send("step.complete", &payload.to_string());
     }
 
     /// Fired when --bail triggers on a failure with checkpointing active
+    #[allow(clippy::too_many_arguments)]
     pub fn checkpoint_failed(
         &self,
         result: &BlockResult,
@@ -140,6 +211,7 @@ impl CallbackConfig {
         checkpoint_id: &str,
         heading: Option<&str>,
         line_number: usize,
+        include_chain: &[IncludeFrame],
     ) {
         let payload = json!({
             "event": "checkpoint.failed",
@@ -162,12 +234,14 @@ impl CallbackConfig {
                 "completed": completed,
                 "total": total,
             },
+            "include_chain": chain_to_json(include_chain),
             "timestamp": Utc::now().to_rfc3339(),
         });
         self.send("checkpoint.failed", &payload.to_string());
     }
 
     /// Fired when a `wait` block pauses the workbook for an external signal
+    #[allow(clippy::too_many_arguments)]
     pub fn workbook_paused(
         &self,
         workbook: &str,
@@ -175,6 +249,7 @@ impl CallbackConfig {
         kind: Option<&str>,
         bind: Option<&[String]>,
         timeout_at: Option<&str>,
+        include_chain: &[IncludeFrame],
     ) {
         let payload = json!({
             "event": "workbook.paused",
@@ -187,9 +262,53 @@ impl CallbackConfig {
                 "bind": bind,
                 "timeout_at": timeout_at,
             },
+            "include_chain": chain_to_json(include_chain),
             "timestamp": Utc::now().to_rfc3339(),
         });
         self.send("workbook.paused", &payload.to_string());
+    }
+
+    /// Fired when an included workbook's sections begin executing. `step_id`
+    /// is the include path relative to the CWD; `step_title` comes from the
+    /// included workbook's frontmatter.title (fallback: filename stem).
+    /// `parent_step_id` is the id of the enclosing include when this one is
+    /// nested — null for top-level includes. Pairs with `step.finished`.
+    pub fn step_started(
+        &self,
+        workbook: &str,
+        checkpoint_id: Option<&str>,
+        frame: &IncludeFrame,
+        parent_step_id: Option<&str>,
+    ) {
+        let payload =
+            build_step_started_payload(workbook, checkpoint_id, frame, parent_step_id, &self.run_id);
+        self.send("step.started", &payload.to_string());
+    }
+
+    /// Fired when an included workbook's sections finish executing. `outcome`
+    /// is one of "ok" | "paused" | "failed". A pause inside the include
+    /// fires `outcome: "paused"` on the deepest active frame; on resume,
+    /// `step.started` re-fires for the active chain.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_finished(
+        &self,
+        workbook: &str,
+        checkpoint_id: Option<&str>,
+        frame: &IncludeFrame,
+        parent_step_id: Option<&str>,
+        duration_ms: u64,
+        outcome: &str,
+    ) {
+        let payload = build_step_finished_payload(
+            workbook,
+            checkpoint_id,
+            frame,
+            parent_step_id,
+            duration_ms,
+            outcome,
+            &self.run_id,
+        );
+        self.send("step.finished", &payload.to_string());
     }
 
     /// Fired for intra-step lifecycle events emitted mid-slice by the sidecar:
@@ -210,6 +329,7 @@ impl CallbackConfig {
         completed: usize,
         total: usize,
         extra: serde_json::Value,
+        include_chain: &[IncludeFrame],
     ) {
         let mut payload = json!({
             "event": event,
@@ -227,6 +347,7 @@ impl CallbackConfig {
                 "completed": completed,
                 "total": total,
             },
+            "include_chain": chain_to_json(include_chain),
             "timestamp": Utc::now().to_rfc3339(),
         });
         // Merge sidecar-supplied top-level fields (slice, reason, resume_url, ...).
@@ -573,6 +694,7 @@ mod tests {
             Some("Identity"),
             42,
             "run-abc",
+            &[],
         );
         assert_eq!(payload["event"], "step.complete");
         assert_eq!(payload["event_version"], "1");
@@ -589,6 +711,125 @@ mod tests {
         assert_eq!(payload["block"]["stderr"], "");
         assert_eq!(payload["progress"]["completed"], 1);
         assert_eq!(payload["progress"]["total"], 6);
+        assert!(payload["include_chain"].is_array());
+        assert_eq!(payload["include_chain"].as_array().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn test_build_step_started_payload_shape() {
+        let frame = IncludeFrame {
+            id: "services/airbase/login.md".into(),
+            title: Some("Airbase login".into()),
+        };
+        let p = build_step_started_payload(
+            "task.md",
+            Some("ckpt-1"),
+            &frame,
+            Some("tasks/close/README.md"),
+            "run-xyz",
+        );
+        assert_eq!(p["event"], "step.started");
+        assert_eq!(p["event_version"], "1");
+        assert_eq!(p["run_id"], "run-xyz");
+        assert_eq!(p["checkpoint_id"], "ckpt-1");
+        assert_eq!(p["workbook"], "task.md");
+        assert_eq!(p["step_kind"], "include");
+        assert_eq!(p["step_id"], "services/airbase/login.md");
+        assert_eq!(p["step_title"], "Airbase login");
+        assert_eq!(p["parent_step_id"], "tasks/close/README.md");
+    }
+
+    #[test]
+    fn test_build_step_started_payload_top_level_parent_is_null() {
+        let frame = IncludeFrame {
+            id: "login.md".into(),
+            title: None,
+        };
+        let p = build_step_started_payload("t.md", None, &frame, None, "r");
+        assert!(p["parent_step_id"].is_null());
+        assert!(p["step_title"].is_null());
+        assert!(p["checkpoint_id"].is_null());
+    }
+
+    #[test]
+    fn test_build_step_finished_payload_shape() {
+        let frame = IncludeFrame {
+            id: "services/airbase/login.md".into(),
+            title: Some("Airbase login".into()),
+        };
+        let p = build_step_finished_payload(
+            "task.md", None, &frame, None, 12340, "paused", "run-xyz",
+        );
+        assert_eq!(p["event"], "step.finished");
+        assert_eq!(p["step_kind"], "include");
+        assert_eq!(p["step_id"], "services/airbase/login.md");
+        assert_eq!(p["duration_ms"], 12340);
+        assert_eq!(p["outcome"], "paused");
+    }
+
+    #[test]
+    fn test_build_step_finished_payload_accepts_all_outcomes() {
+        let frame = IncludeFrame {
+            id: "x.md".into(),
+            title: None,
+        };
+        for outcome in &["ok", "paused", "failed"] {
+            let p = build_step_finished_payload("t", None, &frame, None, 0, outcome, "r");
+            assert_eq!(p["outcome"], *outcome);
+        }
+    }
+
+    #[test]
+    fn test_workbook_paused_payload_carries_include_chain() {
+        // We rebuild the payload inline (same pattern as the lifecycle test
+        // above) since send() has network side effects we can't assert on.
+        let chain = vec![IncludeFrame {
+            id: "tasks/close/README.md".into(),
+            title: Some("Close".into()),
+        }];
+        let payload = json!({
+            "event": "workbook.paused",
+            "event_version": EVENT_VERSION,
+            "include_chain": chain_to_json(&chain),
+        });
+        let arr = payload["include_chain"].as_array().unwrap();
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["step_id"], "tasks/close/README.md");
+        assert_eq!(arr[0]["step_title"], "Close");
+    }
+
+    #[test]
+    fn test_build_step_complete_payload_includes_chain() {
+        let result = BlockResult {
+            block_index: 0,
+            language: "bash".to_string(),
+            stdout: "".to_string(),
+            stderr: "".to_string(),
+            exit_code: 0,
+            duration: std::time::Duration::from_millis(1),
+            error_type: None,
+            stdout_partial: false,
+            stderr_partial: false,
+        };
+        let chain = vec![
+            IncludeFrame {
+                id: "tasks/month-end-close/README.md".into(),
+                title: Some("Month-end close".into()),
+            },
+            IncludeFrame {
+                id: "services/airbase/login.md".into(),
+                title: Some("Airbase login".into()),
+            },
+        ];
+        let payload = build_step_complete_payload(
+            &result, 1, 1, "t.md", None, None, 0, "run-1", &chain,
+        );
+        let arr = payload["include_chain"].as_array().unwrap();
+        assert_eq!(arr.len(), 2);
+        assert_eq!(arr[0]["step_id"], "tasks/month-end-close/README.md");
+        assert_eq!(arr[0]["step_title"], "Month-end close");
+        assert_eq!(arr[1]["step_id"], "services/airbase/login.md");
+        assert_eq!(arr[1]["step_title"], "Airbase login");
     }
 
     #[test]
@@ -641,7 +882,7 @@ mod tests {
             stdout_partial: false,
             stderr_partial: false,
         };
-        let payload = build_step_complete_payload(&result, 4, 10, "wb", None, None, 0, "");
+        let payload = build_step_complete_payload(&result, 4, 10, "wb", None, None, 0, "", &[]);
         let stdout = payload["block"]["stdout"].as_str().unwrap();
         assert!(stdout.contains("…[truncated 50 bytes]"));
         assert!(stdout.len() < huge.len());

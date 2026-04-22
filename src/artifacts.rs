@@ -92,6 +92,14 @@ impl Artifacts {
         }
     }
 
+    /// Read-only access to the resolved artifacts directory. Callers that
+    /// need to write a file directly (e.g. the resume path writing
+    /// `pause_result.json` before any cell runs) use this instead of
+    /// reaching into the env var, which might not be propagated yet.
+    pub fn dir(&self) -> &Path {
+        &self.dir
+    }
+
     /// Scan the artifacts dir for files that are new (or have a newer mtime
     /// than last time we saw them) and upload each one. Called after every
     /// cell completes. Safe to call when uploads are disabled — it still

@@ -18,6 +18,8 @@ import extractVerb from "./extract.js";
 import assertVerb from "./assert.js";
 import evalVerb from "./eval.js";
 import saveVerb from "./save.js";
+import pauseForHumanVerb from "./pause_for_human.js";
+import waitForDropVerb from "./wait_for_drop.js";
 
 const VERBS = [
   gotoVerb,
@@ -30,6 +32,8 @@ const VERBS = [
   assertVerb,
   evalVerb,
   saveVerb,
+  pauseForHumanVerb,
+  waitForDropVerb,
 ];
 
 export const VERB_REGISTRY = Object.fromEntries(VERBS.map((v) => [v.name, v]));
@@ -66,5 +70,10 @@ export async function runVerb(page, verb, index, ctx, expand) {
     ctx?.secrets,
     ctx?.artifactCache,
   );
-  return handler.execute(page, args, { ...ctx, index });
+  // Mutate-in-place so writes a verb makes to ctx (e.g. eval setting
+  // ctx.lastResult for a later save to pick up) survive to the next verb.
+  // The spread-copy pattern that used to live here silently dropped those
+  // writes, which broke the documented eval → save pattern.
+  ctx.index = index;
+  return handler.execute(page, args, ctx);
 }

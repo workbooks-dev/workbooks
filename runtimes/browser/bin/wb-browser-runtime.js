@@ -264,10 +264,17 @@ async function handleSlice(msg) {
       return;
     }
 
-    // Restore-from-pause is not implemented yet (no pause verb wired here).
-    // The sidecar protocol leaves room for it; when wait_for_mfa lands, this
-    // is where we'd jump to verbs[restore.state.verb_index].
-    const startAt = restore?.state?.verb_index ?? 0;
+    // Restore-from-pause: when the Rust side resumes us after a
+    // `slice.paused` frame, `restore.state.verb_index` is the index of the
+    // verb that paused. We skip *past* it — the verb has no post-resume
+    // work (any payload from the operator is already in
+    // $WB_ARTIFACTS_DIR/pause_result.json, written by `wb resume` before
+    // it re-boots the sidecar). Skipping keeps pause verbs pure: their
+    // only job is "halt now," not "halt, then continue."
+    const startAt =
+      restore?.state?.verb_index !== undefined
+        ? Number(restore.state.verb_index) + 1
+        : 0;
 
     for (let i = startAt; i < verbs.length; i++) {
       if (Date.now() >= sliceDeadline) {
@@ -282,6 +289,32 @@ async function handleSlice(msg) {
       const verbStart = Date.now();
       try {
         const summary = await runVerb(session.page, v, i, sliceCtx, expand);
+        // Pause-sentinel escape hatch: a verb signals a mid-slice halt by
+        // returning `{ __pause: {...} }`. We translate that into a
+        // `slice.paused` frame (so the Rust side writes a pending
+        // descriptor and exits 42) and bail out of the verb loop without
+        // firing `slice.complete`. Non-pause verbs hand back a plain
+        // summary and the loop proceeds normally.
+        if (summary && typeof summary === "object" && summary.__pause) {
+          const pauseMeta = summary.__pause;
+          send({
+            type: "slice.paused",
+            reason: pauseMeta.reason || "slice.paused",
+            message: pauseMeta.message || "",
+            context_url: pauseMeta.context_url ?? null,
+            resume_on: pauseMeta.resume_on || "operator_click",
+            timeout: pauseMeta.timeout ?? null,
+            actions: pauseMeta.actions || [{ label: "Resume", value: null }],
+            verb: name,
+            verb_index: i,
+            // `sidecar_state` is forwarded verbatim into the Rust pending
+            // descriptor and handed back on resume. The verb can stash
+            // whatever it needs here; we always ensure verb_index is set
+            // so the dispatcher can compute startAt on re-entry.
+            sidecar_state: { ...(pauseMeta.sidecar_state || {}), verb_index: i },
+          });
+          return;
+        }
         send({
           type: "verb.complete",
           verb: name,

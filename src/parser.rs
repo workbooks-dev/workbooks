@@ -268,6 +268,19 @@ pub struct IncludeSpec {
     pub section_index: usize,
 }
 
+/// Identity of an included workbook, carried on `Section::IncludeEnter` /
+/// `Section::IncludeExit` sentinels so the executor can emit
+/// `step.started` / `step.finished` events keyed to the operator's mental
+/// model of the run ("Logging in → Exporting → Syncing"), not the flattened
+/// block list. `id` is the path relative to the CWD where `wb` was invoked
+/// when possible, falling back to the canonical absolute path. `title` comes
+/// from the included workbook's frontmatter.title (fallback: file stem).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IncludeFrame {
+    pub id: String,
+    pub title: Option<String>,
+}
+
 #[derive(Debug)]
 pub enum Section {
     Text(String),
@@ -275,6 +288,13 @@ pub enum Section {
     Wait(WaitSpec),
     Browser(BrowserSliceSpec),
     Include(IncludeSpec),
+    /// Inserted by `resolve_includes` to mark the start of an included
+    /// workbook's spliced sections. Non-executable — skipped by block
+    /// counting, but the executor uses it to fire `step.started`.
+    IncludeEnter(IncludeFrame),
+    /// Inserted by `resolve_includes` to mark the end of an included
+    /// workbook's spliced sections. Fires `step.finished`.
+    IncludeExit(IncludeFrame),
 }
 
 #[derive(Debug)]
@@ -332,16 +352,33 @@ pub fn resolve_includes(wb: Workbook, parent_path: &Path) -> Result<Workbook, St
         .parent()
         .map(|p| p.to_path_buf())
         .unwrap_or_else(|| PathBuf::from("."));
-    let resolved = resolve_sections(wb.sections, &base_dir, &mut visiting)?;
+    // Root for step_id computation: CWD where `wb` was invoked falls back
+    // to the top-level workbook's directory if CWD isn't an ancestor. This
+    // keeps ids readable (`services/airbase/login.md`) rather than canonical
+    // absolute paths.
+    let id_root = std::env::current_dir().unwrap_or_else(|_| base_dir.clone());
+    let resolved = resolve_sections(wb.sections, &base_dir, &id_root, &mut visiting)?;
     Ok(Workbook {
         frontmatter: wb.frontmatter,
         sections: resolved,
     })
 }
 
+/// Compute a readable step_id for an included workbook: path relative to
+/// `id_root` if possible, otherwise the full canonical path. Used as the
+/// stable identifier in `step.started` / `step.finished` events.
+fn compute_step_id(canonical: &Path, id_root: &Path) -> String {
+    canonical
+        .strip_prefix(id_root)
+        .ok()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|| canonical.to_string_lossy().into_owned())
+}
+
 fn resolve_sections(
     sections: Vec<Section>,
     base_dir: &Path,
+    id_root: &Path,
     visiting: &mut HashSet<PathBuf>,
 ) -> Result<Vec<Section>, String> {
     let mut out = Vec::new();
@@ -378,10 +415,21 @@ fn resolve_sections(
                     .parent()
                     .map(|p| p.to_path_buf())
                     .unwrap_or_else(|| PathBuf::from("."));
+                let frame = IncludeFrame {
+                    id: compute_step_id(&target_canonical, id_root),
+                    title: inner.frontmatter.title.clone().or_else(|| {
+                        target_canonical
+                            .file_stem()
+                            .map(|s| s.to_string_lossy().into_owned())
+                    }),
+                };
                 visiting.insert(target_canonical.clone());
-                let inner_resolved = resolve_sections(inner.sections, &inner_base, visiting)?;
+                let inner_resolved =
+                    resolve_sections(inner.sections, &inner_base, id_root, visiting)?;
                 visiting.remove(&target_canonical);
+                out.push(Section::IncludeEnter(frame.clone()));
                 out.extend(inner_resolved);
+                out.push(Section::IncludeExit(frame));
             }
             other => out.push(other),
         }
@@ -1867,6 +1915,137 @@ path: ./shared.md
         let wb = parse(&std::fs::read_to_string(&a).unwrap());
         let resolved = resolve_includes(wb, &a).expect("nested-dir resolve");
         assert_eq!(resolved.code_block_count(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_resolve_includes_emits_enter_exit_sentinels() {
+        let dir = fresh_tempdir("sentinels");
+        write_temp(
+            &dir,
+            "login.md",
+            "---\ntitle: Airbase login\n---\n\n```bash\necho logged-in\n```\n",
+        );
+        let parent = write_temp(
+            &dir,
+            "task.md",
+            "```bash\necho before\n```\n\n```include\npath: ./login.md\n```\n\n```bash\necho after\n```\n",
+        );
+        let wb = parse(&std::fs::read_to_string(&parent).unwrap());
+        let resolved = resolve_includes(wb, &parent).expect("resolve");
+
+        // Pull out the executable + sentinel stream (drop Text sections).
+        let kinds: Vec<&'static str> = resolved
+            .sections
+            .iter()
+            .filter_map(|s| match s {
+                Section::Code(_) => Some("code"),
+                Section::IncludeEnter(_) => Some("enter"),
+                Section::IncludeExit(_) => Some("exit"),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(kinds, vec!["code", "enter", "code", "exit", "code"]);
+
+        // Exit frame must match Enter frame (same id + title).
+        let (enter_id, enter_title) = resolved
+            .sections
+            .iter()
+            .find_map(|s| match s {
+                Section::IncludeEnter(f) => Some((f.id.clone(), f.title.clone())),
+                _ => None,
+            })
+            .unwrap();
+        assert!(enter_id.ends_with("login.md"), "id: {}", enter_id);
+        assert_eq!(enter_title.as_deref(), Some("Airbase login"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_resolve_includes_nested_sentinel_nesting() {
+        // A includes B includes C → sentinels must nest: enterB, enterC, code, exitC, exitB
+        let dir = fresh_tempdir("nested_sent");
+        write_temp(
+            &dir,
+            "c.md",
+            "---\ntitle: C\n---\n\n```bash\necho C\n```\n",
+        );
+        write_temp(
+            &dir,
+            "b.md",
+            "---\ntitle: B\n---\n\n```include\npath: ./c.md\n```\n",
+        );
+        let a = write_temp(
+            &dir,
+            "a.md",
+            "---\ntitle: A\n---\n\n```include\npath: ./b.md\n```\n",
+        );
+        let wb = parse(&std::fs::read_to_string(&a).unwrap());
+        let resolved = resolve_includes(wb, &a).expect("resolve");
+
+        let trace: Vec<String> = resolved
+            .sections
+            .iter()
+            .filter_map(|s| match s {
+                Section::IncludeEnter(f) => {
+                    Some(format!("enter:{}", f.title.as_deref().unwrap_or("?")))
+                }
+                Section::IncludeExit(f) => {
+                    Some(format!("exit:{}", f.title.as_deref().unwrap_or("?")))
+                }
+                Section::Code(b) => Some(format!("code:{}", b.language)),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            trace,
+            vec!["enter:B", "enter:C", "code:bash", "exit:C", "exit:B"]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_resolve_includes_title_fallback_to_stem() {
+        let dir = fresh_tempdir("title_fallback");
+        write_temp(&dir, "login.md", "```bash\necho hi\n```\n");
+        let parent = write_temp(&dir, "t.md", "```include\npath: ./login.md\n```\n");
+        let wb = parse(&std::fs::read_to_string(&parent).unwrap());
+        let resolved = resolve_includes(wb, &parent).expect("resolve");
+        let title = resolved
+            .sections
+            .iter()
+            .find_map(|s| match s {
+                Section::IncludeEnter(f) => Some(f.title.clone()),
+                _ => None,
+            })
+            .flatten();
+        assert_eq!(title.as_deref(), Some("login"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_resolve_includes_same_target_twice_has_matched_sentinels() {
+        let dir = fresh_tempdir("dup_sent");
+        write_temp(&dir, "s.md", "```bash\necho s\n```\n");
+        let parent = write_temp(
+            &dir,
+            "main.md",
+            "```include\npath: ./s.md\n```\n\n```include\npath: ./s.md\n```\n",
+        );
+        let wb = parse(&std::fs::read_to_string(&parent).unwrap());
+        let resolved = resolve_includes(wb, &parent).expect("resolve");
+        let enters = resolved
+            .sections
+            .iter()
+            .filter(|s| matches!(s, Section::IncludeEnter(_)))
+            .count();
+        let exits = resolved
+            .sections
+            .iter()
+            .filter(|s| matches!(s, Section::IncludeExit(_)))
+            .count();
+        assert_eq!(enters, 2);
+        assert_eq!(exits, 2);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -797,6 +797,9 @@ fn run_single_collect(
                     line_number: spec.line_number,
                     completed: block_idx + 1,
                     total: block_count,
+                    // Folder mode doesn't emit callbacks, so the chain is
+                    // never serialized. An empty slice keeps the type happy.
+                    include_chain: &[],
                 };
                 let (result, pause) = session.execute_browser_slice(spec, block_idx, &ctx, None);
                 artifacts.sync();
@@ -845,6 +848,7 @@ fn run_single_collect(
                     "Section::Include must be resolved by parser::resolve_includes before execution"
                 )
             }
+            parser::Section::IncludeEnter(_) | parser::Section::IncludeExit(_) => {}
         }
     }
 
@@ -1322,6 +1326,17 @@ fn run_single(cfg: RunConfig) {
 
     let mut last_heading: Option<String> = None;
 
+    // Include-boundary tracking for step.started / step.finished events.
+    // The stack is the source of truth for `include_chain` enrichment on every
+    // block/pause callback. `frame_starts` parallels the stack so we can
+    // compute duration_ms on Exit. On resume, the stack is rebuilt by
+    // replaying IncludeEnter/Exit sentinels; `emitted_resume_chain` ensures
+    // we fire step.started once for the restored stack before the first live
+    // action, giving the run page a fresh timeline after a pause.
+    let mut include_stack: Vec<parser::IncludeFrame> = Vec::new();
+    let mut frame_starts: Vec<Instant> = Vec::new();
+    let mut emitted_resume_chain = replay_until == 0;
+
     // Check for stale code hashes before replay
     if replay_until > 0 {
         if let Some(ref c) = ckpt {
@@ -1368,18 +1383,83 @@ fn run_single(cfg: RunConfig) {
     let mut browser_restore: Option<sidecar::RestoreArgs> = None;
     if let Some(ref id) = checkpoint_id {
         if let Ok(Some(desc)) = pending::load(id) {
+            let resume_signal = std::env::var("WB_BROWSER_RESUME_SIGNAL")
+                .ok()
+                .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok());
+            // pause_for_human with `actions:` → persist the operator's choice
+            // to $WB_ARTIFACTS_DIR/pause_result.json so downstream cells can
+            // branch on it via a plain file read. Skipped when actions is
+            // empty (single default "Resume" button — nothing to record) or
+            // no signal came in.
+            if !desc.actions.is_empty() {
+                write_pause_result(artifacts.dir(), resume_signal.as_ref());
+            }
             if desc.sidecar_state.is_some() {
                 browser_restore = Some(sidecar::RestoreArgs {
                     state: desc.sidecar_state.clone(),
-                    signal: std::env::var("WB_BROWSER_RESUME_SIGNAL")
-                        .ok()
-                        .and_then(|s| serde_json::from_str(&s).ok()),
+                    signal: resume_signal.clone(),
                 });
             }
         }
     }
 
     for (section_idx, section) in workbook.sections.iter().enumerate() {
+        // Once we've advanced past the replay prefix on a resumed run, re-emit
+        // step.started for frames rebuilt during replay so the run page sees
+        // a fresh timeline. Fires at most once per run; no-op on cold starts
+        // (replay_until == 0 → emitted_resume_chain starts true).
+        if !emitted_resume_chain && block_idx >= replay_until {
+            if let Some(ref cb) = cb {
+                for (i, frame) in include_stack.iter().enumerate() {
+                    let parent = if i > 0 {
+                        Some(include_stack[i - 1].id.as_str())
+                    } else {
+                        None
+                    };
+                    cb.step_started(file, checkpoint_id.as_deref(), frame, parent);
+                }
+            }
+            emitted_resume_chain = true;
+        }
+
+        if let parser::Section::IncludeEnter(frame) = section {
+            let parent_id = include_stack.last().map(|f| f.id.clone());
+            include_stack.push(frame.clone());
+            frame_starts.push(Instant::now());
+            // Suppress callback during replay: the prior run already fired
+            // step.started. We push to rebuild the stack silently.
+            if block_idx >= replay_until {
+                if let Some(ref cb) = cb {
+                    cb.step_started(
+                        file,
+                        checkpoint_id.as_deref(),
+                        frame,
+                        parent_id.as_deref(),
+                    );
+                }
+            }
+            continue;
+        }
+
+        if let parser::Section::IncludeExit(_) = section {
+            let popped = include_stack.pop();
+            let start = frame_starts.pop();
+            let parent_id = include_stack.last().map(|f| f.id.clone());
+            if block_idx >= replay_until {
+                if let (Some(ref cb), Some(frame), Some(started)) = (&cb, popped, start) {
+                    cb.step_finished(
+                        file,
+                        checkpoint_id.as_deref(),
+                        &frame,
+                        parent_id.as_deref(),
+                        started.elapsed().as_millis() as u64,
+                        "ok",
+                    );
+                }
+            }
+            continue;
+        }
+
         if let parser::Section::Text(text) = section {
             for line in text.lines() {
                 let trimmed = line.trim();
@@ -1433,6 +1513,8 @@ fn run_single(cfg: RunConfig) {
                 start.elapsed(),
                 &results,
                 cb.as_ref(),
+                &include_stack,
+                &frame_starts,
             );
             // Unreachable — pause_for_signal exits.
         }
@@ -1570,6 +1652,7 @@ fn run_single(cfg: RunConfig) {
                         checkpoint_id.as_deref(),
                         block_heading.as_deref(),
                         block.line_number,
+                        &include_stack,
                     );
                 }
             }
@@ -1588,8 +1671,21 @@ fn run_single(cfg: RunConfig) {
                         ckpt_id,
                         block_heading.as_deref(),
                         block.line_number,
+                        &include_stack,
                     );
                 }
+
+                // Bubble the failure up the active include stack: fire
+                // step.finished(outcome="failed") deepest-first so consumers
+                // see each parent include close with the same terminal state.
+                emit_finish_for_stack(
+                    cb.as_ref(),
+                    file,
+                    checkpoint_id.as_deref(),
+                    &mut include_stack,
+                    &mut frame_starts,
+                    "failed",
+                );
 
                 // Don't checkpoint the failed block — re-run it on resume
                 if let (Some(ref mut c), Some(ref ckpt_id)) = (&mut ckpt, &checkpoint_id) {
@@ -1705,6 +1801,7 @@ fn run_single(cfg: RunConfig) {
                 line_number: spec.line_number,
                 completed: block_idx + 1,
                 total: block_count,
+                include_chain: &include_stack,
             };
             // Take a one-shot restore, if the resume path handed us one earlier.
             let restore = browser_restore.take();
@@ -1728,6 +1825,8 @@ fn run_single(cfg: RunConfig) {
                     cb.as_ref(),
                     block_heading.as_deref(),
                     pause,
+                    &include_stack,
+                    &frame_starts,
                 );
                 // Unreachable — pause_browser_slice exits.
             }
@@ -1757,6 +1856,7 @@ fn run_single(cfg: RunConfig) {
                         checkpoint_id.as_deref(),
                         block_heading.as_deref(),
                         spec.line_number,
+                        &include_stack,
                     );
                 }
             }
@@ -1771,8 +1871,18 @@ fn run_single(cfg: RunConfig) {
                         ckpt_id,
                         block_heading.as_deref(),
                         spec.line_number,
+                        &include_stack,
                     );
                 }
+
+                emit_finish_for_stack(
+                    cb.as_ref(),
+                    file,
+                    checkpoint_id.as_deref(),
+                    &mut include_stack,
+                    &mut frame_starts,
+                    "failed",
+                );
 
                 if let (Some(ref mut c), Some(ref ckpt_id)) = (&mut ckpt, &checkpoint_id) {
                     c.mark_failed();
@@ -2103,6 +2213,19 @@ fn inspect_workbook_json(file: &str) {
                     "Section::Include must be resolved by parser::resolve_includes before inspect"
                 )
             }
+            parser::Section::IncludeEnter(frame) => {
+                blocks.push(serde_json::json!({
+                    "kind": "include_enter",
+                    "step_id": frame.id,
+                    "step_title": frame.title,
+                }));
+            }
+            parser::Section::IncludeExit(frame) => {
+                blocks.push(serde_json::json!({
+                    "kind": "include_exit",
+                    "step_id": frame.id,
+                }));
+            }
         }
     }
 
@@ -2162,6 +2285,101 @@ fn default_program(lang: &str) -> &str {
 
 use exit_codes::EXIT_PAUSED;
 
+/// Write the operator's action choice to `<artifacts_dir>/pause_result.json`
+/// so downstream cells can branch on it with a plain file read. Shape is
+/// always `{"value": <choice>}` regardless of how the choice came in via
+/// `wb resume`:
+///   - `--value X`       → writes `{"value": "X"}`
+///   - `--signal {value: X}` → writes `{"value": X}` (value can be any JSON)
+///   - any other shape   → writes `{"value": <whole signal>}`
+///
+/// Best-effort: failures log a warning but do not abort the resume — the
+/// downstream cell can still check `test -s $WB_ARTIFACTS_DIR/pause_result.json`
+/// and fall through to a default.
+fn write_pause_result(dir: &std::path::Path, signal: Option<&serde_json::Value>) {
+    let path = dir.join("pause_result.json");
+    let value = match signal {
+        Some(serde_json::Value::Object(obj)) => {
+            // Prefer an explicit `value` key so the shape matches single-bind
+            // resumes where the operator just sent `--value X`.
+            obj.get("value")
+                .cloned()
+                .unwrap_or_else(|| serde_json::Value::Object(obj.clone()))
+        }
+        Some(v) => v.clone(),
+        None => serde_json::Value::Null,
+    };
+    let payload = serde_json::json!({ "value": value });
+    let serialized = match serde_json::to_string_pretty(&payload) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("warning: pause_result.json serialize: {}", e);
+            return;
+        }
+    };
+    if let Err(e) = std::fs::write(&path, serialized) {
+        eprintln!(
+            "warning: pause_result.json write ({}): {}",
+            path.display(),
+            e
+        );
+    }
+}
+
+/// Fire `step.finished` for every active include frame, deepest-first. Drains
+/// the stack. Used on bail-failure so the run-page timeline shows each parent
+/// include closing with the same terminal outcome as the failing block.
+fn emit_finish_for_stack(
+    cb: Option<&callback::CallbackConfig>,
+    file: &str,
+    checkpoint_id: Option<&str>,
+    include_stack: &mut Vec<parser::IncludeFrame>,
+    frame_starts: &mut Vec<Instant>,
+    outcome: &str,
+) {
+    while let (Some(frame), Some(start)) = (include_stack.pop(), frame_starts.pop()) {
+        let parent_id = include_stack.last().map(|f| f.id.clone());
+        if let Some(cb) = cb {
+            cb.step_finished(
+                file,
+                checkpoint_id,
+                &frame,
+                parent_id.as_deref(),
+                start.elapsed().as_millis() as u64,
+                outcome,
+            );
+        }
+    }
+}
+
+/// Fire `step.finished(outcome="paused")` for every active frame without
+/// consuming the stack. The run-page timeline flips the chain into a paused
+/// state; on resume, `step.started` re-fires for the same chain so the
+/// timeline unfreezes. Used by pause paths that diverge via `process::exit`
+/// (where mutating the stack buys nothing — the process is gone).
+fn emit_paused_finish_snapshot(
+    cb: Option<&callback::CallbackConfig>,
+    file: &str,
+    checkpoint_id: Option<&str>,
+    include_chain: &[parser::IncludeFrame],
+    frame_starts: &[Instant],
+) {
+    let Some(cb) = cb else { return };
+    for i in (0..include_chain.len()).rev() {
+        let frame = &include_chain[i];
+        let parent_id = if i > 0 {
+            Some(include_chain[i - 1].id.as_str())
+        } else {
+            None
+        };
+        let duration = frame_starts
+            .get(i)
+            .map(|s| s.elapsed().as_millis() as u64)
+            .unwrap_or(0);
+        cb.step_finished(file, checkpoint_id, frame, parent_id, duration, "paused");
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn pause_for_signal(
     spec: &parser::WaitSpec,
@@ -2174,6 +2392,8 @@ fn pause_for_signal(
     _elapsed: std::time::Duration,
     _results: &[executor::BlockResult],
     cb: Option<&callback::CallbackConfig>,
+    include_chain: &[parser::IncludeFrame],
+    frame_starts: &[Instant],
 ) -> ! {
     let id = match checkpoint_id.as_deref() {
         Some(id) => id,
@@ -2241,7 +2461,12 @@ fn pause_for_signal(
             spec.kind.as_deref(),
             bind_names.as_deref(),
             desc.timeout_at.as_deref(),
+            include_chain,
         );
+        // Close active include frames with outcome=paused so the run-page
+        // timeline flips them into a pause state. On resume, step.started
+        // re-fires for the same chain (via emitted_resume_chain).
+        emit_paused_finish_snapshot(Some(cb), file, Some(id), include_chain, frame_starts);
     }
 
     std::process::exit(EXIT_PAUSED);
@@ -2261,6 +2486,8 @@ fn pause_browser_slice(
     cb: Option<&callback::CallbackConfig>,
     heading: Option<&str>,
     pause: sidecar::PauseInfo,
+    include_chain: &[parser::IncludeFrame],
+    frame_starts: &[Instant],
 ) -> ! {
     let id = match checkpoint_id.as_deref() {
         Some(id) => id,
@@ -2281,16 +2508,7 @@ fn pause_browser_slice(
         }
     }
 
-    let desc = pending::build_for_browser_pause(
-        id,
-        file,
-        block_idx,
-        spec,
-        pause.reason.clone(),
-        pause.resume_url.clone(),
-        pause.verb_index,
-        pause.sidecar_state.clone(),
-    );
+    let desc = pending::build_for_browser_pause(id, file, block_idx, spec, &pause);
     if let Err(e) = pending::save(id, &desc) {
         eprintln!("warning: pending descriptor: {}", e);
     }
@@ -2320,9 +2538,14 @@ fn pause_browser_slice(
             pause.reason.as_deref().or(Some("browser.slice_paused")),
             None,
             None,
+            include_chain,
         );
         // Also fire step.paused with slice context for consumers that want
         // granular detail (verb index, live-view URL, heading, etc.).
+        // The pause_for_human payload (message, context_url, resume_on,
+        // timeout, actions) is merged in here too so the run page can
+        // render the operator-facing prompt from a single event instead
+        // of joining across step.paused + the pending descriptor.
         let mut extra = serde_json::Map::new();
         if let Some(reason) = pause.reason.as_ref() {
             extra.insert(
@@ -2342,6 +2565,30 @@ fn pause_browser_slice(
                 serde_json::Value::Number(vi.into()),
             );
         }
+        if let Some(m) = pause.message.as_ref() {
+            extra.insert("message".to_string(), serde_json::Value::String(m.clone()));
+        }
+        if let Some(u) = pause.context_url.as_ref() {
+            extra.insert(
+                "context_url".to_string(),
+                serde_json::Value::String(u.clone()),
+            );
+        }
+        if let Some(r) = pause.resume_on.as_ref() {
+            extra.insert(
+                "resume_on".to_string(),
+                serde_json::Value::String(r.clone()),
+            );
+        }
+        if let Some(t) = pause.timeout.as_ref() {
+            extra.insert("timeout".to_string(), serde_json::Value::String(t.clone()));
+        }
+        if !pause.actions.is_empty() {
+            extra.insert(
+                "actions".to_string(),
+                serde_json::Value::Array(pause.actions.clone()),
+            );
+        }
         cb.step_lifecycle(
             "step.paused",
             file,
@@ -2353,7 +2600,11 @@ fn pause_browser_slice(
             block_idx,
             0,
             serde_json::Value::Object(extra),
+            include_chain,
         );
+        // Same bubble-up as pause_for_signal: close active frames with
+        // outcome=paused so the run-page timeline freezes.
+        emit_paused_finish_snapshot(Some(cb), file, Some(id), include_chain, frame_starts);
     }
 
     std::process::exit(EXIT_PAUSED);
@@ -4058,5 +4309,75 @@ echo "pin=$pin"
             "pre-timeout stdout should be preserved, got: {:?}",
             result.stdout
         );
+    }
+
+    // --- write_pause_result (F1) ----------------------------------------------
+
+    fn make_pause_tempdir() -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "wb-pause-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn test_write_pause_result_value_shortcut() {
+        // `wb resume X --value approved` arrives as `Some(String("approved"))`
+        // at this helper. We wrap it as `{"value":"approved"}` so the file
+        // shape is uniform regardless of how the operator resumed.
+        let dir = make_pause_tempdir();
+        let sig = serde_json::Value::String("approved".into());
+        write_pause_result(&dir, Some(&sig));
+        let content = std::fs::read_to_string(dir.join("pause_result.json")).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert_eq!(parsed["value"], "approved");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_write_pause_result_object_with_value_key() {
+        // `wb resume X --signal payload.json` where payload = {"value": "X"}.
+        // Unwrap the `value` key so downstream cells don't have to double-nest.
+        let dir = make_pause_tempdir();
+        let sig = serde_json::json!({"value": "denied", "note": "over budget"});
+        write_pause_result(&dir, Some(&sig));
+        let content = std::fs::read_to_string(dir.join("pause_result.json")).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert_eq!(parsed["value"], "denied");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_write_pause_result_object_without_value_key_preserves_whole_blob() {
+        // Non-standard signal shape (no `value` key) — preserve it verbatim
+        // under `.value` so authors who rely on custom signal payloads can
+        // still read the whole object out.
+        let dir = make_pause_tempdir();
+        let sig = serde_json::json!({"approved_by": "alice", "amount": 420});
+        write_pause_result(&dir, Some(&sig));
+        let content = std::fs::read_to_string(dir.join("pause_result.json")).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert_eq!(parsed["value"]["approved_by"], "alice");
+        assert_eq!(parsed["value"]["amount"], 420);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_write_pause_result_null_when_no_signal() {
+        // Operator clicked Resume without passing --value/--signal. Still
+        // write the file so the downstream cell's `test -f` check passes —
+        // a default branch handles the null case.
+        let dir = make_pause_tempdir();
+        write_pause_result(&dir, None);
+        let content = std::fs::read_to_string(dir.join("pause_result.json")).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
+        assert!(parsed["value"].is_null());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -37,6 +37,28 @@ pub struct PendingDescriptor {
     /// Verb position within the paused slice. Surfaces in `wb pending`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verb_index: Option<usize>,
+    /// Operator-facing prompt from `pause_for_human`. Rendered on the run
+    /// page so an operator seeing `wb pending` output or a dashboard knows
+    /// what they're being asked to do without reading the markdown source.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    /// Deep-link for the off-band action (Drive folder, approval console,
+    /// MFA challenge URL).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_url: Option<String>,
+    /// One of "operator_click" | "poll" | "timeout". Run page uses this
+    /// to pick the right auto-resume behavior.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resume_on: Option<String>,
+    /// Pre-parsed duration string (for display). `timeout_at` is the
+    /// authoritative wall-clock deadline.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout: Option<String>,
+    /// Operator button set. Empty / missing → single default "Resume"
+    /// button. A non-empty list enables branching: the chosen value lands
+    /// in `$WB_ARTIFACTS_DIR/pause_result.json` at resume time.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub actions: Vec<serde_json::Value>,
 }
 
 pub fn descriptor_path(id: &str) -> PathBuf {
@@ -128,26 +150,45 @@ pub fn build(
         sidecar_state: None,
         resume_url: None,
         verb_index: None,
+        message: None,
+        context_url: None,
+        resume_on: None,
+        timeout: None,
+        actions: Vec::new(),
     }
 }
 
 /// Build a pending descriptor for a browser-slice pause. Sidecar state is
 /// opaque — `wb` just persists it so the resumed sidecar can pick up where it
-/// left off.
+/// left off. The operator-facing fields (message, context_url, resume_on,
+/// timeout, actions) come verbatim from the sidecar's `slice.paused` frame
+/// via `PauseInfo`; wb doesn't interpret them beyond persistence +
+/// forwarding on callbacks.
 pub fn build_for_browser_pause(
     checkpoint_id: &str,
     workbook: &str,
     next_block: usize,
     slice: &crate::parser::BrowserSliceSpec,
-    reason: Option<String>,
-    resume_url: Option<String>,
-    verb_index: Option<usize>,
-    sidecar_state: Option<serde_yaml::Value>,
+    pause: &crate::sidecar::PauseInfo,
 ) -> PendingDescriptor {
     let now = Utc::now();
     let ckpt_path = checkpoint::checkpoint_path(checkpoint_id)
         .to_string_lossy()
         .to_string();
+    // If the verb supplied a `timeout:` string we parse it here so the
+    // reaper's `timeout_at` comparison is a plain ISO-8601 compare.
+    let timeout_at = pause.timeout.as_deref().and_then(|t| {
+        parser::parse_duration_secs(t).ok().map(|secs| {
+            (now + ChronoDuration::seconds(secs as i64)).to_rfc3339()
+        })
+    });
+    // `resume_on: timeout` → auto-abort on expiry (reaper picks it up).
+    // `resume_on: operator_click` / `poll` → leave on_timeout unset so the
+    // reaper doesn't touch it.
+    let on_timeout = match pause.resume_on.as_deref() {
+        Some("timeout") => Some("abort".to_string()),
+        _ => None,
+    };
     PendingDescriptor {
         checkpoint: ckpt_path,
         checkpoint_id: checkpoint_id.to_string(),
@@ -155,15 +196,23 @@ pub fn build_for_browser_pause(
         next_block,
         line_number: slice.line_number,
         section_index: slice.section_index,
-        kind: reason.or_else(|| Some("browser.slice_paused".to_string())),
+        kind: pause
+            .reason
+            .clone()
+            .or_else(|| Some("browser.slice_paused".to_string())),
         match_: None,
         bind: None,
         created_at: now.to_rfc3339(),
-        timeout_at: None,
-        on_timeout: None,
-        sidecar_state,
-        resume_url,
-        verb_index,
+        timeout_at,
+        on_timeout,
+        sidecar_state: pause.sidecar_state.clone(),
+        resume_url: pause.resume_url.clone(),
+        verb_index: pause.verb_index,
+        message: pause.message.clone(),
+        context_url: pause.context_url.clone(),
+        resume_on: pause.resume_on.clone(),
+        timeout: pause.timeout.clone(),
+        actions: pause.actions.clone(),
     }
 }
 
@@ -426,6 +475,11 @@ mod tests {
             sidecar_state: None,
             resume_url: None,
             verb_index: None,
+            message: None,
+            context_url: None,
+            resume_on: None,
+            timeout: None,
+            actions: Vec::new(),
         };
         assert!(is_expired(&desc));
     }
@@ -449,6 +503,11 @@ mod tests {
             sidecar_state: None,
             resume_url: None,
             verb_index: None,
+            message: None,
+            context_url: None,
+            resume_on: None,
+            timeout: None,
+            actions: Vec::new(),
         };
         assert!(!is_expired(&desc));
     }
@@ -471,6 +530,11 @@ mod tests {
             sidecar_state: None,
             resume_url: None,
             verb_index: None,
+            message: None,
+            context_url: None,
+            resume_on: None,
+            timeout: None,
+            actions: Vec::new(),
         };
         assert!(!is_expired(&desc));
     }
@@ -493,6 +557,11 @@ mod tests {
             sidecar_state: None,
             resume_url: None,
             verb_index: None,
+            message: None,
+            context_url: None,
+            resume_on: None,
+            timeout: None,
+            actions: Vec::new(),
         };
         let s = summarize("my-run", &desc);
         assert!(s.contains("my-run"), "should contain id");
@@ -524,6 +593,11 @@ mod tests {
             sidecar_state: None,
             resume_url: None,
             verb_index: None,
+            message: None,
+            context_url: None,
+            resume_on: None,
+            timeout: None,
+            actions: Vec::new(),
         };
         let s = summarize("run-2", &desc);
         assert!(s.contains("code,sender"), "should contain joined bind vars");
@@ -548,6 +622,11 @@ mod tests {
             sidecar_state: None,
             resume_url: None,
             verb_index: None,
+            message: None,
+            context_url: None,
+            resume_on: None,
+            timeout: None,
+            actions: Vec::new(),
         };
         let s = summarize("old-run", &desc);
         assert!(s.contains("[EXPIRED]"), "should show expired marker");
@@ -571,6 +650,11 @@ mod tests {
             sidecar_state: None,
             resume_url: None,
             verb_index: None,
+            message: None,
+            context_url: None,
+            resume_on: None,
+            timeout: None,
+            actions: Vec::new(),
         };
         let s = summarize("bare", &desc);
         // kind defaults to "-", bind defaults to "-"
@@ -625,6 +709,11 @@ mod tests {
             sidecar_state: None,
             resume_url: None,
             verb_index: None,
+            message: None,
+            context_url: None,
+            resume_on: None,
+            timeout: None,
+            actions: Vec::new(),
         }
     }
 
@@ -776,5 +865,107 @@ mod tests {
         }
         // Post-condition holds regardless of which parallel call reaped it.
         assert!(load(&id).expect("load").is_none());
+    }
+
+    fn make_browser_slice_spec() -> parser::BrowserSliceSpec {
+        parser::BrowserSliceSpec {
+            line_number: 17,
+            section_index: 2,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn test_build_for_browser_pause_threads_pause_for_human_fields() {
+        let slice = make_browser_slice_spec();
+        let pause = crate::sidecar::PauseInfo {
+            sidecar_state: None,
+            reason: Some("pause_for_human".into()),
+            resume_url: Some("https://run.example.com/runs/xyz".into()),
+            verb_index: Some(3),
+            message: Some("Drop receipts".into()),
+            context_url: Some("https://drive.google.com/x".into()),
+            resume_on: Some("operator_click".into()),
+            timeout: Some("1h".into()),
+            actions: vec![serde_json::json!({"label": "OK", "value": "ok"})],
+        };
+        let desc = build_for_browser_pause("ckpt-1", "t.md", 5, &slice, &pause);
+        assert_eq!(desc.checkpoint_id, "ckpt-1");
+        assert_eq!(desc.next_block, 5);
+        assert_eq!(desc.line_number, 17);
+        assert_eq!(desc.verb_index, Some(3));
+        assert_eq!(desc.message.as_deref(), Some("Drop receipts"));
+        assert_eq!(
+            desc.context_url.as_deref(),
+            Some("https://drive.google.com/x")
+        );
+        assert_eq!(desc.resume_on.as_deref(), Some("operator_click"));
+        assert_eq!(desc.timeout.as_deref(), Some("1h"));
+        assert_eq!(desc.actions.len(), 1);
+        // timeout: "1h" with resume_on: operator_click → timeout_at is set
+        // (for display/reaper scheduling) but on_timeout stays unset (reaper
+        // doesn't auto-abort an operator_click pause).
+        assert!(desc.timeout_at.is_some());
+        assert!(desc.on_timeout.is_none());
+    }
+
+    #[test]
+    fn test_build_for_browser_pause_timeout_mode_sets_on_timeout_abort() {
+        // resume_on: timeout means "no operator needed; auto-abort on expiry."
+        // The reaper sweep in `wb pending` relies on on_timeout == "abort" to
+        // fire the auto-cleanup; we set it here so the contract is automatic
+        // for workbook authors.
+        let slice = make_browser_slice_spec();
+        let pause = crate::sidecar::PauseInfo {
+            resume_on: Some("timeout".into()),
+            timeout: Some("30s".into()),
+            ..Default::default()
+        };
+        let desc = build_for_browser_pause("ckpt-1", "t.md", 0, &slice, &pause);
+        assert_eq!(desc.on_timeout.as_deref(), Some("abort"));
+        assert!(desc.timeout_at.is_some());
+    }
+
+    #[test]
+    fn test_build_for_browser_pause_round_trips_through_json() {
+        // Critical invariant: the descriptor must survive a save+load cycle
+        // so timeout reaping and resume can read the new fields off disk.
+        let slice = make_browser_slice_spec();
+        let pause = crate::sidecar::PauseInfo {
+            message: Some("m".into()),
+            context_url: Some("u".into()),
+            resume_on: Some("poll".into()),
+            actions: vec![serde_json::json!({"label": "Go", "value": 1})],
+            ..Default::default()
+        };
+        let desc = build_for_browser_pause("ckpt-rt", "t.md", 0, &slice, &pause);
+        let serialized = serde_json::to_string(&desc).expect("serialize");
+        let back: PendingDescriptor = serde_json::from_str(&serialized).expect("deserialize");
+        assert_eq!(back.message.as_deref(), Some("m"));
+        assert_eq!(back.context_url.as_deref(), Some("u"));
+        assert_eq!(back.resume_on.as_deref(), Some("poll"));
+        assert_eq!(back.actions.len(), 1);
+        assert_eq!(back.actions[0]["value"], 1);
+    }
+
+    #[test]
+    fn test_legacy_descriptor_without_new_fields_parses() {
+        // Descriptors written by older `wb` versions won't have the
+        // pause_for_human fields. `#[serde(default)]` on each must be wired
+        // so loading them doesn't error — otherwise an upgrade strands
+        // every in-flight paused workbook.
+        let legacy = r#"{
+            "checkpoint": "c",
+            "checkpoint_id": "ckpt-old",
+            "workbook": "w.md",
+            "next_block": 1,
+            "line_number": 1,
+            "section_index": 0,
+            "created_at": "2026-01-01T00:00:00Z"
+        }"#;
+        let desc: PendingDescriptor = serde_json::from_str(legacy).expect("parse legacy");
+        assert_eq!(desc.checkpoint_id, "ckpt-old");
+        assert!(desc.message.is_none());
+        assert!(desc.actions.is_empty());
     }
 }

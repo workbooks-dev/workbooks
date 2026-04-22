@@ -22,7 +22,7 @@ import { createStubPage, captureSendFrames } from "../lib/stub-page.js";
 
 // --- registry shape ---------------------------------------------------------
 
-test("SUPPORTS lists all 10 verbs in expected order", () => {
+test("SUPPORTS lists all 12 verbs in expected order", () => {
   assert.deepEqual(SUPPORTS, [
     "goto",
     "fill",
@@ -34,6 +34,8 @@ test("SUPPORTS lists all 10 verbs in expected order", () => {
     "assert",
     "eval",
     "save",
+    "pause_for_human",
+    "wait_for_drop",
   ]);
 });
 
@@ -455,4 +457,263 @@ test("save sanitizes path separators + whitespace in names", async (t) => {
   // And the written file must actually live inside artifactsDir.
   const resolved = path.resolve(saved.path);
   assert.ok(resolved.startsWith(path.resolve(dir) + path.sep));
+});
+
+// --- pause_for_human --------------------------------------------------------
+
+test("pause_for_human returns __pause sentinel with operator_click default", async () => {
+  const result = await VERB_REGISTRY.pause_for_human.execute(
+    null,
+    { message: "Complete MFA in the open browser" },
+    { index: 2 },
+  );
+  assert.ok(result.__pause, "should return __pause sentinel");
+  const p = result.__pause;
+  assert.equal(p.reason, "pause_for_human");
+  assert.equal(p.message, "Complete MFA in the open browser");
+  assert.equal(p.context_url, null);
+  assert.equal(p.resume_on, "operator_click");
+  assert.deepEqual(p.actions, [{ label: "Resume", value: null }]);
+  assert.equal(p.timeout, null);
+});
+
+test("pause_for_human forwards context_url + resume_on + timeout", async () => {
+  const result = await VERB_REGISTRY.pause_for_human.execute(
+    null,
+    {
+      message: "Drop receipts in the folder below",
+      context_url: "https://drive.google.com/drive/folders/abc",
+      resume_on: "timeout",
+      timeout: "1h",
+    },
+    { index: 0 },
+  );
+  const p = result.__pause;
+  assert.equal(p.context_url, "https://drive.google.com/drive/folders/abc");
+  assert.equal(p.resume_on, "timeout");
+  assert.equal(p.timeout, "1h");
+});
+
+test("pause_for_human preserves custom actions list", async () => {
+  const result = await VERB_REGISTRY.pause_for_human.execute(
+    null,
+    {
+      message: "Approve?",
+      actions: [
+        { label: "Approved", value: "approved" },
+        { label: "Denied", value: "denied" },
+      ],
+    },
+    { index: 0 },
+  );
+  const p = result.__pause;
+  assert.equal(p.actions.length, 2);
+  assert.equal(p.actions[0].value, "approved");
+  assert.equal(p.actions[1].value, "denied");
+});
+
+test("pause_for_human rejects invalid resume_on", async () => {
+  await assert.rejects(
+    VERB_REGISTRY.pause_for_human.execute(
+      null,
+      { message: "x", resume_on: "whenever" },
+      { index: 0 },
+    ),
+    /resume_on must be one of/,
+  );
+});
+
+test("pause_for_human rejects malformed action entries", async () => {
+  await assert.rejects(
+    VERB_REGISTRY.pause_for_human.execute(
+      null,
+      { message: "x", actions: [{ value: "no-label" }] },
+      { index: 0 },
+    ),
+    /each action must be/,
+  );
+});
+
+// --- wait_for_drop (argument validation only; network tests live elsewhere) -
+
+async function callWaitForDrop(args, envOverrides = {}) {
+  const savedEnv = {};
+  for (const [k, v] of Object.entries(envOverrides)) {
+    savedEnv[k] = process.env[k];
+    if (v === null) delete process.env[k];
+    else process.env[k] = v;
+  }
+  try {
+    return await VERB_REGISTRY.wait_for_drop.execute(null, args, { index: 0 });
+  } finally {
+    for (const [k, v] of Object.entries(savedEnv)) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+  }
+}
+
+test("wait_for_drop rejects missing PARACORD_RELAY_API_KEY", async () => {
+  await assert.rejects(
+    callWaitForDrop(
+      { folder_url: "https://drive.google.com/drive/folders/abc" },
+      { PARACORD_RELAY_API_KEY: null, PARACORD_RELAY_URL: "https://r" },
+    ),
+    /PARACORD_RELAY_API_KEY is required/,
+  );
+});
+
+test("wait_for_drop rejects missing PARACORD_RELAY_URL", async () => {
+  await assert.rejects(
+    callWaitForDrop(
+      { folder_url: "https://drive.google.com/drive/folders/abc" },
+      { PARACORD_RELAY_API_KEY: "k", PARACORD_RELAY_URL: null },
+    ),
+    /PARACORD_RELAY_URL is required/,
+  );
+});
+
+test("wait_for_drop rejects malformed folder_url", async () => {
+  await assert.rejects(
+    callWaitForDrop(
+      { folder_url: "https://not-drive.example.com/path" },
+      { PARACORD_RELAY_API_KEY: "k", PARACORD_RELAY_URL: "https://r" },
+    ),
+    /does not look like a Drive folder URL/,
+  );
+});
+
+test("wait_for_drop rejects invalid expect value", async () => {
+  await assert.rejects(
+    callWaitForDrop(
+      {
+        folder_url: "https://drive.google.com/drive/folders/abc",
+        expect: "something_else",
+      },
+      { PARACORD_RELAY_API_KEY: "k", PARACORD_RELAY_URL: "https://r" },
+    ),
+    /expect must be/,
+  );
+});
+
+test("wait_for_drop rejects filename_matches without pattern", async () => {
+  await assert.rejects(
+    callWaitForDrop(
+      {
+        folder_url: "https://drive.google.com/drive/folders/abc",
+        expect: "filename_matches",
+      },
+      { PARACORD_RELAY_API_KEY: "k", PARACORD_RELAY_URL: "https://r" },
+    ),
+    /filename_matches requires filename_pattern/,
+  );
+});
+
+test("wait_for_drop rejects bogus duration string", async () => {
+  await assert.rejects(
+    callWaitForDrop(
+      {
+        folder_url: "https://drive.google.com/drive/folders/abc",
+        poll_every: "sometime",
+      },
+      { PARACORD_RELAY_API_KEY: "k", PARACORD_RELAY_URL: "https://r" },
+    ),
+    /invalid duration/,
+  );
+});
+
+test("wait_for_drop accepts a user folder URL (with /u/0/)", async () => {
+  // We stub fetch to return one file so the verb returns quickly. This also
+  // proves the extractFolderId regex handles the `/u/<n>/` personal-drive
+  // prefix that Google uses when the operator is signed into multiple accs.
+  const savedFetch = globalThis.fetch;
+  globalThis.fetch = async () => ({
+    ok: true,
+    async json() {
+      return { files: [{ id: "f1", name: "x.pdf" }] };
+    },
+  });
+  const savedDir = process.env.WB_ARTIFACTS_DIR;
+  const tmp = await mkdtemp(path.join(tmpdir(), "wb-drop-"));
+  process.env.WB_ARTIFACTS_DIR = tmp;
+  try {
+    const summary = await callWaitForDrop(
+      { folder_url: "https://drive.google.com/drive/u/0/folders/ABC123_xyz" },
+      { PARACORD_RELAY_API_KEY: "k", PARACORD_RELAY_URL: "https://relay" },
+    );
+    assert.match(summary, /matched/);
+  } finally {
+    globalThis.fetch = savedFetch;
+    if (savedDir === undefined) delete process.env.WB_ARTIFACTS_DIR;
+    else process.env.WB_ARTIFACTS_DIR = savedDir;
+  }
+});
+
+test("wait_for_drop writes bind_artifact to WB_ARTIFACTS_DIR", async () => {
+  const savedFetch = globalThis.fetch;
+  const files = [
+    { id: "a", name: "statement-2026-04.pdf" },
+    { id: "b", name: "receipts.pdf" },
+  ];
+  globalThis.fetch = async () => ({
+    ok: true,
+    async json() {
+      return { files };
+    },
+  });
+  const tmp = await mkdtemp(path.join(tmpdir(), "wb-drop-"));
+  const savedDir = process.env.WB_ARTIFACTS_DIR;
+  process.env.WB_ARTIFACTS_DIR = tmp;
+  try {
+    await callWaitForDrop(
+      {
+        folder_url: "https://drive.google.com/drive/folders/abc",
+        bind_artifact: "uploaded",
+      },
+      { PARACORD_RELAY_API_KEY: "k", PARACORD_RELAY_URL: "https://relay" },
+    );
+    const content = await readFile(path.join(tmp, "uploaded.json"), "utf8");
+    const parsed = JSON.parse(content);
+    assert.equal(parsed.files.length, 2);
+    assert.equal(parsed.files[0].name, "statement-2026-04.pdf");
+  } finally {
+    globalThis.fetch = savedFetch;
+    if (savedDir === undefined) delete process.env.WB_ARTIFACTS_DIR;
+    else process.env.WB_ARTIFACTS_DIR = savedDir;
+  }
+});
+
+test("wait_for_drop filename_matches filters with glob", async () => {
+  // Directory has two files; only one matches *.csv. The verb should match
+  // on the first poll and return.
+  const savedFetch = globalThis.fetch;
+  globalThis.fetch = async () => ({
+    ok: true,
+    async json() {
+      return {
+        files: [
+          { id: "a", name: "notes.txt" },
+          { id: "b", name: "data.csv" },
+        ],
+      };
+    },
+  });
+  const tmp = await mkdtemp(path.join(tmpdir(), "wb-drop-"));
+  const savedDir = process.env.WB_ARTIFACTS_DIR;
+  process.env.WB_ARTIFACTS_DIR = tmp;
+  try {
+    const summary = await callWaitForDrop(
+      {
+        folder_url: "https://drive.google.com/drive/folders/abc",
+        expect: "filename_matches",
+        filename_pattern: "*.csv",
+      },
+      { PARACORD_RELAY_API_KEY: "k", PARACORD_RELAY_URL: "https://relay" },
+    );
+    assert.match(summary, /matched/);
+  } finally {
+    globalThis.fetch = savedFetch;
+    if (savedDir === undefined) delete process.env.WB_ARTIFACTS_DIR;
+    else process.env.WB_ARTIFACTS_DIR = savedDir;
+  }
 });
