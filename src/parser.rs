@@ -138,6 +138,15 @@ pub struct CodeBlock {
     pub skip_execution: bool,
     /// `{silent}` info-string flag: execute normally but suppress step.complete/step.failed callbacks.
     pub silent: bool,
+    /// `{when=EXPR}` info-string attribute: runtime-conditional execution. The
+    /// block runs only if EXPR evaluates true against the session env. Evaluated
+    /// per-run; unlike `{no-run}` the decision can differ between runs of the
+    /// same workbook as env changes. `None` = always run.
+    pub when: Option<String>,
+    /// `{skip_if=EXPR}` info-string attribute: inverse of `when`. Block is skipped
+    /// if EXPR evaluates true. Composes with `when` via AND — a block runs when
+    /// `when` is true *and* `skip_if` is false.
+    pub skip_if: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -223,6 +232,12 @@ pub struct BrowserSliceSpec {
     pub session: Option<String>,
     #[serde(default)]
     pub on_pause: Option<String>,
+    /// Opaque provider-side profile identifier (e.g. browser-use `profileId`).
+    /// Hard-coded per runbook by whatever emits it (UI editor, codegen) so
+    /// rotating the bound auth state is a workbook re-emit, not an env-var
+    /// shuffle. Providers that don't support profiles log + ignore.
+    #[serde(default, rename = "profile_id")]
+    pub profile: Option<String>,
     #[serde(default)]
     pub verbs: Vec<serde_yaml::Value>,
     #[serde(skip, default)]
@@ -235,6 +250,10 @@ pub struct BrowserSliceSpec {
     pub skip_execution: bool,
     #[serde(skip, default)]
     pub silent: bool,
+    #[serde(skip, default)]
+    pub when: Option<String>,
+    #[serde(skip, default)]
+    pub skip_if: Option<String>,
 }
 
 /// Workbook-composition fence (```include ```). Body is YAML with a `path:`
@@ -399,19 +418,24 @@ fn extract_frontmatter(input: &str) -> (Frontmatter, String) {
     }
 }
 
-/// Parsed info string: language token + optional `{no-run, silent, ...}` flags.
+/// Parsed info string: language token + optional `{no-run, silent, when=, skip_if=, ...}` attrs.
 #[derive(Debug, Default, PartialEq, Eq)]
 struct InfoString {
     language: String,
     skip_execution: bool,
     silent: bool,
+    /// `when=EXPR` — run only if EXPR is truthy at runtime.
+    when: Option<String>,
+    /// `skip_if=EXPR` — skip if EXPR is truthy at runtime.
+    skip_if: Option<String>,
 }
 
-/// Split a fence info string like `bash {no-run, silent}` into language + flags.
+/// Split a fence info string like `bash {no-run, silent, when=$X}` into language + attrs.
 ///
-/// Brace cluster is optional and can appear anywhere after the language token. Flags
-/// inside braces are comma or whitespace separated; unknown flags are currently
-/// ignored so the parser stays forward-compatible.
+/// Brace cluster is optional and can appear anywhere after the language token. Attrs
+/// inside braces are comma or whitespace separated; unknown attrs are currently
+/// ignored so the parser stays forward-compatible. Key/value attrs (`when=`, `skip_if=`)
+/// must have no whitespace in the value — the split would fracture the expression.
 fn parse_info_string(info: &str) -> InfoString {
     let info = info.trim();
     let (lang_part, flag_part) = match (info.find('{'), info.rfind('}')) {
@@ -430,14 +454,105 @@ fn parse_info_string(info: &str) -> InfoString {
             .map(str::trim)
             .filter(|s| !s.is_empty())
         {
-            match flag {
-                "no-run" => out.skip_execution = true,
-                "silent" => out.silent = true,
-                _ => {}
+            if let Some(expr) = flag.strip_prefix("when=") {
+                out.when = Some(expr.to_string());
+            } else if let Some(expr) = flag.strip_prefix("skip_if=") {
+                out.skip_if = Some(expr.to_string());
+            } else {
+                match flag {
+                    "no-run" => out.skip_execution = true,
+                    "silent" => out.silent = true,
+                    _ => {}
+                }
             }
         }
     }
     out
+}
+
+/// Evaluate a `when=` / `skip_if=` expression against a resolved env map.
+///
+/// Grammar (intentionally tiny):
+///   - `$VAR`          → truthy check on env[VAR]: non-empty, and not "0"/"false"/"no"/"off" (case-insensitive)
+///   - `$VAR=value`    → env[VAR] equals value (missing var ≠ value → false)
+///   - `$VAR!=value`   → env[VAR] does not equal value (missing var counts as not-equal → true)
+///   - `!<expr>`       → boolean NOT of any of the above
+///
+/// No shell, no arithmetic, no Jinja. If the expression is malformed, a warning is
+/// logged and `false` is returned — fail-safe: a broken conditional does not run.
+pub fn evaluate_condition(expr: &str, env: &HashMap<String, String>) -> bool {
+    let expr = expr.trim();
+    let (negate, expr) = match expr.strip_prefix('!') {
+        Some(rest) => (true, rest.trim()),
+        None => (false, expr),
+    };
+    let result = match expr.strip_prefix('$') {
+        Some(var) => {
+            if let Some((name, value)) = var.split_once("!=") {
+                env.get(name).map(|v| v != value).unwrap_or(true)
+            } else if let Some((name, value)) = var.split_once('=') {
+                env.get(name).map(|v| v == value).unwrap_or(false)
+            } else {
+                is_truthy(env.get(var))
+            }
+        }
+        None => {
+            eprintln!(
+                "wb: invalid when/skip_if expression '{}' — must start with '$' (or '!$'). Treating as false.",
+                expr
+            );
+            false
+        }
+    };
+    if negate { !result } else { result }
+}
+
+fn is_truthy(v: Option<&String>) -> bool {
+    match v {
+        None => false,
+        Some(s) => {
+            let t = s.trim();
+            if t.is_empty() {
+                return false;
+            }
+            !matches!(t.to_ascii_lowercase().as_str(), "0" | "false" | "no" | "off")
+        }
+    }
+}
+
+/// Build the env map used to evaluate `when=` / `skip_if=` expressions.
+///
+/// Merges the process env (inherited by child subprocesses by default) with
+/// the session env (frontmatter + resolved secrets + WB_* internals), with
+/// session values winning on conflict. The resulting map matches what a bash
+/// block would see at runtime, so `skip_if=$CI` behaves the way an author
+/// expects when `CI=1` is set in the parent shell.
+pub fn resolved_env(session_env: &HashMap<String, String>) -> HashMap<String, String> {
+    let mut merged: HashMap<String, String> = std::env::vars().collect();
+    for (k, v) in session_env {
+        merged.insert(k.clone(), v.clone());
+    }
+    merged
+}
+
+/// Decide whether a block should be skipped this run. Returns a human-readable
+/// reason (matches the hint printed in the run loop) or `None` to run normally.
+pub fn should_skip_block(
+    when: Option<&str>,
+    skip_if: Option<&str>,
+    env: &HashMap<String, String>,
+) -> Option<String> {
+    if let Some(expr) = when {
+        if !evaluate_condition(expr, env) {
+            return Some(format!("when={} → false", expr));
+        }
+    }
+    if let Some(expr) = skip_if {
+        if evaluate_condition(expr, env) {
+            return Some(format!("skip_if={} → true", expr));
+        }
+    }
+    None
 }
 
 fn extract_sections(body: &str) -> Vec<Section> {
@@ -549,6 +664,8 @@ fn extract_sections(body: &str) -> Vec<Section> {
                 spec.raw = yaml;
                 spec.skip_execution = info.skip_execution;
                 spec.silent = info.silent;
+                spec.when = info.when.clone();
+                spec.skip_if = info.skip_if.clone();
                 sections.push(Section::Browser(spec));
                 continue;
             }
@@ -590,6 +707,8 @@ fn extract_sections(body: &str) -> Vec<Section> {
                 line_number: line_num + 1, // 1-indexed
                 skip_execution: info.skip_execution,
                 silent: info.silent,
+                when: info.when,
+                skip_if: info.skip_if,
             }));
         } else {
             current_text.push_str(line);
@@ -978,6 +1097,57 @@ verbs:
     }
 
     #[test]
+    fn test_parse_browser_block_with_profile_id() {
+        let input = r#"```browser
+session: airbase
+profile_id: 550e8400-e29b-41d4-a716-446655440000
+verbs:
+  - goto: https://example.com
+```
+"#;
+        let wb = parse(input);
+        let b = wb
+            .sections
+            .iter()
+            .find_map(|s| {
+                if let Section::Browser(b) = s {
+                    Some(b)
+                } else {
+                    None
+                }
+            })
+            .expect("browser slice");
+        assert_eq!(
+            b.profile.as_deref(),
+            Some("550e8400-e29b-41d4-a716-446655440000")
+        );
+        assert_eq!(b.session.as_deref(), Some("airbase"));
+    }
+
+    #[test]
+    fn test_parse_browser_block_without_profile_id() {
+        let input = r#"```browser
+session: airbase
+verbs:
+  - goto: https://example.com
+```
+"#;
+        let wb = parse(input);
+        let b = wb
+            .sections
+            .iter()
+            .find_map(|s| {
+                if let Section::Browser(b) = s {
+                    Some(b)
+                } else {
+                    None
+                }
+            })
+            .expect("browser slice");
+        assert!(b.profile.is_none());
+    }
+
+    #[test]
     fn test_block_policy_defaults_when_unset() {
         let fm = Frontmatter::default();
         let p = fm.block_policy(1);
@@ -1305,6 +1475,191 @@ verbs:
         assert_eq!(browsers.len(), 1);
         assert!(browsers[0].skip_execution);
         assert_eq!(wb.code_block_count(), 0);
+    }
+
+    // --- {when=…} / {skip_if=…} runtime-conditional attrs ----------------
+
+    #[test]
+    fn test_parse_info_string_when_truthy_check() {
+        let info = parse_info_string("bash {when=$DEPLOY_ENV}");
+        assert_eq!(info.language, "bash");
+        assert_eq!(info.when.as_deref(), Some("$DEPLOY_ENV"));
+        assert!(info.skip_if.is_none());
+    }
+
+    #[test]
+    fn test_parse_info_string_when_equals() {
+        let info = parse_info_string("bash {when=$DEPLOY_ENV=prod}");
+        assert_eq!(info.when.as_deref(), Some("$DEPLOY_ENV=prod"));
+    }
+
+    #[test]
+    fn test_parse_info_string_skip_if_truthy() {
+        let info = parse_info_string("bash {skip_if=$DRY_RUN}");
+        assert_eq!(info.skip_if.as_deref(), Some("$DRY_RUN"));
+        assert!(info.when.is_none());
+    }
+
+    #[test]
+    fn test_parse_info_string_conditional_combines_with_silent() {
+        let info = parse_info_string("bash {when=$X, silent}");
+        assert_eq!(info.when.as_deref(), Some("$X"));
+        assert!(info.silent);
+    }
+
+    #[test]
+    fn test_parse_info_string_negation() {
+        let info = parse_info_string("bash {when=!$DRY_RUN}");
+        assert_eq!(info.when.as_deref(), Some("!$DRY_RUN"));
+    }
+
+    #[test]
+    fn test_parse_info_string_not_equals() {
+        let info = parse_info_string("bash {skip_if=$ENV!=prod}");
+        assert_eq!(info.skip_if.as_deref(), Some("$ENV!=prod"));
+    }
+
+    fn env_map(pairs: &[(&str, &str)]) -> HashMap<String, String> {
+        pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+    }
+
+    #[test]
+    fn test_evaluate_condition_truthy_missing_var() {
+        assert!(!evaluate_condition("$MISSING", &env_map(&[])));
+    }
+
+    #[test]
+    fn test_evaluate_condition_truthy_set_var() {
+        assert!(evaluate_condition("$X", &env_map(&[("X", "1")])));
+        assert!(evaluate_condition("$X", &env_map(&[("X", "anything")])));
+    }
+
+    #[test]
+    fn test_evaluate_condition_falsy_values() {
+        // Empty, "0", "false", "no", "off" are all falsy (case-insensitive).
+        for v in ["", "0", "false", "FALSE", "No", "off"] {
+            assert!(
+                !evaluate_condition("$X", &env_map(&[("X", v)])),
+                "expected '{}' to be falsy",
+                v
+            );
+        }
+    }
+
+    #[test]
+    fn test_evaluate_condition_equals() {
+        let env = env_map(&[("DEPLOY", "prod")]);
+        assert!(evaluate_condition("$DEPLOY=prod", &env));
+        assert!(!evaluate_condition("$DEPLOY=staging", &env));
+        // Missing var with equality: always false.
+        assert!(!evaluate_condition("$MISSING=prod", &env));
+    }
+
+    #[test]
+    fn test_evaluate_condition_not_equals() {
+        let env = env_map(&[("DEPLOY", "prod")]);
+        assert!(!evaluate_condition("$DEPLOY!=prod", &env));
+        assert!(evaluate_condition("$DEPLOY!=staging", &env));
+        // Missing var with !=: true (a missing var is "not equal" to anything).
+        assert!(evaluate_condition("$MISSING!=prod", &env));
+    }
+
+    #[test]
+    fn test_evaluate_condition_negation() {
+        let env = env_map(&[("X", "1")]);
+        assert!(!evaluate_condition("!$X", &env));
+        assert!(evaluate_condition("!$MISSING", &env));
+        // Negation composes with equality.
+        assert!(!evaluate_condition("!$X=1", &env));
+        assert!(evaluate_condition("!$X=2", &env));
+    }
+
+    #[test]
+    fn test_evaluate_condition_malformed_is_false() {
+        // Expressions not starting with `$` (or `!$`) are invalid and treated
+        // as false — fail-safe: a broken conditional does not run the block.
+        assert!(!evaluate_condition("DEPLOY", &env_map(&[("DEPLOY", "1")])));
+        assert!(!evaluate_condition("", &env_map(&[])));
+    }
+
+    #[test]
+    fn test_should_skip_block_when_only() {
+        let env = env_map(&[("X", "1")]);
+        assert!(should_skip_block(Some("$X"), None, &env).is_none());
+        let reason = should_skip_block(Some("$MISSING"), None, &env);
+        assert!(reason.is_some());
+        assert!(reason.unwrap().starts_with("when="));
+    }
+
+    #[test]
+    fn test_should_skip_block_skip_if_only() {
+        let env = env_map(&[("DRY_RUN", "1")]);
+        let reason = should_skip_block(None, Some("$DRY_RUN"), &env);
+        assert!(reason.is_some());
+        assert!(reason.unwrap().starts_with("skip_if="));
+        assert!(should_skip_block(None, Some("$MISSING"), &env).is_none());
+    }
+
+    #[test]
+    fn test_should_skip_block_when_and_skip_if_compose() {
+        // Run only if X is set AND DRY_RUN is not set.
+        let run = env_map(&[("X", "1")]);
+        assert!(should_skip_block(Some("$X"), Some("$DRY_RUN"), &run).is_none());
+
+        let skip_dry = env_map(&[("X", "1"), ("DRY_RUN", "1")]);
+        let r = should_skip_block(Some("$X"), Some("$DRY_RUN"), &skip_dry);
+        assert!(r.unwrap().starts_with("skip_if="));
+
+        let skip_missing = env_map(&[]);
+        let r = should_skip_block(Some("$X"), Some("$DRY_RUN"), &skip_missing);
+        assert!(r.unwrap().starts_with("when="));
+    }
+
+    #[test]
+    fn test_code_block_conditional_attrs_attached() {
+        let input = r#"```bash {when=$X}
+echo one
+```
+
+```bash {skip_if=$DRY_RUN}
+echo two
+```
+
+```bash
+echo three
+```
+"#;
+        let wb = parse(input);
+        let blocks: Vec<&CodeBlock> = wb
+            .sections
+            .iter()
+            .filter_map(|s| if let Section::Code(b) = s { Some(b) } else { None })
+            .collect();
+        assert_eq!(blocks.len(), 3);
+        assert_eq!(blocks[0].when.as_deref(), Some("$X"));
+        assert!(blocks[0].skip_if.is_none());
+        assert!(blocks[1].when.is_none());
+        assert_eq!(blocks[1].skip_if.as_deref(), Some("$DRY_RUN"));
+        assert!(blocks[2].when.is_none() && blocks[2].skip_if.is_none());
+        // Conditional blocks still count — can't be evaluated at parse time.
+        assert_eq!(wb.code_block_count(), 3);
+    }
+
+    #[test]
+    fn test_browser_slice_conditional_attrs_attached() {
+        let input = r#"```browser {when=$BROWSER_ON}
+session: s1
+verbs: []
+```
+"#;
+        let wb = parse(input);
+        let b = wb
+            .sections
+            .iter()
+            .find_map(|s| if let Section::Browser(b) = s { Some(b) } else { None })
+            .expect("browser slice parsed");
+        assert_eq!(b.when.as_deref(), Some("$BROWSER_ON"));
+        assert!(b.skip_if.is_none());
     }
 
     // --- Include fence + resolve_includes --------------------------------

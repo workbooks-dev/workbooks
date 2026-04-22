@@ -331,6 +331,13 @@ impl Session {
         self.ctx.env.remove(key);
     }
 
+    /// Snapshot of the env that will be injected into the next block. Used
+    /// by the run loop to evaluate `when=` / `skip_if=` expressions against
+    /// the same state a block would otherwise see.
+    pub fn env(&self) -> &HashMap<String, String> {
+        &self.ctx.env
+    }
+
     /// Inject a small code snippet into all running persistent sessions to unset an env var.
     /// This ensures the already-spawned processes reflect the removal.
     pub fn unset_env_in_sessions(&mut self, key: &str) {
@@ -343,6 +350,8 @@ impl Session {
                     line_number: 0,
                     skip_execution: false,
                     silent: false,
+                    when: None,
+                    skip_if: None,
                 };
                 let saved_quiet = self.ctx.quiet;
                 self.ctx.quiet = true;
@@ -357,6 +366,8 @@ impl Session {
                 line_number: 0,
                 skip_execution: false,
                 silent: false,
+                when: None,
+                skip_if: None,
             };
             let saved_quiet = self.ctx.quiet;
             self.ctx.quiet = true;
@@ -370,6 +381,8 @@ impl Session {
                 line_number: 0,
                 skip_execution: false,
                 silent: false,
+                when: None,
+                skip_if: None,
             };
             let saved_quiet = self.ctx.quiet;
             self.ctx.quiet = true;
@@ -383,6 +396,8 @@ impl Session {
                 line_number: 0,
                 skip_execution: false,
                 silent: false,
+                when: None,
+                skip_if: None,
             };
             let saved_quiet = self.ctx.quiet;
             self.ctx.quiet = true;
@@ -492,7 +507,48 @@ impl Session {
         let start = Instant::now();
 
         if self.browser_sidecar.is_none() {
-            match Sidecar::spawn(&self.ctx.env, &self.ctx.working_dir) {
+            // Resolve vendor: runbook's `vars.browser_service` declares which
+            // sidecar provider this workbook is designed to drive. We project
+            // it into WB_BROWSER_VENDOR before spawning so the sidecar's
+            // boot-time provider selection lands on the right vendor without
+            // requiring the operator to also set the env var. Conflicts
+            // (env says X, runbook says Y) fail fast with a clear message —
+            // silent precedence rules cause more confusion than enforcement.
+            let mut spawn_env = self.ctx.env.clone();
+            if let Some(declared) = self.ctx.vars.get("browser_service") {
+                match self.ctx.env.get("WB_BROWSER_VENDOR") {
+                    Some(env_v) if env_v != declared => {
+                        let err = format!(
+                            "browser vendor mismatch: runbook declares browser_service=\"{}\" but env WB_BROWSER_VENDOR=\"{}\". Unset one or align them.",
+                            declared, env_v
+                        );
+                        if !self.ctx.quiet {
+                            crate::output::print_stderr_dim(&err);
+                        }
+                        return (
+                            BlockResult {
+                                block_index: index,
+                                language: "browser".to_string(),
+                                stdout: String::new(),
+                                stderr: err,
+                                exit_code: 1,
+                                duration: start.elapsed(),
+                                error_type: Some("vendor_mismatch".to_string()),
+                                stdout_partial: false,
+                                stderr_partial: false,
+                            },
+                            None,
+                        );
+                    }
+                    _ => {
+                        spawn_env.insert(
+                            "WB_BROWSER_VENDOR".to_string(),
+                            declared.clone(),
+                        );
+                    }
+                }
+            }
+            match Sidecar::spawn(&spawn_env, &self.ctx.working_dir) {
                 Ok(sc) => self.browser_sidecar = Some(sc),
                 Err(e) => {
                     if !self.ctx.quiet {
@@ -516,11 +572,30 @@ impl Session {
             }
         }
 
+        // Run `{{var}}` substitution on slice fields that are session-scoped
+        // (set on the slice envelope, not inside verbs). Verbs themselves are
+        // forwarded opaquely — the JS sidecar already does its own
+        // `{{ env.X }}` / `{{ artifacts.X }}` expansion against verb args
+        // so it can pick up values written by intervening cells. Session
+        // fields like `profile` are bound at slice dispatch and don't
+        // change mid-slice, so we resolve them here against ctx.vars
+        // (frontmatter `vars:` + any signal-bound vars merged in).
+        let mut effective_spec;
+        let resolved_spec = if spec.profile.is_some() && !self.ctx.vars.is_empty() {
+            effective_spec = spec.clone();
+            if let Some(p) = effective_spec.profile.as_ref() {
+                effective_spec.profile = Some(substitute_vars(p, &self.ctx.vars));
+            }
+            &effective_spec
+        } else {
+            spec
+        };
+
         let outcome = self
             .browser_sidecar
             .as_mut()
             .unwrap()
-            .run_slice(spec, self.ctx.quiet, ctx, restore);
+            .run_slice(resolved_spec, self.ctx.quiet, ctx, restore);
 
         let mut block = BlockResult {
             block_index: index,
@@ -1144,6 +1219,8 @@ mod tests {
             line_number: 0,
             skip_execution: false,
             silent: false,
+            when: None,
+            skip_if: None,
         }
     }
 

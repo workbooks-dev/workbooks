@@ -1416,6 +1416,12 @@ fn run_single(cfg: RunConfig) {
                 continue;
             }
 
+            // pause_for_signal diverges via std::process::exit, which skips
+            // Drop on `session` — the browser sidecar would be SIGKILLed by
+            // the OS instead of getting its graceful-shutdown window. Drop
+            // explicitly so Sidecar::Drop fires (shutdown frame + recording
+            // flush + browser.close() before exit).
+            drop(session);
             pause_for_signal(
                 spec,
                 section_idx,
@@ -1443,6 +1449,29 @@ fn run_single(cfg: RunConfig) {
                         output::style_dim(&format!(
                             "  ⊘ skipped {{no-run}} [{}] (L{})",
                             block.language, block.line_number
+                        ))
+                    );
+                }
+                continue;
+            }
+
+            // `{when=…}` / `{skip_if=…}`: runtime-conditional skip evaluated
+            // against the session env merged with process env (frontmatter
+            // wins). Same semantics as `{no-run}` — no execution, no callback,
+            // no checkpoint, block_idx does not advance. Block is still
+            // counted in `block_count` (can't be evaluated at parse time) so
+            // the UI progress shows a gap.
+            if let Some(reason) = parser::should_skip_block(
+                block.when.as_deref(),
+                block.skip_if.as_deref(),
+                &parser::resolved_env(session.env()),
+            ) {
+                if !quiet {
+                    eprintln!(
+                        "{}",
+                        output::style_dim(&format!(
+                            "  ⊘ skipped [{}] (L{}) — {}",
+                            block.language, block.line_number, reason
                         ))
                     );
                 }
@@ -1612,6 +1641,27 @@ fn run_single(cfg: RunConfig) {
                 continue;
             }
 
+            // `{when=…}` / `{skip_if=…}`: runtime-conditional skip. Browser
+            // slices share the same session env as code blocks, so we evaluate
+            // against it identically. Skipping here also avoids spawning the
+            // sidecar when every browser slice is conditionally off.
+            if let Some(reason) = parser::should_skip_block(
+                spec.when.as_deref(),
+                spec.skip_if.as_deref(),
+                &parser::resolved_env(session.env()),
+            ) {
+                if !quiet {
+                    eprintln!(
+                        "{}",
+                        output::style_dim(&format!(
+                            "  ⊘ skipped [browser] (L{}) — {}",
+                            spec.line_number, reason
+                        ))
+                    );
+                }
+                continue;
+            }
+
             // Replay path: browser sidecars rehydrate via persistent Browserbase
             // contexts, so a completed slice doesn't need to re-execute.
             if block_idx < replay_until {
@@ -1663,6 +1713,11 @@ fn run_single(cfg: RunConfig) {
             artifacts.sync();
 
             if let Some(pause) = pause_info {
+                // pause_browser_slice diverges via std::process::exit, which
+                // skips Drop on `session`. Drop first so the sidecar gets
+                // its shutdown frame (flushing recording + closing the
+                // browser context cleanly) before the process dies.
+                drop(session);
                 pause_browser_slice(
                     spec,
                     section_idx,
@@ -1791,6 +1846,11 @@ fn run_single(cfg: RunConfig) {
     write_run_output(&workbook, &summary, output_format, output_path.as_deref(), stdout_output);
 
     if failed > 0 {
+        // std::process::exit skips Drop, which would orphan the browser
+        // sidecar (Sidecar::Drop sends the shutdown frame + bounded-wait
+        // for recording flush + browser.close). Drop session first so the
+        // browser context actually closes on --bail and end-of-run failures.
+        drop(session);
         std::process::exit(1);
     }
 }
@@ -3878,6 +3938,8 @@ echo "pin=$pin"
             line_number: 0,
             skip_execution: false,
             silent: false,
+            when: None,
+            skip_if: None,
         }
     }
 

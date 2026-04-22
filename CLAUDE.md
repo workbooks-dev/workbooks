@@ -91,6 +91,48 @@ continue_on_error: [4] # block 4 failure doesn't trigger --bail
 
 Callback payloads (`step.complete`, `checkpoint.failed`) include `stdout_partial` / `stderr_partial` fields so downstream agents can distinguish "block failed" from "block was cut off mid-run".
 
+## Conditional cells: `{when=…}` and `{skip_if=…}`
+
+Runtime-conditional execution via info-string attributes — same attribute cluster
+as `{no-run}` and `{silent}`:
+
+```markdown
+```bash {when=$DEPLOY_ENV=prod}
+deploy --to prod
+```
+
+```bash {skip_if=$DRY_RUN}
+rm -rf $WORKDIR
+```
+
+```python {when=$FEATURE_X, silent}
+run_experiment()
+```
+```
+
+**Expression grammar** (intentionally tiny, no shell, no arithmetic):
+
+- `$VAR` — truthy: non-empty, and not `0`/`false`/`no`/`off` (case-insensitive)
+- `$VAR=value` — env[VAR] equals `value`
+- `$VAR!=value` — env[VAR] does not equal `value` (a missing var is "not equal" to anything)
+- `!<expr>` — boolean NOT of any of the above
+
+Values can't contain spaces — the info-string tokenizer splits on whitespace. A
+block runs when `when` is truthy *and* `skip_if` is falsy (AND composition).
+
+**Eval env** — process env merged with the workbook's session env (frontmatter +
+resolved secrets + `--env` CLI + `WB_*` internals), session values win on conflict.
+This matches what a bash block actually sees at runtime, so `skip_if=$CI` behaves
+as expected when `CI=1` is set in the parent shell.
+
+**Skip semantics** — same as `{no-run}`: no execution, no callback, no checkpoint,
+`block_idx` does not advance. Unlike `{no-run}`, a conditionally-skipped block
+still counts toward `blocks.total` (can't be filtered at parse time), so callback
+streams show a gap (e.g. events for 1, 2, 4, 5 out of 5 blocks). Malformed
+expressions log a warning and skip the block fail-safe.
+
+See `examples/conditional-demo.md` for a runnable example.
+
 ## Composing workbooks with `include:`
 
 Factor out repeated setup (logins, env priming, health pre-flights) into its own
