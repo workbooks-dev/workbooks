@@ -1,10 +1,12 @@
 # wb-browser-runtime
 
-Browser sidecar for `wb` — deterministic Playwright slices over Browserbase.
+Browser sidecar for `wb` — deterministic Playwright slices over a CDP-exposing
+vendor. Browserbase is the default; browser-use cloud is supported via
+`WB_BROWSER_VENDOR=browser-use`.
 
 Each `browser` fenced block in a workbook arrives as one `slice` message;
 this sidecar dispatches its `verbs` against a `playwright-core` `Page`
-connected to a Browserbase session via CDP. Sessions are cached by `session:`
+connected to a vendor-provided CDP endpoint. Sessions are cached by `session:`
 name across slices for the lifetime of the sidecar process so a runbook with
 multiple browser blocks against the same vendor reuses one logged-in browser
 context.
@@ -20,10 +22,53 @@ npm link          # exposes `wb-browser-runtime` on $PATH
 Or set `WB_BROWSER_RUNTIME=/absolute/path/to/bin/wb-browser-runtime.js` for a
 specific run.
 
-## Required env
+## Vendor selection
+
+`WB_BROWSER_VENDOR` — `browserbase` (default) or `browser-use`. Resolved once
+at sidecar boot; there is no per-slice override.
+
+### Browserbase (default)
 
 - `BROWSERBASE_API_KEY`
 - `BROWSERBASE_PROJECT_ID`
+
+### browser-use
+
+- `BROWSER_USE_API_KEY`
+- `BROWSER_USE_PROXY_COUNTRY` *(optional)* — ISO country code for the cloud's
+  built-in residential proxy (defaults to `us` on the vendor side). Set to
+  `null` to disable the proxy.
+- `BROWSER_USE_TIMEOUT_MIN` *(optional, 1–240)* — session TTL. Vendor default
+  is 60 minutes; unused time is refunded if the session ran less than an hour.
+
+Profile (auth state) is selected per-runbook via the `profile_id:` field on a
+`browser` block — see "Profiles" below.
+
+## Profiles
+
+Some vendors expose persistent browser profiles — cookies, localStorage, saved
+auth — that bind a session to a previously-logged-in identity so the
+runbook can skip login. The current support matrix:
+
+| Vendor       | Profile field | Source of profile id                         |
+|--------------|---------------|----------------------------------------------|
+| browser-use  | `profileId`   | `curl -fsSL https://browser-use.com/profile.sh \| sh` |
+| browserbase  | n/a           | logged + ignored                             |
+
+A runbook pins a profile via `profile_id:` on the `browser` block:
+
+```browser
+session: airbase
+profile_id: 550e8400-e29b-41d4-a716-446655440000
+verbs:
+  - goto: https://dashboard.airbase.io/home
+```
+
+The id is an opaque UUID that the runbook generator (UI editor, codegen, or
+hand-author) bakes in. Rotating the underlying auth state means re-emitting
+the runbook with a fresh id — no env-var shuffle and no in-place edits at
+run time. Browserbase runs ignore the field with an info-level log so the
+same runbook executes against either vendor.
 
 Verb arguments support two substitutions at dispatch time:
 
@@ -44,7 +89,7 @@ Both forms are redacted in stdout summaries — only the verb name + selector ma
 
 **Per-verb + session timings.** `verb.complete` and `verb.failed` frames include `duration_ms`. `slice.session_started` includes a `timings` object with `allocate_ms` (bbCreateSession), `connect_ms` (bbGetLiveUrl + CDP connect), `page_ready_ms` (context/page setup), and `total_ms`. Graph these to see where slow sessions spend time — usually `connect_ms` on a cold Browserbase region.
 
-## Optional: anti-detection
+## Optional: anti-detection (Browserbase only)
 
 Targets behind Cloudflare / Kasada / DataDome (e.g. Airbase) will reject the
 default Browserbase session fingerprint and serve a non-interactive challenge
@@ -57,7 +102,9 @@ page. Flip either flag on for the affected runs.
 
 Set `=1` (or `=true`) to enable. `proxies: true` alone clears most Cloudflare
 challenges; add `advancedStealth: true` on top when the target still blocks.
-The sidecar logs the resolved config at session create.
+The sidecar logs the resolved config at session create. Ignored when
+`WB_BROWSER_VENDOR=browser-use` — that vendor has stealth + residential
+proxies on by default.
 
 ## Optional: session recording (rrweb + CDP screencast)
 

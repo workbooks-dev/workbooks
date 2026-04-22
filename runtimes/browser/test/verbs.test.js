@@ -265,11 +265,29 @@ test("eval sets ctx.lastResult to page.evaluate's return", async () => {
   const ctx = {};
   const summary = await VERB_REGISTRY.eval.execute(
     page,
-    { script: "1+1" },
+    { script: "return 1+1" },
     ctx,
   );
   assert.deepEqual(ctx.lastResult, { x: 42 });
   assert.equal(summary, "script ran");
+});
+
+test("eval wraps script in async IIFE so top-level return + await work", async () => {
+  const page = createStubPage({ evalResult: null });
+  await VERB_REGISTRY.eval.execute(
+    page,
+    { script: "console.log('seeded'); return 'ok';" },
+    {},
+  );
+  const call = page.calls.find((c) => c.verb === "evaluate");
+  assert.ok(
+    /^\(async \(\) => \{ .* \}\)\(\)$/.test(call.script),
+    `expected async IIFE wrap, got: ${call.script}`,
+  );
+  assert.ok(
+    call.script.includes("return 'ok';"),
+    "wrapped script must contain the original return statement",
+  );
 });
 
 // --- screenshot (filesystem) -----------------------------------------------

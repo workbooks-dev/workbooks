@@ -1,18 +1,19 @@
 #!/usr/bin/env node
-// wb-browser-runtime — Browserbase + Playwright sidecar for `wb`.
+// wb-browser-runtime — CDP + Playwright sidecar for `wb`.
 //
 // Speaks wb's line-framed JSON protocol on stdio (see ../README.md). Each
 // `browser` fenced block in a workbook arrives as one `slice` message; this
 // sidecar dispatches its verbs against a Playwright `Page` connected to a
-// Browserbase session via CDP.
+// vendor-provided CDP endpoint.
+//
+// The vendor (Browserbase, browser-use, ...) is selected by WB_BROWSER_VENDOR
+// and lives behind a provider in ../lib/providers/. Verbs, recording, session
+// cache, and substitutions are all vendor-agnostic — they run against a
+// Playwright Page regardless of whose chromium is on the other end.
 //
 // Sessions are cached by `session:` name across slices for the lifetime of
 // this process, so a runbook with multiple browser blocks against the same
-// vendor reuses one Browserbase session (and one logged-in browser context).
-//
-// Env required for real runs:
-//   BROWSERBASE_API_KEY
-//   BROWSERBASE_PROJECT_ID
+// vendor reuses one session (and one logged-in browser context).
 //
 // Verb args support two substitutions, expanded recursively at dispatch time:
 //   {{ env.NAME }}        → process.env.NAME
@@ -27,16 +28,17 @@ import { chromium } from "playwright-core";
 import { readFileSync } from "node:fs";
 import { send, log } from "../lib/io.js";
 import { resolveInside } from "../lib/util.js";
-import { retryableFetch, safeText } from "../lib/http.js";
 import { SessionManager } from "../lib/session-manager.js";
 import {
   RecordingManager,
   loadRecordingConfig,
 } from "../lib/recording-manager.js";
+import { getProvider } from "../lib/providers/index.js";
 import { SUPPORTS, runVerb, verbName } from "../verbs/index.js";
 
-const BB_BASE = "https://api.browserbase.com";
-const VERSION = "0.6.0";
+const VERSION = "0.7.0";
+const provider = getProvider();
+log(`[provider] ${provider.name}`);
 
 // --- Recording --------------------------------------------------------------
 //
@@ -50,122 +52,36 @@ if (recording.enabled) {
   );
 }
 
-// --- Browserbase REST -------------------------------------------------------
-
-async function bbCreateSession() {
-  const apiKey = process.env.BROWSERBASE_API_KEY;
-  const projectId = process.env.BROWSERBASE_PROJECT_ID;
-  if (!apiKey || !projectId) {
-    throw new Error(
-      "BROWSERBASE_API_KEY and BROWSERBASE_PROJECT_ID must be set",
-    );
-  }
-
-  // Both flags opt-in per session. advancedStealth is Scale-plan-gated on
-  // Browserbase's side; proxies adds residential-IP cost. Default off so a
-  // misconfigured plan doesn't break unrelated runs (HN, Google Sheets, etc.);
-  // flip per vendor when the target sits behind Cloudflare / similar bot
-  // detection (e.g., Airbase).
-  const envBool = (v) => v === "1" || (typeof v === "string" && v.toLowerCase() === "true");
-  const advancedStealth = envBool(process.env.BROWSERBASE_ADVANCED_STEALTH);
-  const proxies = envBool(process.env.BROWSERBASE_PROXIES);
-
-  // keepAlive:false — slice lifetime is tied to wb process; on shutdown
-  // we explicitly REQUEST_RELEASE so quota isn't burned by orphans.
-  const body = { projectId, keepAlive: false };
-  if (advancedStealth) {
-    body.browserSettings = { advancedStealth: true };
-  }
-  if (proxies) {
-    body.proxies = true;
-  }
-
-  log(`[bb] session create advancedStealth=${advancedStealth} proxies=${proxies}`);
-
-  const res = await retryableFetch(
-    `${BB_BASE}/v1/sessions`,
-    {
-      method: "POST",
-      headers: {
-        "X-BB-API-Key": apiKey,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify(body),
-    },
-    "bb.create",
-  );
-  if (!res.ok) {
-    throw new Error(
-      `Browserbase create failed (${res.status}): ${await safeText(res)}`,
-    );
-  }
-  return await res.json();
-}
-
-async function bbGetLiveUrl(sessionId) {
-  const apiKey = process.env.BROWSERBASE_API_KEY;
-  const res = await retryableFetch(
-    `${BB_BASE}/v1/sessions/${sessionId}/debug`,
-    { headers: { "X-BB-API-Key": apiKey } },
-    "bb.debug",
-  );
-  if (!res.ok) {
-    throw new Error(
-      `Browserbase debug fetch failed (${res.status}): ${await safeText(res)}`,
-    );
-  }
-  const body = await res.json();
-  return body.debuggerFullscreenUrl;
-}
-
-async function bbReleaseSession(sessionId) {
-  const apiKey = process.env.BROWSERBASE_API_KEY;
-  const projectId = process.env.BROWSERBASE_PROJECT_ID;
-  try {
-    await retryableFetch(
-      `${BB_BASE}/v1/sessions/${sessionId}`,
-      {
-        method: "POST",
-        headers: { "X-BB-API-Key": apiKey, "Content-Type": "application/json" },
-        body: JSON.stringify({ projectId, status: "REQUEST_RELEASE" }),
-      },
-      "bb.release",
-    );
-  } catch (e) {
-    log(`[shutdown] release session ${sessionId} failed: ${e.message}`);
-  }
-}
-
 // --- Session cache ----------------------------------------------------------
 
 const sessions = new SessionManager();
 
-async function ensureSession(name) {
+async function ensureSession(name, { profile } = {}) {
   return sessions.ensure(name, async () => {
-    // Browserbase charges for the session the moment it's created; if
-    // anything after this point throws (debug URL, CDP connect, newContext,
+    // Vendors charge for the session the moment allocate() returns; if
+    // anything after this point throws (getLiveUrl, CDP connect, newContext,
     // recording setup) we must release it explicitly or quota leaks until
-    // BB's idle timeout. SessionManager only caches a successful return,
-    // so on throw there's no half-populated entry to clean up here.
+    // the vendor's idle timeout. SessionManager only caches a successful
+    // return, so on throw there's no half-populated entry to clean up here.
     //
     // Lifecycle timings attached to `slice.session_started` tell operators
     // which step dominated when startup feels slow — usually connectOverCDP
-    // against a cold Browserbase region, but the live-URL fetch and
+    // against a cold vendor region, but the live-URL fetch and
     // newContext/newPage can each stall independently.
     const t0 = Date.now();
-    const created = await bbCreateSession();
+    const allocated = await provider.allocate({ profile, sessionName: name });
     const tAllocated = Date.now();
     let browser = null;
     try {
-      const liveUrl = await bbGetLiveUrl(created.id);
-      browser = await chromium.connectOverCDP(created.connectUrl);
+      const liveUrl = await provider.getLiveUrl(allocated);
+      browser = await chromium.connectOverCDP(allocated.cdpUrl);
       const tConnected = Date.now();
       const context = browser.contexts()[0] ?? (await browser.newContext());
       const page = context.pages()[0] ?? (await context.newPage());
       const tPageReady = Date.now();
 
       const info = {
-        sid: created.id,
+        sid: allocated.sid,
         browser,
         context,
         page,
@@ -176,8 +92,9 @@ async function ensureSession(name) {
       send({
         type: "slice.session_started",
         session: name,
-        session_id: created.id,
+        session_id: allocated.sid,
         live_url: liveUrl,
+        vendor: provider.name,
         started_at: new Date().toISOString(),
         timings: {
           allocate_ms: tAllocated - t0,
@@ -195,7 +112,7 @@ async function ensureSession(name) {
           await browser.close();
         } catch {}
       }
-      await bbReleaseSession(created.id);
+      await provider.release(allocated.sid);
       throw e;
     }
   });
@@ -338,7 +255,7 @@ async function handleSlice(msg) {
 
     let session;
     try {
-      session = await ensureSession(sessionName);
+      session = await ensureSession(sessionName, { profile: msg.profile });
     } catch (e) {
       send({
         type: "slice.failed",
@@ -433,10 +350,10 @@ async function shutdown() {
       log(`[shutdown] close ${name}: ${e.message}`);
     }
   }
-  // Ask Browserbase to release sessions explicitly so quota isn't held by
+  // Ask the vendor to release sessions explicitly so quota isn't held by
   // orphans waiting for their idle timeout.
   await Promise.all(
-    Array.from(sessions.values()).map((s) => bbReleaseSession(s.sid)),
+    Array.from(sessions.values()).map((s) => provider.release(s.sid)),
   );
   process.exit(0);
 }
@@ -448,8 +365,8 @@ const rl = readline.createInterface({ input: process.stdin, terminal: false });
 // Per-session dispatch: slices against the same session name serialize
 // (shared Playwright page), slices against different names run in parallel.
 // SessionManager owns the chain map + the in-flight-create dedup that makes
-// this safe — two concurrent slices for "vendor-a" share one bbCreateSession
-// instead of racing to create two Browserbase sessions.
+// this safe — two concurrent slices for "vendor-a" share one provider.allocate
+// instead of racing to create two vendor sessions.
 function dispatchSlice(msg) {
   const sessionName = msg.session || "default";
   return sessions
