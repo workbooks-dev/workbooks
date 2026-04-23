@@ -9,6 +9,13 @@
 //! the cell that produced it completes. Failures are logged and skipped —
 //! artifact capture never fails a run.
 //!
+//! `sync()` also returns the set of newly-seen artifacts so the main loop
+//! can emit `step.artifact_saved` callback events downstream. Sidecar files
+//! (`*.meta.json`, `*.wb.json`, `pause_result.json`) are filtered out of
+//! that return: they describe artifacts but aren't artifacts themselves.
+//! When a `foo.csv.meta.json` sidecar exists next to `foo.csv`, its
+//! `{label, description}` fields ride along on the `ArtifactRecord`.
+//!
 //! Env vars:
 //! - `WB_ARTIFACTS_DIR` — set by wb, read by cells. Default location is
 //!   `~/.wb/runs/<run_id>/artifacts/` when a run id is available (via
@@ -31,6 +38,18 @@ pub const ENV_UPLOAD_URL: &str = "WB_ARTIFACTS_UPLOAD_URL";
 pub const ENV_UPLOAD_SECRET: &str = "WB_RECORDING_UPLOAD_SECRET";
 pub const ENV_RUN_ID: &str = "WB_RECORDING_RUN_ID";
 pub const ENV_TRIGGER_RUN_ID: &str = "TRIGGER_RUN_ID";
+
+/// A newly-seen (or rewritten) artifact, emitted by `sync()` so the caller
+/// can fire a `step.artifact_saved` callback. Sidecar files are excluded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArtifactRecord {
+    pub path: PathBuf,
+    pub filename: String,
+    pub bytes: u64,
+    pub content_type: &'static str,
+    pub label: Option<String>,
+    pub description: Option<String>,
+}
 
 pub struct Artifacts {
     dir: PathBuf,
@@ -104,11 +123,19 @@ impl Artifacts {
     /// than last time we saw them) and upload each one. Called after every
     /// cell completes. Safe to call when uploads are disabled — it still
     /// records mtimes so subsequent rewrites are detected.
-    pub fn sync(&mut self) {
+    ///
+    /// Returns a `Vec<ArtifactRecord>` for each newly-seen artifact (sidecars
+    /// excluded) so the caller can emit `step.artifact_saved` events. The
+    /// record already reflects the matching `.meta.json` sidecar (if any);
+    /// sidecars are re-read on every emission so an updated sidecar surfaces
+    /// an updated label on the next mtime bump.
+    pub fn sync(&mut self) -> Vec<ArtifactRecord> {
         let entries = match fs::read_dir(&self.dir) {
             Ok(e) => e,
-            Err(_) => return,
+            Err(_) => return Vec::new(),
         };
+
+        let mut out = Vec::new();
 
         for entry in entries.flatten() {
             let path = entry.path();
@@ -131,7 +158,32 @@ impl Artifacts {
             if self.upload_url.is_some() && self.upload_secret.is_some() {
                 self.upload_one(&path);
             }
+
+            // Sidecar / internal files never fire `step.artifact_saved` —
+            // they describe artifacts but aren't artifacts themselves.
+            let filename = match path.file_name().and_then(|s| s.to_str()) {
+                Some(n) => n.to_string(),
+                None => continue,
+            };
+            if is_sidecar_filename(&filename) {
+                continue;
+            }
+
+            let bytes = fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+            let content_type = guess_content_type(&filename);
+            let (label, description) = read_sidecar(&path);
+
+            out.push(ArtifactRecord {
+                path: path.clone(),
+                filename,
+                bytes,
+                content_type,
+                label,
+                description,
+            });
         }
+
+        out
     }
 
     fn upload_one(&self, path: &Path) {
@@ -301,6 +353,47 @@ fn guess_content_type(filename: &str) -> &'static str {
     }
 }
 
+/// Which filenames in `$WB_ARTIFACTS_DIR` are wb-internal or artifact-metadata
+/// rather than artifacts the run page should surface. These files are still
+/// uploaded (so first-party storage sees them) but they don't fire
+/// `step.artifact_saved`.
+fn is_sidecar_filename(filename: &str) -> bool {
+    if filename == "pause_result.json" {
+        return true;
+    }
+    if filename.ends_with(".meta.json") || filename.ends_with(".wb.json") {
+        return true;
+    }
+    false
+}
+
+/// Read `<path>.meta.json` if present and extract `label` / `description`.
+/// Returns `(None, None)` if the sidecar is missing, unreadable, or invalid
+/// JSON — label metadata is best-effort, never fatal. Unknown keys are
+/// ignored so the sidecar schema can grow without a version field.
+fn read_sidecar(artifact_path: &Path) -> (Option<String>, Option<String>) {
+    let mut sidecar = artifact_path.as_os_str().to_os_string();
+    sidecar.push(".meta.json");
+    let sidecar = PathBuf::from(sidecar);
+
+    let bytes = match fs::read(&sidecar) {
+        Ok(b) => b,
+        Err(_) => return (None, None),
+    };
+
+    let v: serde_json::Value = match serde_json::from_slice(&bytes) {
+        Ok(v) => v,
+        Err(_) => return (None, None),
+    };
+
+    let label = v.get("label").and_then(|x| x.as_str()).map(|s| s.to_string());
+    let description = v
+        .get("description")
+        .and_then(|x| x.as_str())
+        .map(|s| s.to_string());
+    (label, description)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -329,13 +422,124 @@ mod tests {
         let mut a = Artifacts::init(&mut env);
         let p = tmp.join("foo.json");
         fs::write(&p, "{}").unwrap();
-        a.sync();
-        // Second call should be a no-op (same mtime); we can't observe
-        // uploads without a server, but we can check that `seen` tracked it.
+        let first = a.sync();
+        assert_eq!(first.len(), 1, "first sync should return the new file");
+        assert_eq!(first[0].filename, "foo.json");
+
+        // Second call should be a no-op (same mtime).
+        let second = a.sync();
+        assert!(second.is_empty(), "second sync with same mtime should be empty");
         assert!(a.seen.contains_key(&p));
-        let first_mtime = a.seen[&p];
-        a.sync();
-        assert_eq!(a.seen[&p], first_mtime, "mtime should not change without rewrite");
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn sync_returns_record_shape() {
+        let mut env = HashMap::new();
+        let tmp = std::env::temp_dir().join(format!("wb-artifacts-shape-{}", short_rand()));
+        env.insert(ENV_DIR.to_string(), tmp.to_string_lossy().into_owned());
+
+        let mut a = Artifacts::init(&mut env);
+        let p = tmp.join("statement.csv");
+        fs::write(&p, "date,amount\n2026-04-01,100.00\n").unwrap();
+        let records = a.sync();
+
+        assert_eq!(records.len(), 1);
+        let r = &records[0];
+        assert_eq!(r.filename, "statement.csv");
+        assert_eq!(r.content_type, "text/csv");
+        assert!(r.bytes > 0);
+        assert_eq!(r.label, None);
+        assert_eq!(r.description, None);
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn sync_excludes_sidecar_filenames() {
+        let mut env = HashMap::new();
+        let tmp = std::env::temp_dir().join(format!("wb-artifacts-exclude-{}", short_rand()));
+        env.insert(ENV_DIR.to_string(), tmp.to_string_lossy().into_owned());
+
+        let mut a = Artifacts::init(&mut env);
+        fs::write(tmp.join("pause_result.json"), "{}").unwrap();
+        fs::write(tmp.join("foo.csv.meta.json"), r#"{"label":"x"}"#).unwrap();
+        fs::write(tmp.join("bar.wb.json"), "{}").unwrap();
+        fs::write(tmp.join("real.csv"), "a,b\n").unwrap();
+
+        let records = a.sync();
+        assert_eq!(records.len(), 1, "only real.csv should be emitted");
+        assert_eq!(records[0].filename, "real.csv");
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn sync_reads_sidecar_label_and_description() {
+        let mut env = HashMap::new();
+        let tmp = std::env::temp_dir().join(format!("wb-artifacts-label-{}", short_rand()));
+        env.insert(ENV_DIR.to_string(), tmp.to_string_lossy().into_owned());
+
+        let mut a = Artifacts::init(&mut env);
+        fs::write(tmp.join("statement.csv"), "ok").unwrap();
+        fs::write(
+            tmp.join("statement.csv.meta.json"),
+            r#"{"label":"April HSBC statement","description":"reconciled"}"#,
+        )
+        .unwrap();
+
+        let records = a.sync();
+        let statement = records.iter().find(|r| r.filename == "statement.csv").unwrap();
+        assert_eq!(statement.label.as_deref(), Some("April HSBC statement"));
+        assert_eq!(statement.description.as_deref(), Some("reconciled"));
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn sync_ignores_malformed_sidecar() {
+        let mut env = HashMap::new();
+        let tmp = std::env::temp_dir().join(format!("wb-artifacts-bad-{}", short_rand()));
+        env.insert(ENV_DIR.to_string(), tmp.to_string_lossy().into_owned());
+
+        let mut a = Artifacts::init(&mut env);
+        fs::write(tmp.join("foo.csv"), "ok").unwrap();
+        fs::write(tmp.join("foo.csv.meta.json"), "{ not valid json").unwrap();
+
+        let records = a.sync();
+        let foo = records.iter().find(|r| r.filename == "foo.csv").unwrap();
+        // Malformed sidecar should not fail sync, just produce no label.
+        assert_eq!(foo.label, None);
+        assert_eq!(foo.description, None);
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn sync_rereads_sidecar_on_rewrite() {
+        let mut env = HashMap::new();
+        let tmp = std::env::temp_dir().join(format!("wb-artifacts-reread-{}", short_rand()));
+        env.insert(ENV_DIR.to_string(), tmp.to_string_lossy().into_owned());
+
+        let mut a = Artifacts::init(&mut env);
+        let artifact = tmp.join("report.csv");
+        let sidecar = tmp.join("report.csv.meta.json");
+        fs::write(&artifact, "v1").unwrap();
+        fs::write(&sidecar, r#"{"label":"Draft"}"#).unwrap();
+        let first = a.sync();
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].label.as_deref(), Some("Draft"));
+
+        // Bump mtime on both files and rewrite with new label.
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        fs::write(&artifact, "v2-final").unwrap();
+        fs::write(&sidecar, r#"{"label":"Final"}"#).unwrap();
+        let second = a.sync();
+        // Both rewrites bumped mtime; the artifact is returned with the
+        // fresh label. The sidecar is filtered out of the records.
+        let r = second.iter().find(|r| r.filename == "report.csv").unwrap();
+        assert_eq!(r.label.as_deref(), Some("Final"));
 
         let _ = fs::remove_dir_all(&tmp);
     }
@@ -345,6 +549,16 @@ mod tests {
         assert_eq!(guess_content_type("orders.json"), "application/json");
         assert_eq!(guess_content_type("notes.txt"), "text/plain");
         assert_eq!(guess_content_type("x.bin"), "application/octet-stream");
+    }
+
+    #[test]
+    fn sidecar_filename_detection() {
+        assert!(is_sidecar_filename("pause_result.json"));
+        assert!(is_sidecar_filename("foo.csv.meta.json"));
+        assert!(is_sidecar_filename("anything.wb.json"));
+        assert!(!is_sidecar_filename("statement.csv"));
+        assert!(!is_sidecar_filename("metadata.json"));
+        assert!(!is_sidecar_filename("report.json"));
     }
 
     #[test]

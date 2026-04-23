@@ -1,6 +1,6 @@
 [package]
 name = "wb"
-version = "0.10.0"
+version = "0.11.0"
 edition = "2021"
 description = "Run markdown workbooks from the command line"
 license = "MIT"

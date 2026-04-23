@@ -158,6 +158,54 @@ fn build_step_finished_payload(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
+fn build_step_artifact_saved_payload(
+    workbook: &str,
+    checkpoint_id: Option<&str>,
+    block_index: usize,
+    language: &str,
+    heading: Option<&str>,
+    line_number: usize,
+    completed: usize,
+    total: usize,
+    filename: &str,
+    path: &str,
+    bytes: u64,
+    content_type: &str,
+    label: Option<&str>,
+    description: Option<&str>,
+    run_id: &str,
+    include_chain: &[IncludeFrame],
+) -> serde_json::Value {
+    json!({
+        "event": "step.artifact_saved",
+        "event_version": EVENT_VERSION,
+        "run_id": run_id,
+        "checkpoint_id": checkpoint_id,
+        "workbook": workbook,
+        "block": {
+            "index": block_index,
+            "language": language,
+            "heading": heading,
+            "line_number": line_number,
+        },
+        "progress": {
+            "completed": completed,
+            "total": total,
+        },
+        "artifact": {
+            "filename": filename,
+            "path": path,
+            "bytes": bytes,
+            "content_type": content_type,
+            "label": label,
+            "description": description,
+        },
+        "include_chain": chain_to_json(include_chain),
+        "timestamp": Utc::now().to_rfc3339(),
+    })
+}
+
 pub struct CallbackConfig {
     pub url: String,
     pub secret: Option<String>,
@@ -357,6 +405,53 @@ impl CallbackConfig {
             }
         }
         self.send(event, &payload.to_string());
+    }
+
+    /// Fired when `Artifacts::sync()` picks up a newly-seen (or rewritten)
+    /// file in `$WB_ARTIFACTS_DIR`. One event per file; sidecar files
+    /// (`*.meta.json`, `*.wb.json`, `pause_result.json`) are excluded.
+    /// Emitted after the cell completes, before `step.complete`, so the
+    /// notify-stream ordering groups artifacts under the block that produced
+    /// them. `{silent}` blocks suppress this event — if you want an artifact
+    /// surfaced, don't mark the block silent.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_artifact_saved(
+        &self,
+        workbook: &str,
+        checkpoint_id: Option<&str>,
+        block_index: usize,
+        language: &str,
+        heading: Option<&str>,
+        line_number: usize,
+        completed: usize,
+        total: usize,
+        filename: &str,
+        path: &str,
+        bytes: u64,
+        content_type: &str,
+        label: Option<&str>,
+        description: Option<&str>,
+        include_chain: &[IncludeFrame],
+    ) {
+        let payload = build_step_artifact_saved_payload(
+            workbook,
+            checkpoint_id,
+            block_index,
+            language,
+            heading,
+            line_number,
+            completed,
+            total,
+            filename,
+            path,
+            bytes,
+            content_type,
+            label,
+            description,
+            &self.run_id,
+            include_chain,
+        );
+        self.send("step.artifact_saved", &payload.to_string());
     }
 
     /// Fired when the entire run finishes (all blocks executed)
@@ -866,6 +961,64 @@ mod tests {
         assert_eq!(payload["slice"]["verb_index"], 7);
         assert_eq!(payload["reason"], "airbase_totp");
         assert_eq!(payload["resume_url"], "https://browserbase/live/abc123");
+    }
+
+    #[test]
+    fn test_build_step_artifact_saved_payload_shape() {
+        let chain = vec![IncludeFrame {
+            id: "services/airbase/login.md".into(),
+            title: Some("Airbase login".into()),
+        }];
+        let payload = build_step_artifact_saved_payload(
+            "tasks/month-end-close/hsbc.md",
+            Some("ckpt-7"),
+            3,
+            "bash",
+            Some("Export"),
+            42,
+            4,
+            12,
+            "statement.csv",
+            "/tmp/scout-artifacts/run-abc/statement.csv",
+            18234,
+            "text/csv",
+            Some("April HSBC statement"),
+            None,
+            "run-abc",
+            &chain,
+        );
+        assert_eq!(payload["event"], "step.artifact_saved");
+        assert_eq!(payload["event_version"], "1");
+        assert_eq!(payload["run_id"], "run-abc");
+        assert_eq!(payload["checkpoint_id"], "ckpt-7");
+        assert_eq!(payload["workbook"], "tasks/month-end-close/hsbc.md");
+        assert_eq!(payload["block"]["index"], 3);
+        assert_eq!(payload["block"]["language"], "bash");
+        assert_eq!(payload["block"]["heading"], "Export");
+        assert_eq!(payload["block"]["line_number"], 42);
+        assert_eq!(payload["progress"]["completed"], 4);
+        assert_eq!(payload["progress"]["total"], 12);
+        assert_eq!(payload["artifact"]["filename"], "statement.csv");
+        assert_eq!(payload["artifact"]["path"], "/tmp/scout-artifacts/run-abc/statement.csv");
+        assert_eq!(payload["artifact"]["bytes"], 18234);
+        assert_eq!(payload["artifact"]["content_type"], "text/csv");
+        assert_eq!(payload["artifact"]["label"], "April HSBC statement");
+        assert!(payload["artifact"]["description"].is_null());
+        let arr = payload["include_chain"].as_array().unwrap();
+        assert_eq!(arr.len(), 1);
+        assert_eq!(arr[0]["step_id"], "services/airbase/login.md");
+        assert_eq!(arr[0]["step_title"], "Airbase login");
+    }
+
+    #[test]
+    fn test_build_step_artifact_saved_payload_null_label() {
+        let payload = build_step_artifact_saved_payload(
+            "t.md", None, 0, "bash", None, 0, 1, 1, "x.bin", "/x.bin", 0,
+            "application/octet-stream", None, None, "r", &[],
+        );
+        assert!(payload["artifact"]["label"].is_null());
+        assert!(payload["artifact"]["description"].is_null());
+        assert!(payload["include_chain"].is_array());
     }
 
     #[test]

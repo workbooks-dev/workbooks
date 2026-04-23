@@ -780,7 +780,9 @@ fn run_single_collect(
                     executor::DEFAULT_BLOCK_TIMEOUT,
                     quiet,
                 );
-                artifacts.sync();
+                // Folder mode has no callback, so artifact records are
+                // discarded — no step.artifact_saved is emitted here.
+                let _ = artifacts.sync();
                 results.push(result);
                 block_idx += 1;
             }
@@ -802,7 +804,9 @@ fn run_single_collect(
                     include_chain: &[],
                 };
                 let (result, pause) = session.execute_browser_slice(spec, block_idx, &ctx, None);
-                artifacts.sync();
+                // Folder mode: no callback, so we don't emit
+                // step.artifact_saved for anything this slice produced.
+                let _ = artifacts.sync();
                 if pause.is_some() {
                     // Folder mode: no --checkpoint, no way to resume. Fail loudly
                     // rather than leak a half-run browser slice.
@@ -1623,7 +1627,35 @@ fn run_single(cfg: RunConfig) {
                 executor::DEFAULT_BLOCK_TIMEOUT,
                 quiet,
             );
-            artifacts.sync();
+            let new_artifacts = artifacts.sync();
+
+            // Emit step.artifact_saved for each new artifact produced by this
+            // block, before step.complete — ordering groups artifacts under
+            // the step that produced them in the run-page timeline. Silent
+            // blocks suppress the events: `{silent}` is a hard off-switch.
+            if let Some(ref cb) = cb {
+                if !block.silent {
+                    for art in &new_artifacts {
+                        cb.step_artifact_saved(
+                            file,
+                            checkpoint_id.as_deref(),
+                            block_idx,
+                            &block.language,
+                            block_heading.as_deref(),
+                            block.line_number,
+                            block_idx + 1,
+                            block_count,
+                            &art.filename,
+                            &art.path.to_string_lossy(),
+                            art.bytes,
+                            art.content_type,
+                            art.label.as_deref(),
+                            art.description.as_deref(),
+                            &include_stack,
+                        );
+                    }
+                }
+            }
             let success = result.success();
 
             // Per-block progress
@@ -1807,7 +1839,35 @@ fn run_single(cfg: RunConfig) {
             let restore = browser_restore.take();
             let (result, pause_info) =
                 session.execute_browser_slice(spec, block_idx, &slice_ctx, restore.as_ref());
-            artifacts.sync();
+            let new_artifacts = artifacts.sync();
+
+            // Emit step.artifact_saved for each artifact this slice produced,
+            // before step.complete (or before the pause path exits). Silent
+            // slices suppress the events; see the code-block site above for
+            // the same pattern.
+            if let Some(ref cb) = cb {
+                if !spec.silent {
+                    for art in &new_artifacts {
+                        cb.step_artifact_saved(
+                            file,
+                            checkpoint_id.as_deref(),
+                            block_idx,
+                            "browser",
+                            block_heading.as_deref(),
+                            spec.line_number,
+                            block_idx + 1,
+                            block_count,
+                            &art.filename,
+                            &art.path.to_string_lossy(),
+                            art.bytes,
+                            art.content_type,
+                            art.label.as_deref(),
+                            art.description.as_deref(),
+                            &include_stack,
+                        );
+                    }
+                }
+            }
 
             if let Some(pause) = pause_info {
                 // pause_browser_slice diverges via std::process::exit, which
