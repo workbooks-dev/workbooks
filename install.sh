@@ -146,9 +146,37 @@ maybe_install_browser_runtime() {
     info "Installing browser runtime (wb-browser-runtime)"
     if npm i -g wb-browser-runtime; then
         info "Browser runtime installed"
+        verify_browser_runtime
     else
         printf "${BOLD}${RED}warn:${RESET} browser runtime install failed. Retry manually: npm i -g wb-browser-runtime\n" >&2
     fi
+}
+
+# Probe the newly-installed runtime with the wb-sidecar/1 handshake:
+# send {"type":"hello"} on stdin, expect {"type":"ready", ...} back.
+# Catches the "installed but broken" case (wrong Node version, PATH
+# shadowing, etc.) that `npm i -g` itself can't detect. Non-fatal — we
+# just warn if the probe fails, since the install already succeeded
+# and the user can retry the probe standalone via
+# scripts/check-browser-runtime.sh from the repo.
+verify_browser_runtime() {
+    if ! command -v wb-browser-runtime > /dev/null 2>&1; then
+        printf "${BOLD}${RED}warn:${RESET} wb-browser-runtime not on \$PATH after install — check that npm's global bin is on your PATH.\n" >&2
+        return 1
+    fi
+    FRAME=$(
+        {
+            printf '{"type":"hello"}\n'
+            sleep 1
+            printf '{"type":"shutdown"}\n'
+        } | wb-browser-runtime 2>/dev/null | head -n 1
+    ) || true
+    if [ -z "$FRAME" ] || ! printf "%s" "$FRAME" | grep -q '"type":"ready"'; then
+        printf "${BOLD}${RED}warn:${RESET} wb-browser-runtime installed but did not respond to the wb-sidecar/1 probe. Node >=24 required.\n" >&2
+        return 1
+    fi
+    VERSION=$(printf "%s" "$FRAME" | grep -o '"version":"[^"]*"' | cut -d'"' -f4)
+    info "Browser runtime ${VERSION:-?} responds OK"
 }
 
 install_binary() {
