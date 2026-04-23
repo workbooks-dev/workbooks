@@ -38,7 +38,7 @@ export function createBrowserUseProvider() {
       // bootstrap, baked into the runbook frontmatter by whatever generates
       // it (UI editor, codegen, hand-authored). The slice envelope carries
       // it through; this provider just forwards.
-      const profileId = profile ?? null;
+      const profileId = profile ?? process.env.BROWSER_USE_PROFILE_ID ?? null;
 
       const body = {};
       if (profileId) body.profileId = profileId;

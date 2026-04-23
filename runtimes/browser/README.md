@@ -42,7 +42,9 @@ at sidecar boot; there is no per-slice override.
   is 60 minutes; unused time is refunded if the session ran less than an hour.
 
 Profile (auth state) is selected per-runbook via the `profile_id:` field on a
-`browser` block — see "Profiles" below.
+`browser` block — see "Profiles" below. `BROWSER_USE_PROFILE_ID` is read as a
+default when the browser block omits `profile_id:`; a per-runbook `profile_id:`
+always wins over the env var.
 
 ## Profiles
 

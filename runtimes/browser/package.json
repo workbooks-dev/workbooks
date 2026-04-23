@@ -1,6 +1,6 @@
 {
   "name": "wb-browser-runtime",
-  "version": "0.8.0",
+  "version": "0.9.0",
   "description": "Browser sidecar runtime for wb — Playwright over CDP (Browserbase, browser-use) via the wb-sidecar/1 line-framed JSON protocol.",
   "bin": {
     "wb-browser-runtime": "bin/wb-browser-runtime.js"

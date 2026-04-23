@@ -20,6 +20,7 @@ import evalVerb from "./eval.js";
 import saveVerb from "./save.js";
 import pauseForHumanVerb from "./pause_for_human.js";
 import waitForDropVerb from "./wait_for_drop.js";
+import announceArtifactVerb from "./announce_artifact.js";
 
 const VERBS = [
   gotoVerb,
@@ -34,6 +35,7 @@ const VERBS = [
   saveVerb,
   pauseForHumanVerb,
   waitForDropVerb,
+  announceArtifactVerb,
 ];
 
 export const VERB_REGISTRY = Object.fromEntries(VERBS.map((v) => [v.name, v]));

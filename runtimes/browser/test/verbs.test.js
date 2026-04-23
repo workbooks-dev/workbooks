@@ -22,7 +22,7 @@ import { createStubPage, captureSendFrames } from "../lib/stub-page.js";
 
 // --- registry shape ---------------------------------------------------------
 
-test("SUPPORTS lists all 12 verbs in expected order", () => {
+test("SUPPORTS lists all 13 verbs in expected order", () => {
   assert.deepEqual(SUPPORTS, [
     "goto",
     "fill",
@@ -36,6 +36,7 @@ test("SUPPORTS lists all 12 verbs in expected order", () => {
     "save",
     "pause_for_human",
     "wait_for_drop",
+    "announce_artifact",
   ]);
 });
 
@@ -357,6 +358,108 @@ test("screenshot picks jpeg type from .jpg extension", async (t) => {
   const page = createStubPage();
   await VERB_REGISTRY.screenshot.execute(page, { path: "photo.jpg" });
   assert.equal(page.calls[0].options.type, "jpeg");
+});
+
+// --- announce_artifact (filesystem sidecar, no network) --------------------
+
+test("announce_artifact writes <path>.meta.json with label", async (t) => {
+  const dir = await withArtifactsDir(t);
+  const summary = await VERB_REGISTRY.announce_artifact.execute(
+    null,
+    { path: "statement.csv", label: "April HSBC statement" },
+  );
+  const written = await readFile(
+    path.join(dir, "statement.csv.meta.json"),
+    "utf8",
+  );
+  assert.deepEqual(JSON.parse(written), { label: "April HSBC statement" });
+  assert.equal(summary, "→ statement.csv (labelled)");
+});
+
+test("announce_artifact includes description when provided", async (t) => {
+  const dir = await withArtifactsDir(t);
+  await VERB_REGISTRY.announce_artifact.execute(null, {
+    path: "statement.csv",
+    label: "April HSBC statement",
+    description: "Reconciled balance export",
+  });
+  const written = JSON.parse(
+    await readFile(path.join(dir, "statement.csv.meta.json"), "utf8"),
+  );
+  assert.equal(written.label, "April HSBC statement");
+  assert.equal(written.description, "Reconciled balance export");
+});
+
+test("announce_artifact does not require the target file to exist", async (t) => {
+  const dir = await withArtifactsDir(t);
+  // No statement.csv yet — pre-writing the sidecar is allowed.
+  await VERB_REGISTRY.announce_artifact.execute(null, {
+    path: "future.csv",
+    label: "Future output",
+  });
+  const written = await readFile(
+    path.join(dir, "future.csv.meta.json"),
+    "utf8",
+  );
+  assert.deepEqual(JSON.parse(written), { label: "Future output" });
+});
+
+test("announce_artifact rejects absolute paths", async (t) => {
+  await withArtifactsDir(t);
+  await assert.rejects(
+    () =>
+      VERB_REGISTRY.announce_artifact.execute(null, {
+        path: "/etc/passwd",
+        label: "nope",
+      }),
+    /absolute paths are not allowed/,
+  );
+});
+
+test("announce_artifact rejects traversal out of artifacts dir", async (t) => {
+  await withArtifactsDir(t);
+  await assert.rejects(
+    () =>
+      VERB_REGISTRY.announce_artifact.execute(null, {
+        path: "../../etc/passwd",
+        label: "nope",
+      }),
+    /escapes artifacts dir/,
+  );
+});
+
+test("announce_artifact requires path", async (t) => {
+  await withArtifactsDir(t);
+  await assert.rejects(
+    () =>
+      VERB_REGISTRY.announce_artifact.execute(null, { label: "x" }),
+    /`path` is required/,
+  );
+});
+
+test("announce_artifact requires label", async (t) => {
+  await withArtifactsDir(t);
+  await assert.rejects(
+    () =>
+      VERB_REGISTRY.announce_artifact.execute(null, { path: "foo.csv" }),
+    /`label` is required/,
+  );
+});
+
+test("announce_artifact fails when WB_ARTIFACTS_DIR is unset", async (t) => {
+  const prev = process.env.WB_ARTIFACTS_DIR;
+  delete process.env.WB_ARTIFACTS_DIR;
+  t.after(() => {
+    if (prev !== undefined) process.env.WB_ARTIFACTS_DIR = prev;
+  });
+  await assert.rejects(
+    () =>
+      VERB_REGISTRY.announce_artifact.execute(null, {
+        path: "x.csv",
+        label: "x",
+      }),
+    /WB_ARTIFACTS_DIR is not set/,
+  );
 });
 
 // --- save (filesystem + send frame) ----------------------------------------
