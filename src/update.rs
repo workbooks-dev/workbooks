@@ -106,12 +106,20 @@ pub fn cmd_version() {
 }
 
 fn fetch_latest_version() -> Result<String, String> {
-    // Use curl to hit GitHub API (avoids adding reqwest as a dependency)
+    // Hit /releases (not /releases/latest) and pick the newest tag that
+    // matches the wb-CLI naming convention (`v<semver>`). The multi-product
+    // repo also ships `browser-runtime-v*` tags; those must be ignored or
+    // the update flow tries to download wb binaries from a release that
+    // has none. GitHub returns releases newest-first, so the first match
+    // wins.
     let output = Command::new("curl")
         .args([
             "-fsSL",
             "-H", "Accept: application/vnd.github.v3+json",
-            &format!("https://api.github.com/repos/{}/releases/latest", REPO),
+            &format!(
+                "https://api.github.com/repos/{}/releases?per_page=30",
+                REPO
+            ),
         ])
         .output()
         .map_err(|e| format!("curl failed: {}", e))?;
@@ -122,21 +130,33 @@ fn fetch_latest_version() -> Result<String, String> {
 
     let body = String::from_utf8_lossy(&output.stdout);
 
-    // Simple JSON extraction — avoid pulling in a JSON parser just for this
-    // Look for "tag_name": "v0.1.0"
+    // Simple JSON extraction — avoid pulling in a JSON parser just for this.
+    // Walk the array and return the first `"tag_name": "v<N>.<N>.<N>..."`
+    // that is NOT prefixed by some other product name (e.g. the
+    // `browser-runtime-v*` tags we also push from this repo).
     for line in body.lines() {
         let line = line.trim();
-        if line.starts_with("\"tag_name\"") {
-            if let Some(start) = line.find(": \"") {
-                let rest = &line[start + 3..];
-                if let Some(end) = rest.find('"') {
-                    return Ok(rest[..end].to_string());
-                }
+        if let Some(rest) = line.strip_prefix("\"tag_name\":") {
+            let rest = rest.trim().trim_start_matches('"');
+            let tag = rest.split('"').next().unwrap_or("");
+            if is_wb_cli_tag(tag) {
+                return Ok(tag.to_string());
             }
         }
     }
 
     Err("could not parse version from GitHub response".to_string())
+}
+
+/// The wb-CLI release tag shape: `v<digit>...`. Anything else (e.g.
+/// `browser-runtime-v0.9.0`) belongs to a sibling product in this repo
+/// and must not be returned to the update flow.
+fn is_wb_cli_tag(tag: &str) -> bool {
+    let mut chars = tag.chars();
+    match (chars.next(), chars.next()) {
+        (Some('v'), Some(c)) if c.is_ascii_digit() => true,
+        _ => false,
+    }
 }
 
 fn download(url: &str, dest: &std::path::Path) -> bool {
@@ -197,5 +217,34 @@ fn detect_arch() -> &'static str {
         "aarch64"
     } else {
         "unknown"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn is_wb_cli_tag_accepts_v_prefixed_versions() {
+        assert!(is_wb_cli_tag("v0.11.0"));
+        assert!(is_wb_cli_tag("v0.1.0"));
+        assert!(is_wb_cli_tag("v1.0.0-rc.1"));
+        assert!(is_wb_cli_tag("v10.0.0"));
+    }
+
+    #[test]
+    fn is_wb_cli_tag_rejects_sibling_product_tags() {
+        assert!(!is_wb_cli_tag("browser-runtime-v0.9.0"));
+        assert!(!is_wb_cli_tag("browser-runtime-v0.8.0"));
+        assert!(!is_wb_cli_tag("sdk-v1.0.0"));
+    }
+
+    #[test]
+    fn is_wb_cli_tag_rejects_garbage() {
+        assert!(!is_wb_cli_tag(""));
+        assert!(!is_wb_cli_tag("v"));
+        assert!(!is_wb_cli_tag("vNext"));
+        assert!(!is_wb_cli_tag("release"));
+        assert!(!is_wb_cli_tag("0.11.0"));
     }
 }
