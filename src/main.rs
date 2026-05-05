@@ -2715,7 +2715,8 @@ fn pause_for_signal(
     // Write pending-signal descriptor next to the checkpoint.
     let mut spec_with_idx = spec.clone();
     spec_with_idx.section_index = section_idx;
-    let desc = pending::build(id, file, block_idx, &spec_with_idx);
+    let cb_for_desc = cb.map(|c| (c.url.as_str(), c.secret.as_deref()));
+    let desc = pending::build(id, file, block_idx, &spec_with_idx, cb_for_desc);
     if let Err(e) = pending::save(id, &desc) {
         eprintln!("warning: pending descriptor: {}", e);
     }
@@ -2805,7 +2806,8 @@ fn pause_browser_slice(
         }
     }
 
-    let desc = pending::build_for_browser_pause(id, file, block_idx, spec, &pause);
+    let cb_for_desc = cb.map(|c| (c.url.as_str(), c.secret.as_deref()));
+    let desc = pending::build_for_browser_pause(id, file, block_idx, spec, &pause, cb_for_desc);
     if let Err(e) = pending::save(id, &desc) {
         eprintln!("warning: pending descriptor: {}", e);
     }
@@ -4034,7 +4036,7 @@ mod tests {
             section_index: 3,
         };
 
-        let desc = pending::build(id, "test-workbook.md", 2, &spec);
+        let desc = pending::build(id, "test-workbook.md", 2, &spec, None);
         assert_eq!(desc.checkpoint_id, id);
         assert_eq!(desc.workbook, "test-workbook.md");
         assert_eq!(desc.next_block, 2);
@@ -4074,7 +4076,7 @@ mod tests {
             line_number: 10,
             section_index: 1,
         };
-        let desc = pending::build("no-timeout", "test.md", 0, &spec);
+        let desc = pending::build("no-timeout", "test.md", 0, &spec, None);
         assert!(desc.timeout_at.is_none());
         assert!(!pending::is_expired(&desc));
     }
@@ -4090,7 +4092,7 @@ mod tests {
             line_number: 5,
             section_index: 2,
         };
-        let mut desc = pending::build("expired-test", "test.md", 0, &spec);
+        let mut desc = pending::build("expired-test", "test.md", 0, &spec, None);
         desc.timeout_at = Some("2020-01-01T00:00:00+00:00".to_string());
         assert!(pending::is_expired(&desc));
     }

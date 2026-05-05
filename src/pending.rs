@@ -60,6 +60,14 @@ pub struct PendingDescriptor {
     /// in `$WB_ARTIFACTS_DIR/pause_result.json` at resume time.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub actions: Vec<serde_json::Value>,
+    /// Callback URL the original `wb run` was invoked with (`--callback`).
+    /// Persisted so timeout reaping can fire `checkpoint.failed` against the
+    /// same endpoint that received the original `workbook.paused` event.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub callback_url: Option<String>,
+    /// HMAC secret paired with `callback_url`. Same persistence reasoning.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub callback_secret: Option<String>,
 }
 
 pub fn descriptor_path(id: &str) -> PathBuf {
@@ -162,6 +170,7 @@ pub fn build(
     workbook: &str,
     next_block: usize,
     spec: &WaitSpec,
+    callback: Option<(&str, Option<&str>)>,
 ) -> PendingDescriptor {
     let now = Utc::now();
     let timeout_at = spec.timeout.as_deref().and_then(|t| {
@@ -172,6 +181,10 @@ pub fn build(
     let ckpt_path = checkpoint::checkpoint_path(checkpoint_id)
         .to_string_lossy()
         .to_string();
+    let (callback_url, callback_secret) = match callback {
+        Some((url, secret)) => (Some(url.to_string()), secret.map(String::from)),
+        None => (None, None),
+    };
     PendingDescriptor {
         checkpoint: ckpt_path,
         checkpoint_id: checkpoint_id.to_string(),
@@ -193,6 +206,8 @@ pub fn build(
         resume_on: None,
         timeout: None,
         actions: Vec::new(),
+        callback_url,
+        callback_secret,
     }
 }
 
@@ -208,6 +223,7 @@ pub fn build_for_browser_pause(
     next_block: usize,
     slice: &crate::parser::BrowserSliceSpec,
     pause: &crate::sidecar::PauseInfo,
+    callback: Option<(&str, Option<&str>)>,
 ) -> PendingDescriptor {
     let now = Utc::now();
     let ckpt_path = checkpoint::checkpoint_path(checkpoint_id)
@@ -226,6 +242,10 @@ pub fn build_for_browser_pause(
     let on_timeout = match pause.resume_on.as_deref() {
         Some("timeout") => Some("abort".to_string()),
         _ => None,
+    };
+    let (callback_url, callback_secret) = match callback {
+        Some((url, secret)) => (Some(url.to_string()), secret.map(String::from)),
+        None => (None, None),
     };
     PendingDescriptor {
         checkpoint: ckpt_path,
@@ -251,6 +271,8 @@ pub fn build_for_browser_pause(
         resume_on: pause.resume_on.clone(),
         timeout: pause.timeout.clone(),
         actions: pause.actions.clone(),
+        callback_url,
+        callback_secret,
     }
 }
 
@@ -312,12 +334,22 @@ pub fn reap_expired() -> Vec<ReapedEntry> {
             }
 
             let mut marked = false;
+            let mut total_blocks: Option<usize> = None;
+            // `we_transitioned` distinguishes "we just moved the checkpoint
+            // into the failed state" from "checkpoint was already terminal" /
+            // "no paired checkpoint". The original-run failure path would
+            // have already emitted checkpoint.failed for an already-terminal
+            // checkpoint, so we suppress the reaper's emission in that case
+            // to avoid duplicates. When there's no checkpoint at all, the
+            // operator never got a callback for this run, so we DO emit.
+            let mut we_transitioned = false;
             match checkpoint::load(&id) {
                 Ok(Some(mut ckpt)) => {
                     // If a concurrent reaper already marked it failed (or a
                     // resume already ran it to completion), don't clobber the
                     // terminal state.
                     use checkpoint::CheckpointStatus;
+                    total_blocks = Some(ckpt.total_blocks);
                     if matches!(
                         ckpt.status,
                         CheckpointStatus::Failed | CheckpointStatus::Complete
@@ -327,13 +359,63 @@ pub fn reap_expired() -> Vec<ReapedEntry> {
                         ckpt.mark_failed();
                         if checkpoint::save(&id, &ckpt).is_ok() {
                             marked = true;
+                            we_transitioned = true;
                         }
                     }
                 }
                 _ => {
-                    // No paired checkpoint — fine, just delete the descriptor.
+                    // No paired checkpoint — fine, just delete the
+                    // descriptor. Still fire the callback below since the
+                    // original run never got a chance to.
+                    we_transitioned = true;
                 }
             }
+
+            // Best-effort: if the original run was started with --callback,
+            // fire `checkpoint.failed` so downstream agents see the timeout
+            // the same way they'd see a bail-on-failure event. Failures here
+            // are non-fatal — we still delete the descriptor below.
+            if we_transitioned {
+                if let Some(url) = desc_now.callback_url.as_deref() {
+                    let cb = crate::callback::CallbackConfig {
+                        url: url.to_string(),
+                        secret: desc_now.callback_secret.clone(),
+                        stream_key: "wb:events".to_string(),
+                        run_id: id.clone(),
+                        seq: std::sync::atomic::AtomicU64::new(0),
+                    };
+                    let total = total_blocks.unwrap_or(desc_now.next_block);
+                    let completed = desc_now.next_block.saturating_sub(1);
+                    let result = crate::executor::BlockResult {
+                        block_index: desc_now.next_block,
+                        language: desc_now
+                            .kind
+                            .clone()
+                            .unwrap_or_else(|| "wait".to_string()),
+                        stdout: String::new(),
+                        stderr: format!(
+                            "wait timed out (timeout_at={})",
+                            desc_now.timeout_at.as_deref().unwrap_or("-")
+                        ),
+                        exit_code: 124,
+                        duration: std::time::Duration::from_secs(0),
+                        error_type: Some("timeout".to_string()),
+                        stdout_partial: false,
+                        stderr_partial: false,
+                    };
+                    cb.checkpoint_failed(
+                        &result,
+                        completed,
+                        total,
+                        &desc_now.workbook,
+                        &id,
+                        None,
+                        desc_now.line_number,
+                        &[],
+                    );
+                }
+            }
+
             let _ = delete(&id);
 
             Some(ReapedEntry {
@@ -439,7 +521,7 @@ mod tests {
     #[test]
     fn test_build_creates_correct_descriptor() {
         let spec = make_wait_spec();
-        let desc = build("ckpt-1", "deploy.md", 2, &spec);
+        let desc = build("ckpt-1", "deploy.md", 2, &spec, None);
 
         assert_eq!(desc.checkpoint_id, "ckpt-1");
         assert_eq!(desc.workbook, "deploy.md");
@@ -486,7 +568,7 @@ mod tests {
             line_number: 10,
             section_index: 1,
         };
-        let desc = build("ckpt-2", "manual.md", 1, &spec);
+        let desc = build("ckpt-2", "manual.md", 1, &spec, None);
         assert!(desc.timeout_at.is_none());
         assert!(desc.on_timeout.is_none());
         assert!(desc.bind.is_none());
@@ -496,7 +578,7 @@ mod tests {
     fn test_save_and_load_roundtrip() {
         let id = unique_id("test_pending_roundtrip");
         let spec = make_wait_spec();
-        let desc = build(&id, "deploy.md", 2, &spec);
+        let desc = build(&id, "deploy.md", 2, &spec, None);
 
         save(&id, &desc).expect("save should succeed");
         let loaded = load(&id)
@@ -527,7 +609,7 @@ mod tests {
     fn test_delete_removes_descriptor() {
         let id = unique_id("test_pending_delete");
         let spec = make_wait_spec();
-        let desc = build(&id, "deploy.md", 2, &spec);
+        let desc = build(&id, "deploy.md", 2, &spec, None);
 
         save(&id, &desc).expect("save should succeed");
         // Confirm it exists
@@ -567,6 +649,8 @@ mod tests {
             resume_on: None,
             timeout: None,
             actions: Vec::new(),
+            callback_url: None,
+            callback_secret: None,
         };
         assert!(is_expired(&desc));
     }
@@ -595,6 +679,8 @@ mod tests {
             resume_on: None,
             timeout: None,
             actions: Vec::new(),
+            callback_url: None,
+            callback_secret: None,
         };
         assert!(!is_expired(&desc));
     }
@@ -622,6 +708,8 @@ mod tests {
             resume_on: None,
             timeout: None,
             actions: Vec::new(),
+            callback_url: None,
+            callback_secret: None,
         };
         assert!(!is_expired(&desc));
     }
@@ -649,6 +737,8 @@ mod tests {
             resume_on: None,
             timeout: None,
             actions: Vec::new(),
+            callback_url: None,
+            callback_secret: None,
         };
         let s = summarize("my-run", &desc);
         assert!(s.contains("my-run"), "should contain id");
@@ -685,6 +775,8 @@ mod tests {
             resume_on: None,
             timeout: None,
             actions: Vec::new(),
+            callback_url: None,
+            callback_secret: None,
         };
         let s = summarize("run-2", &desc);
         assert!(s.contains("code,sender"), "should contain joined bind vars");
@@ -714,6 +806,8 @@ mod tests {
             resume_on: None,
             timeout: None,
             actions: Vec::new(),
+            callback_url: None,
+            callback_secret: None,
         };
         let s = summarize("old-run", &desc);
         assert!(s.contains("[EXPIRED]"), "should show expired marker");
@@ -742,6 +836,8 @@ mod tests {
             resume_on: None,
             timeout: None,
             actions: Vec::new(),
+            callback_url: None,
+            callback_secret: None,
         };
         let s = summarize("bare", &desc);
         // kind defaults to "-", bind defaults to "-"
@@ -759,8 +855,8 @@ mod tests {
             kind: Some("manual".to_string()),
             ..WaitSpec::default()
         };
-        let desc_a = build(&id_a, "a.md", 1, &spec);
-        let desc_b = build(&id_b, "b.md", 2, &spec);
+        let desc_a = build(&id_a, "a.md", 1, &spec, None);
+        let desc_b = build(&id_b, "b.md", 2, &spec, None);
 
         save(&id_a, &desc_a).expect("save a");
         save(&id_b, &desc_b).expect("save b");
@@ -806,6 +902,8 @@ mod tests {
             resume_on: None,
             timeout: None,
             actions: Vec::new(),
+            callback_url: None,
+            callback_secret: None,
         }
     }
 
@@ -1105,7 +1203,7 @@ mod tests {
             timeout: Some("1h".into()),
             actions: vec![serde_json::json!({"label": "OK", "value": "ok"})],
         };
-        let desc = build_for_browser_pause("ckpt-1", "t.md", 5, &slice, &pause);
+        let desc = build_for_browser_pause("ckpt-1", "t.md", 5, &slice, &pause, None);
         assert_eq!(desc.checkpoint_id, "ckpt-1");
         assert_eq!(desc.next_block, 5);
         assert_eq!(desc.line_number, 17);
@@ -1137,7 +1235,7 @@ mod tests {
             timeout: Some("30s".into()),
             ..Default::default()
         };
-        let desc = build_for_browser_pause("ckpt-1", "t.md", 0, &slice, &pause);
+        let desc = build_for_browser_pause("ckpt-1", "t.md", 0, &slice, &pause, None);
         assert_eq!(desc.on_timeout.as_deref(), Some("abort"));
         assert!(desc.timeout_at.is_some());
     }
@@ -1154,7 +1252,7 @@ mod tests {
             actions: vec![serde_json::json!({"label": "Go", "value": 1})],
             ..Default::default()
         };
-        let desc = build_for_browser_pause("ckpt-rt", "t.md", 0, &slice, &pause);
+        let desc = build_for_browser_pause("ckpt-rt", "t.md", 0, &slice, &pause, None);
         let serialized = serde_json::to_string(&desc).expect("serialize");
         let back: PendingDescriptor = serde_json::from_str(&serialized).expect("deserialize");
         assert_eq!(back.message.as_deref(), Some("m"));
@@ -1183,5 +1281,160 @@ mod tests {
         assert_eq!(desc.checkpoint_id, "ckpt-old");
         assert!(desc.message.is_none());
         assert!(desc.actions.is_empty());
+        // The new callback persistence fields default to None for legacy
+        // descriptors written before this feature shipped.
+        assert!(desc.callback_url.is_none());
+        assert!(desc.callback_secret.is_none());
+    }
+
+    #[test]
+    fn test_build_persists_callback_url_and_secret() {
+        let spec = make_wait_spec();
+        let desc = build(
+            "ckpt-cb",
+            "deploy.md",
+            2,
+            &spec,
+            Some(("https://hooks.example.com/wb", Some("topsecret"))),
+        );
+        assert_eq!(
+            desc.callback_url.as_deref(),
+            Some("https://hooks.example.com/wb")
+        );
+        assert_eq!(desc.callback_secret.as_deref(), Some("topsecret"));
+    }
+
+    #[test]
+    fn test_build_no_callback_leaves_fields_none() {
+        let spec = make_wait_spec();
+        let desc = build("ckpt-nocb", "deploy.md", 2, &spec, None);
+        assert!(desc.callback_url.is_none());
+        assert!(desc.callback_secret.is_none());
+    }
+
+    #[test]
+    fn test_callback_fields_round_trip_through_json() {
+        let spec = make_wait_spec();
+        let desc = build(
+            "ckpt-rt-cb",
+            "w.md",
+            1,
+            &spec,
+            Some(("https://hooks.example.com/wb", Some("s"))),
+        );
+        let serialized = serde_json::to_string(&desc).expect("serialize");
+        // skip_serializing_if keeps the JSON tight — but the values must
+        // survive a load round-trip.
+        let back: PendingDescriptor = serde_json::from_str(&serialized).expect("deserialize");
+        assert_eq!(
+            back.callback_url.as_deref(),
+            Some("https://hooks.example.com/wb")
+        );
+        assert_eq!(back.callback_secret.as_deref(), Some("s"));
+    }
+
+    #[test]
+    fn test_reap_expired_fires_checkpoint_failed_callback() {
+        // Bind an ephemeral port and accept one connection. The reaper
+        // should POST `checkpoint.failed` to the listener when it sweeps
+        // an expired descriptor whose callback_url is set.
+        use std::io::Read;
+        use std::net::TcpListener;
+        use std::sync::mpsc;
+        use std::thread;
+        use std::time::Duration as StdDuration;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
+        let port = listener.local_addr().expect("local_addr").port();
+        let url = format!("http://127.0.0.1:{}/hook", port);
+
+        let (tx, rx) = mpsc::channel::<String>();
+        let handle = thread::spawn(move || {
+            listener
+                .set_nonblocking(false)
+                .expect("set blocking");
+            // Accept one connection — the reaper's curl call.
+            if let Ok((mut stream, _)) = listener.accept() {
+                let _ = stream.set_read_timeout(Some(StdDuration::from_secs(2)));
+                let mut buf = [0u8; 8192];
+                let mut accumulated = String::new();
+                // Read what we can; curl will close the write half once it's
+                // done sending. We don't need the full body — headers are
+                // enough to verify the event.
+                loop {
+                    match stream.read(&mut buf) {
+                        Ok(0) => break,
+                        Ok(n) => {
+                            accumulated.push_str(&String::from_utf8_lossy(&buf[..n]));
+                            // Once we've seen the headers' double-CRLF we
+                            // can stop — payload is large but the headers
+                            // are what we check.
+                            if accumulated.contains("\r\n\r\n") {
+                                break;
+                            }
+                        }
+                        Err(_) => break,
+                    }
+                }
+                // Minimal HTTP/1.1 response so curl returns a 2xx.
+                use std::io::Write;
+                let _ = stream.write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok",
+                );
+                let _ = tx.send(accumulated);
+            }
+        });
+
+        // Build an expired descriptor that points at the listener.
+        let id = unique_id("test_reap_callback");
+        let mut desc = expired_desc(&id, "deploy.md", Some("abort"));
+        desc.callback_url = Some(url.clone());
+        desc.callback_secret = Some("hmackey".to_string());
+        save(&id, &desc).expect("save");
+
+        // Save a checkpoint so reap_expired marks it failed (and exercises
+        // the total_blocks branch of the reaper).
+        let ckpt = checkpoint::Checkpoint::new("deploy.md", 5);
+        checkpoint::save(&id, &ckpt).expect("save ckpt");
+
+        let _ = reap_expired();
+
+        // Wait briefly for the listener thread to relay what it saw.
+        let received = rx
+            .recv_timeout(StdDuration::from_secs(5))
+            .expect("listener should receive a request");
+        let _ = handle.join();
+
+        assert!(
+            received.contains("X-WB-Event: checkpoint.failed"),
+            "expected X-WB-Event: checkpoint.failed header, got:\n{}",
+            received
+        );
+        // HMAC signature header is present when secret is set.
+        assert!(
+            received.contains("X-WB-Signature: sha256="),
+            "expected signed payload, got:\n{}",
+            received
+        );
+
+        // Descriptor still gone after callback fired.
+        assert!(load(&id).expect("load").is_none());
+        let _ = checkpoint::delete(&id);
+    }
+
+    #[test]
+    fn test_reap_expired_without_callback_url_does_not_panic() {
+        // Sanity: descriptor without a callback_url means no HTTP call.
+        // The reap should still mark the checkpoint failed and delete the
+        // descriptor.
+        let id = unique_id("test_reap_no_cb_url");
+        let ckpt = checkpoint::Checkpoint::new("deploy.md", 1);
+        checkpoint::save(&id, &ckpt).expect("save ckpt");
+        let desc = expired_desc(&id, "deploy.md", Some("abort"));
+        save(&id, &desc).expect("save");
+
+        let _ = reap_expired();
+        assert!(load(&id).expect("load").is_none());
+        let _ = checkpoint::delete(&id);
     }
 }
