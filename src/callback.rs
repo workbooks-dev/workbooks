@@ -1,10 +1,11 @@
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use chrono::Utc;
 use hmac::{Hmac, Mac};
 use serde_json::json;
-use sha2::Sha256;
+use sha2::{Digest, Sha256};
 
 use crate::executor::BlockResult;
 use crate::parser::IncludeFrame;
@@ -214,6 +215,29 @@ pub struct CallbackConfig {
     /// the result artifact's `run_id` field so a dashboard can join across
     /// callbacks + final report without extra plumbing.
     pub run_id: String,
+    /// Per-CallbackConfig monotonic counter stamped on every HTTP callback as
+    /// `X-WB-Sequence`. Receivers use it (combined with `run_id`) to reorder
+    /// events that arrived out-of-order across retries / processes. First
+    /// emitted event is sequence 1. Counter is per-process (not persisted) —
+    /// receivers should always tie sequence to `run_id` when sorting.
+    pub seq: AtomicU64,
+}
+
+/// Compute the stable idempotency key for a logical event delivery.
+///
+/// Hashes `(event, identity, sequence)` where `identity` is the most stable
+/// run-correlation id we have (`run_id`). The sequence is the per-logical-event
+/// sequence number — fixed across HTTP retries of the same event so receivers
+/// can dedup retries that succeeded the first time but got re-POSTed.
+fn idempotency_key(event: &str, identity: &str, sequence: u64) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(event.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(identity.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(sequence.to_string().as_bytes());
+    let digest = hasher.finalize();
+    digest.iter().map(|b| format!("{:02x}", b)).collect()
 }
 
 impl CallbackConfig {
@@ -504,12 +528,30 @@ impl CallbackConfig {
             )
         });
 
+        // Reserve the per-CallbackConfig sequence + derive the idempotency key
+        // ONCE per logical event so retries of the same event share both
+        // values. Receivers use sequence to reorder, and idempotency key to
+        // dedup retries that may have already been delivered upstream.
+        let sequence = self.seq.fetch_add(1, Ordering::Relaxed) + 1;
+        let seq_header = format!("X-WB-Sequence: {}", sequence);
+        let idem_header = format!(
+            "X-WB-Idempotency-Key: {}",
+            idempotency_key(event, &self.run_id, sequence)
+        );
+
         for (attempt, delay) in HTTP_RETRY_DELAYS.iter().enumerate() {
             if *delay > Duration::ZERO {
                 std::thread::sleep(*delay);
             }
             let is_last = attempt + 1 == HTTP_RETRY_DELAYS.len();
-            match try_send_http_once(&self.url, &event_header, sig_header.as_deref(), payload) {
+            match try_send_http_once(
+                &self.url,
+                &event_header,
+                sig_header.as_deref(),
+                &seq_header,
+                &idem_header,
+                payload,
+            ) {
                 HttpSendResult::Ok => return,
                 HttpSendResult::ClientError(code) => {
                     // 4xx — receiver says we're wrong; retrying won't help.
@@ -596,6 +638,8 @@ fn try_send_http_once(
     url: &str,
     event_header: &str,
     sig_header: Option<&str>,
+    seq_header: &str,
+    idem_header: &str,
     payload: &str,
 ) -> HttpSendResult {
     let mut args: Vec<&str> = vec![
@@ -612,6 +656,10 @@ fn try_send_http_once(
         "Content-Type: application/json",
         "-H",
         event_header,
+        "-H",
+        seq_header,
+        "-H",
+        idem_header,
     ];
 
     if let Some(sh) = sig_header {
@@ -663,6 +711,7 @@ mod tests {
             secret: None,
             stream_key: "wb:events".to_string(),
             run_id: "test-run".to_string(),
+            seq: AtomicU64::new(0),
         };
         assert!(!http_cb.is_redis());
 
@@ -671,6 +720,7 @@ mod tests {
             secret: None,
             stream_key: "wb:events".to_string(),
             run_id: "test-run".to_string(),
+            seq: AtomicU64::new(0),
         };
         assert!(redis_cb.is_redis());
 
@@ -679,6 +729,7 @@ mod tests {
             secret: None,
             stream_key: "wb:events".to_string(),
             run_id: "test-run".to_string(),
+            seq: AtomicU64::new(0),
         };
         assert!(redis_plain.is_redis());
     }
@@ -690,6 +741,7 @@ mod tests {
             secret: Some("mysecret".to_string()),
             stream_key: "wb:events".to_string(),
             run_id: "test-run".to_string(),
+            seq: AtomicU64::new(0),
         };
         assert!(!cb.is_redis());
     }
@@ -1062,5 +1114,151 @@ mod tests {
 
         let stderr = payload["block"]["stderr"].as_str().unwrap();
         assert_eq!(stderr, "<binary: 11 bytes>");
+    }
+
+    #[test]
+    fn test_idempotency_key_is_stable_for_same_inputs() {
+        // Same (event, identity, sequence) → same key. This is the property
+        // receivers rely on to dedup retries of an already-delivered event.
+        let k1 = idempotency_key("step.complete", "run-abc", 7);
+        let k2 = idempotency_key("step.complete", "run-abc", 7);
+        assert_eq!(k1, k2);
+        // sha256 hex output is 64 chars.
+        assert_eq!(k1.len(), 64);
+        assert!(k1.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn test_idempotency_key_changes_with_sequence() {
+        // Different sequence → different key (so two distinct logical events
+        // for the same run can be told apart even if event+run_id match).
+        let a = idempotency_key("step.complete", "run-abc", 1);
+        let b = idempotency_key("step.complete", "run-abc", 2);
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn test_idempotency_key_changes_with_event_or_identity() {
+        let base = idempotency_key("step.complete", "run-abc", 1);
+        assert_ne!(base, idempotency_key("run.complete", "run-abc", 1));
+        assert_ne!(base, idempotency_key("step.complete", "run-xyz", 1));
+    }
+
+    #[test]
+    fn test_sequence_monotonic_per_callback_config() {
+        // Per-process per-CallbackConfig counter: the first event is sequence
+        // 1, and successive emissions are strictly increasing.
+        let cb = CallbackConfig {
+            url: "http://localhost:9/null".to_string(),
+            secret: None,
+            stream_key: "wb:events".to_string(),
+            run_id: "run-seq".to_string(),
+            seq: AtomicU64::new(0),
+        };
+        let mut seen = Vec::new();
+        for _ in 0..5 {
+            let s = cb.seq.fetch_add(1, Ordering::Relaxed) + 1;
+            seen.push(s);
+        }
+        assert_eq!(seen, vec![1, 2, 3, 4, 5]);
+        for w in seen.windows(2) {
+            assert!(w[1] > w[0], "sequence must be strictly increasing");
+        }
+    }
+
+    #[test]
+    fn test_two_callback_configs_have_independent_sequences() {
+        // Sequence is per-CallbackConfig (not per-process global) so two
+        // separate runs don't interleave numbers.
+        let mk = |run: &str| CallbackConfig {
+            url: "http://localhost:9/null".to_string(),
+            secret: None,
+            stream_key: "wb:events".to_string(),
+            run_id: run.to_string(),
+            seq: AtomicU64::new(0),
+        };
+        let a = mk("run-a");
+        let b = mk("run-b");
+        let s1 = a.seq.fetch_add(1, Ordering::Relaxed) + 1;
+        let s2 = a.seq.fetch_add(1, Ordering::Relaxed) + 1;
+        let t1 = b.seq.fetch_add(1, Ordering::Relaxed) + 1;
+        assert_eq!(s1, 1);
+        assert_eq!(s2, 2);
+        assert_eq!(t1, 1);
+    }
+
+    #[test]
+    fn test_http_callback_emits_sequence_and_idempotency_headers() {
+        // Spin a single-shot TCP listener, fire one HTTP callback, parse the
+        // request line + headers, and assert both new headers are present.
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::thread;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind ephemeral");
+        let port = listener.local_addr().unwrap().port();
+
+        let server = thread::spawn(move || {
+            let (mut stream, _addr) = listener.accept().expect("accept");
+            // Read enough to capture all headers + body. 8 KiB is plenty for
+            // the small JSON payload we send.
+            let mut buf = [0u8; 8192];
+            let n = stream.read(&mut buf).expect("read req");
+            let req = String::from_utf8_lossy(&buf[..n]).to_string();
+            // Reply 200 so the client doesn't retry.
+            let _ = stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+                .map_err(|e| eprintln!("write resp: {}", e));
+            let _ = stream.shutdown(std::net::Shutdown::Both);
+            req
+        });
+
+        let cb = CallbackConfig {
+            url: format!("http://127.0.0.1:{}/hook", port),
+            secret: None,
+            stream_key: "wb:events".to_string(),
+            run_id: "run-headers".to_string(),
+            seq: AtomicU64::new(0),
+        };
+        cb.send_http("run.complete", r#"{"event":"run.complete"}"#);
+
+        let req = server.join().expect("server thread");
+
+        // Parse just the header block (everything before the blank-line CRLF).
+        let header_block = req
+            .split("\r\n\r\n")
+            .next()
+            .expect("request has header block");
+
+        let mut seq_value: Option<String> = None;
+        let mut idem_value: Option<String> = None;
+        let mut event_value: Option<String> = None;
+        for line in header_block.split("\r\n") {
+            if let Some(v) = line.strip_prefix("X-WB-Sequence: ") {
+                seq_value = Some(v.trim().to_string());
+            } else if let Some(v) = line.strip_prefix("X-WB-Idempotency-Key: ") {
+                idem_value = Some(v.trim().to_string());
+            } else if let Some(v) = line.strip_prefix("X-WB-Event: ") {
+                event_value = Some(v.trim().to_string());
+            }
+        }
+
+        assert_eq!(event_value.as_deref(), Some("run.complete"));
+        assert_eq!(
+            seq_value.as_deref(),
+            Some("1"),
+            "first emitted event should be sequence 1; got headers:\n{}",
+            header_block
+        );
+        let idem = idem_value.expect("X-WB-Idempotency-Key header must be present");
+        // sha256 hex = 64 chars, all hex digits.
+        assert_eq!(idem.len(), 64, "idempotency key should be sha256 hex");
+        assert!(idem.chars().all(|c| c.is_ascii_hexdigit()));
+        // And it must equal the deterministic value we'd expect for these inputs.
+        assert_eq!(
+            idem,
+            idempotency_key("run.complete", "run-headers", 1),
+            "header idempotency key must match the helper for the same inputs"
+        );
     }
 }

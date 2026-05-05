@@ -1456,6 +1456,7 @@ fn resolve_callback_config(
         secret,
         stream_key,
         run_id: run_id.to_string(),
+        seq: std::sync::atomic::AtomicU64::new(0),
     })
 }
 
