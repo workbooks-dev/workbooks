@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
+use fs4::fs_std::FileExt;
 use serde::{Deserialize, Serialize};
 
 use crate::checkpoint;
@@ -63,6 +64,43 @@ pub struct PendingDescriptor {
 
 pub fn descriptor_path(id: &str) -> PathBuf {
     checkpoint::checkpoint_dir().join(format!("{}.pending.json", id))
+}
+
+/// Path to the per-id sidecar lock file used to serialize reap operations.
+/// We lock a sibling `.lock` file rather than the descriptor itself because the
+/// descriptor is deleted as part of reaping — locking a file you're about to
+/// remove is fragile (the lock fd is still held but the inode is gone, and
+/// readers via `descriptor_path` race the unlink).
+fn reap_lock_path(id: &str) -> PathBuf {
+    checkpoint::checkpoint_dir().join(format!("{}.pending.reap.lock", id))
+}
+
+/// Acquire a per-id exclusive advisory lock on a sidecar `.lock` file, run the
+/// closure, then release the lock (via Drop). Concurrent reapers serialize on
+/// the same id; reapers for different ids don't contend.
+///
+/// The lock file is left in place across calls — it's a tiny zero-byte file
+/// and creating/removing it on every reap would re-introduce races. It lives
+/// next to the checkpoint state in `~/.wb/checkpoints/`.
+fn with_pending_lock<F, T>(id: &str, f: F) -> std::io::Result<T>
+where
+    F: FnOnce() -> T,
+{
+    let dir = checkpoint::checkpoint_dir();
+    std::fs::create_dir_all(&dir)?;
+    let path = reap_lock_path(id);
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(&path)?;
+    FileExt::lock_exclusive(&file)?;
+    let result = f();
+    // Explicit unlock; Drop on the File would also release, but being explicit
+    // makes the lifetime obvious.
+    let _ = FileExt::unlock(&file);
+    Ok(result)
 }
 
 pub fn save(id: &str, desc: &PendingDescriptor) -> Result<(), String> {
@@ -249,23 +287,71 @@ pub fn reap_expired() -> Vec<ReapedEntry> {
             continue;
         }
 
-        let mut marked = false;
-        if let Ok(Some(mut ckpt)) = checkpoint::load(&id) {
-            ckpt.mark_failed();
-            if checkpoint::save(&id, &ckpt).is_ok() {
-                marked = true;
+        // Take a per-id exclusive lock so two concurrent `wb pending` runs
+        // (cron + manual, two CI processes, two threads) don't both load,
+        // mark, and delete the same descriptor. The race window is short but
+        // the cost of double-reaping is real: spurious ReapedEntry rows in
+        // both callers' output, two `mark_failed` saves, two delete syscalls,
+        // and a ckpt re-save after another writer that may have rerun the
+        // checkpoint into a non-terminal state.
+        let lock_outcome = with_pending_lock(&id, || -> Option<ReapedEntry> {
+            // Re-check inside the lock — another reaper may have just
+            // finished. If the descriptor file is gone, skip silently.
+            let desc_now = match load(&id) {
+                Ok(Some(d)) => d,
+                _ => return None,
+            };
+            // Another reaper might also have raced an in-place edit; re-honor
+            // the same expiry/mode filters under the lock.
+            if !is_expired(&desc_now) {
+                return None;
             }
-        }
-        let _ = delete(&id);
+            let mode_now = desc_now.on_timeout.as_deref().unwrap_or("abort");
+            if mode_now == "skip" || mode_now == "prompt" {
+                return None;
+            }
 
-        reaped.push(ReapedEntry {
-            id: id.clone(),
-            workbook: desc.workbook.clone(),
-            kind: desc.kind.clone(),
-            on_timeout: desc.on_timeout.clone(),
-            timeout_at: desc.timeout_at.clone(),
-            checkpoint_marked_failed: marked,
+            let mut marked = false;
+            match checkpoint::load(&id) {
+                Ok(Some(mut ckpt)) => {
+                    // If a concurrent reaper already marked it failed (or a
+                    // resume already ran it to completion), don't clobber the
+                    // terminal state.
+                    use checkpoint::CheckpointStatus;
+                    if matches!(
+                        ckpt.status,
+                        CheckpointStatus::Failed | CheckpointStatus::Complete
+                    ) {
+                        marked = ckpt.status == CheckpointStatus::Failed;
+                    } else {
+                        ckpt.mark_failed();
+                        if checkpoint::save(&id, &ckpt).is_ok() {
+                            marked = true;
+                        }
+                    }
+                }
+                _ => {
+                    // No paired checkpoint — fine, just delete the descriptor.
+                }
+            }
+            let _ = delete(&id);
+
+            Some(ReapedEntry {
+                id: id.clone(),
+                workbook: desc_now.workbook.clone(),
+                kind: desc_now.kind.clone(),
+                on_timeout: desc_now.on_timeout.clone(),
+                timeout_at: desc_now.timeout_at.clone(),
+                checkpoint_marked_failed: marked,
+            })
         });
+
+        if let Ok(Some(entry)) = lock_outcome {
+            reaped.push(entry);
+        }
+        // If lock acquisition failed (rare: I/O error opening the lock file),
+        // we silently skip this id. The reap is best-effort and a future
+        // `wb pending` invocation will retry.
     }
     reaped
 }
@@ -891,6 +977,110 @@ mod tests {
         }
         // Post-condition holds regardless of which parallel call reaped it.
         assert!(load(&id).expect("load").is_none());
+    }
+
+    #[test]
+    fn test_reap_concurrent_reapers_partition_ids() {
+        // Two threads call `reap_expired()` simultaneously over the same set
+        // of expired descriptors. Without the per-id lock, both threads can
+        // race the load → mark_failed → save → delete sequence and both push
+        // a `ReapedEntry` for the same id. With the lock, each id is reaped
+        // exactly once: its ReapedEntry appears in at most one thread's
+        // result, never both.
+        //
+        // Note: `reap_expired` scans the shared checkpoint dir, so other
+        // parallel tests' reapers may also claim our descriptors (the
+        // existing single-id reap tests do unconditional `reap_expired()`
+        // calls and pick up anything expired). We filter both to our prefix
+        // and to whatever survived parallel test pressure, and then assert
+        // the load-bearing race property: no id appears in both threads'
+        // results.
+        use std::collections::HashSet;
+        use std::sync::Arc;
+        use std::sync::Barrier;
+
+        let prefix = unique_id("test_reap_concurrent");
+        const N: usize = 5;
+        let mut our_ids: HashSet<String> = HashSet::new();
+        for n in 0..N {
+            let id = format!("{}_{}", prefix, n);
+            // Pair each pending with a checkpoint so the load/mark_failed/save
+            // path inside the lock actually does work — that's the side that
+            // races without locking.
+            let ckpt = checkpoint::Checkpoint::new("race.md", 1);
+            checkpoint::save(&id, &ckpt).expect("save ckpt");
+            let desc = expired_desc(&id, "race.md", Some("abort"));
+            save(&id, &desc).expect("save pending");
+            our_ids.insert(id);
+        }
+
+        // Barrier ensures both threads enter `reap_expired` close enough in
+        // time to genuinely race on the same descriptors.
+        let barrier = Arc::new(Barrier::new(2));
+        let b1 = Arc::clone(&barrier);
+        let b2 = Arc::clone(&barrier);
+
+        let t1 = std::thread::spawn(move || {
+            b1.wait();
+            reap_expired()
+        });
+        let t2 = std::thread::spawn(move || {
+            b2.wait();
+            reap_expired()
+        });
+
+        let r1 = t1.join().expect("t1 join");
+        let r2 = t2.join().expect("t2 join");
+
+        let r1_ours: HashSet<String> = r1
+            .iter()
+            .filter(|e| our_ids.contains(&e.id))
+            .map(|e| e.id.clone())
+            .collect();
+        let r2_ours: HashSet<String> = r2
+            .iter()
+            .filter(|e| our_ids.contains(&e.id))
+            .map(|e| e.id.clone())
+            .collect();
+
+        // Load-bearing assertion: each id must appear in *at most one*
+        // thread's result. The lock serializes reapers so the loser sees the
+        // descriptor already gone and skips it (no spurious ReapedEntry).
+        // Without the lock, both threads happily push the same id.
+        let intersection: HashSet<&String> = r1_ours.intersection(&r2_ours).collect();
+        assert!(
+            intersection.is_empty(),
+            "id reaped by both threads (lock failed): {:?}",
+            intersection
+        );
+
+        // Sanity: at least *some* of our ids were reaped between the two
+        // threads (we created 5; even if other parallel tests stole a few,
+        // at least one of ours should land in our threads' results, since
+        // those threads run concurrently with whatever else is going on).
+        // This guards against a future change that accidentally short-
+        // circuits the reaper for our prefix.
+        let our_reaped_count = r1_ours.len() + r2_ours.len();
+        assert!(
+            our_reaped_count >= 1,
+            "neither thread reaped any of our {} ids — reaper short-circuited?",
+            N
+        );
+
+        // Post-condition: every descriptor we created is gone from disk,
+        // regardless of which reaper (ours or a sibling test's) cleaned it up.
+        for id in &our_ids {
+            assert!(
+                load(id).expect("load").is_none(),
+                "descriptor {} survived concurrent reap",
+                id
+            );
+        }
+
+        // Cleanup checkpoints (descriptors are already gone).
+        for id in &our_ids {
+            let _ = checkpoint::delete(id);
+        }
     }
 
     fn make_browser_slice_spec() -> parser::BrowserSliceSpec {
