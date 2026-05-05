@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::Duration;
 
 use chrono::Utc;
@@ -85,7 +85,13 @@ impl Checkpoint {
         self.updated_at = Utc::now().to_rfc3339();
     }
 
-    pub fn add_result(&mut self, result: &BlockResult, line_number: usize, heading: Option<&str>, code: &str) {
+    pub fn add_result(
+        &mut self,
+        result: &BlockResult,
+        line_number: usize,
+        heading: Option<&str>,
+        code: &str,
+    ) {
         self.results.push(SavedResult {
             block_index: result.block_index,
             language: result.language.clone(),
@@ -137,8 +143,38 @@ pub fn hash_code(code: &str) -> String {
 }
 
 pub fn checkpoint_dir() -> PathBuf {
+    if let Ok(dir) = std::env::var("WB_CHECKPOINT_DIR") {
+        if !dir.trim().is_empty() {
+            return PathBuf::from(dir);
+        }
+    }
+    default_checkpoint_dir()
+}
+
+#[cfg(not(test))]
+fn default_checkpoint_dir() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    Path::new(&home).join(".wb").join("checkpoints")
+    std::path::Path::new(&home).join(".wb").join("checkpoints")
+}
+
+#[cfg(test)]
+fn default_checkpoint_dir() -> PathBuf {
+    use std::sync::OnceLock;
+
+    static TEST_DIR: OnceLock<PathBuf> = OnceLock::new();
+    TEST_DIR
+        .get_or_init(|| {
+            let nanos = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0);
+            std::env::temp_dir().join(format!(
+                "wb_test_checkpoints_{}_{}",
+                std::process::id(),
+                nanos
+            ))
+        })
+        .clone()
 }
 
 pub fn checkpoint_path(id: &str) -> PathBuf {
@@ -157,8 +193,8 @@ pub fn save(id: &str, checkpoint: &Checkpoint) -> Result<(), String> {
     let dir = checkpoint_dir();
     std::fs::create_dir_all(&dir).map_err(|e| format!("create checkpoint dir: {}", e))?;
     let path = checkpoint_path(id);
-    let json =
-        serde_json::to_string_pretty(checkpoint).map_err(|e| format!("serialize checkpoint: {}", e))?;
+    let json = serde_json::to_string_pretty(checkpoint)
+        .map_err(|e| format!("serialize checkpoint: {}", e))?;
     crate::atomic_io::write_secret_file(&path, json.as_bytes())
         .map_err(|e| format!("write checkpoint: {}", e))?;
     Ok(())
@@ -229,14 +265,18 @@ mod tests {
     fn test_bound_vars_persist_through_save_load() {
         let id = unique_id("test_ckpt_bound_vars");
         let mut ckpt = Checkpoint::new("test.md", 3);
-        ckpt.bound_vars.insert("otp_code".to_string(), "123456".to_string());
-        ckpt.bound_vars.insert("sender".to_string(), "auth@example.com".to_string());
+        ckpt.bound_vars
+            .insert("otp_code".to_string(), "123456".to_string());
+        ckpt.bound_vars
+            .insert("sender".to_string(), "auth@example.com".to_string());
         ckpt.waits_completed.push(1);
         ckpt.waits_completed.push(4);
         ckpt.mark_paused();
 
         save(&id, &ckpt).expect("save should succeed");
-        let loaded = load(&id).expect("load should not error").expect("should find checkpoint");
+        let loaded = load(&id)
+            .expect("load should not error")
+            .expect("should find checkpoint");
 
         assert_eq!(loaded.bound_vars.get("otp_code").unwrap(), "123456");
         assert_eq!(loaded.bound_vars.get("sender").unwrap(), "auth@example.com");

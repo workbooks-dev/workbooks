@@ -2,8 +2,11 @@ mod artifacts;
 mod atomic_io;
 mod callback;
 mod checkpoint;
-mod exit_codes;
+mod diagnostic;
+mod doctor;
 mod executor;
+mod exit;
+mod exit_codes;
 mod output;
 mod parser;
 mod pending;
@@ -11,7 +14,9 @@ mod sandbox;
 mod secrets;
 mod sidecar;
 mod signal;
+mod step_ir;
 mod update;
+mod validate;
 
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -78,199 +83,360 @@ fn execute_block_with_policy(
     }
 }
 
-use clap::Parser;
+use clap::{Parser, Subcommand};
+use exit::WbExit;
 use output::OutputFormat;
 
-#[derive(Parser)]
-#[command(name = "wb", version, about = "Run markdown workbooks")]
-struct Cli {
-    /// Path to a markdown file or folder of workbooks
-    file: Option<String>,
+// ─── Per-subcommand arg structs ───────────────────────────────────────────────
 
-    /// Output file (format inferred from extension: .json, .yaml, .md)
+#[derive(clap::Args, Clone)]
+struct RunArgs {
+    /// Path to a markdown file or folder of workbooks
+    file: String,
     #[arg(short, long)]
     output: Option<String>,
-
-    /// Output JSON (to stdout if no -o file)
     #[arg(long, group = "format")]
     json: bool,
-
-    /// Output YAML (to stdout if no -o file)
     #[arg(long, group = "format")]
     yaml: bool,
-
-    /// Output Markdown (to stdout if no -o file)
     #[arg(long, group = "format")]
     md: bool,
-
-    /// Secret provider override (e.g., doppler, yard, env, prompt)
     #[arg(long)]
     secrets: Option<String>,
-
-    /// Secret provider project (for doppler)
     #[arg(long)]
     project: Option<String>,
-
-    /// Secret provider command (for yard/custom)
     #[arg(long = "secrets-cmd")]
     secrets_cmd: Option<String>,
-
-    /// Working directory override
     #[arg(short = 'C', long)]
     dir: Option<String>,
-
-    /// Suppress block output in terminal
     #[arg(short, long)]
     quiet: bool,
-
-    /// Show block output in terminal (default; kept for backward compatibility)
     #[arg(short, long, hide = true)]
     verbose: bool,
-
-    /// Stop on first failure
     #[arg(long)]
     bail: bool,
-
-    /// Skip setup commands
     #[arg(long)]
     no_setup: bool,
-
-    /// Inspect workbook structure without executing
-    #[arg(short, long)]
-    inspect: bool,
-
-    /// Sort order for folder runs: a-z (default), z-a
     #[arg(long, default_value = "a-z")]
     order: String,
-
-    /// Enable checkpointing with an ID (resumes if checkpoint exists)
     #[arg(long)]
     checkpoint: Option<String>,
-
-    /// Callback URL to POST events to, or redis:// / rediss:// for Redis streams
     #[arg(long, env = "WB_CALLBACK_URL")]
     callback: Option<String>,
-
-    /// HMAC-SHA256 secret for signing HTTP callback payloads (X-WB-Signature header)
     #[arg(long = "callback-secret", env = "WB_CALLBACK_SECRET")]
     callback_secret: Option<String>,
-
-    /// Redis stream key for redis:// callbacks (default: wb:events)
     #[arg(long = "callback-key", env = "WB_CALLBACK_KEY")]
     callback_key: Option<String>,
-
-    /// Set a variable (KEY=VALUE), overrides frontmatter vars
     #[arg(short = 'e', long = "set", value_name = "KEY=VALUE")]
     set_vars: Vec<String>,
-
-    /// Load environment variables from a .env-style file (repeatable)
     #[arg(long = "env-file", value_name = "PATH")]
     env_files: Vec<String>,
-
-    /// Resolve --env-file paths relative to the workbook file, not CWD
     #[arg(long = "env-file-relative")]
     env_file_relative: bool,
-
-    /// Mark variable keys as secret (values redacted from output)
     #[arg(long)]
     redact: Vec<String>,
 }
 
-fn main() {
-    // Intercept built-in commands before clap parses
-    let args: Vec<String> = std::env::args().collect();
-    if args.len() > 1 {
-        match args[1].as_str() {
-            "update" => {
-                let check_only = args.iter().any(|a| a == "--check");
-                update::cmd_update(check_only);
-                return;
-            }
-            "version" => {
-                update::cmd_version();
-                return;
-            }
-            "run" => {
-                // Rewrite args: strip "run" so clap sees the file/folder as positional
-                // wb run folder/ --order a-z  ->  wb folder/ --order a-z
-                let mut new_args = vec![args[0].clone()];
-                new_args.extend_from_slice(&args[2..]);
-                let cli = Cli::parse_from(new_args);
-                dispatch(cli);
-                return;
-            }
-            "inspect" => {
-                // wb inspect file.md  ->  wb file.md --inspect
-                let mut new_args = vec![args[0].clone()];
-                new_args.extend_from_slice(&args[2..]);
-                new_args.push("--inspect".to_string());
-                let cli = Cli::parse_from(new_args);
-                dispatch(cli);
-                return;
-            }
-            "transform" => {
-                if args.len() < 3 {
-                    eprintln!("usage: wb transform <file.md>");
-                    std::process::exit(1);
-                }
-                transform_workbook(&args[2]);
-                return;
-            }
-            "pending" => {
-                cmd_pending(&args[2..]);
-                return;
-            }
-            "cancel" => {
-                if args.len() < 3 {
-                    eprintln!("usage: wb cancel <checkpoint-id>");
-                    std::process::exit(1);
-                }
-                cmd_cancel(&args[2]);
-                return;
-            }
-            "resume" => {
-                cmd_resume(&args[2..]);
-                return;
-            }
-            "containers" => {
-                cmd_containers(&args[2..]);
-                return;
-            }
-            _ => {}
-        }
-    }
-
-    let cli = Cli::parse();
-    dispatch(cli);
+#[derive(clap::Args)]
+struct InspectArgs {
+    file: String,
+    /// Emit JSON instead of human prose
+    #[arg(long)]
+    json: bool,
 }
 
-fn dispatch(cli: Cli) {
-    let path = match cli.file {
-        Some(ref f) => f.as_str(),
+#[derive(clap::Args)]
+struct ValidateArgs {
+    /// File or folder to validate
+    file: String,
+    #[arg(long, default_value = "text")]
+    format: String,
+    #[arg(long = "strict")]
+    strict: bool,
+}
+
+#[derive(clap::Args)]
+struct DoctorArgs {
+    /// Run optional deep checks that probe Docker/Redis/sidecar
+    #[arg(long)]
+    deep: bool,
+    #[arg(long, default_value = "text")]
+    format: String,
+}
+
+#[derive(clap::Args)]
+struct PendingArgs {
+    #[arg(long, default_value = "text")]
+    format: String,
+    #[arg(long = "no-reap")]
+    no_reap: bool,
+}
+
+#[derive(clap::Args)]
+struct ResumeArgs {
+    /// Checkpoint id to resume (omit to auto-detect from pending signals)
+    id: Option<String>,
+    /// Signal payload JSON file (use `-` for stdin)
+    #[arg(long)]
+    signal: Option<String>,
+    /// Provide a single value for the bound var directly (shorthand for simple waits)
+    #[arg(long)]
+    value: Option<String>,
+    #[arg(long)]
+    secrets: Option<String>,
+    #[arg(long)]
+    project: Option<String>,
+    #[arg(long = "secrets-cmd")]
+    secrets_cmd: Option<String>,
+    #[arg(short = 'C', long)]
+    dir: Option<String>,
+    #[arg(short, long)]
+    quiet: bool,
+    #[arg(long)]
+    bail: bool,
+    #[arg(long)]
+    no_setup: bool,
+    #[arg(long, env = "WB_CALLBACK_URL")]
+    callback: Option<String>,
+    #[arg(long = "callback-secret", env = "WB_CALLBACK_SECRET")]
+    callback_secret: Option<String>,
+    #[arg(long = "callback-key", env = "WB_CALLBACK_KEY")]
+    callback_key: Option<String>,
+    #[arg(short = 'e', long = "set", value_name = "KEY=VALUE")]
+    set_vars: Vec<String>,
+    #[arg(long = "env-file", value_name = "PATH")]
+    env_files: Vec<String>,
+    #[arg(long = "env-file-relative")]
+    env_file_relative: bool,
+    #[arg(long)]
+    redact: Vec<String>,
+    #[arg(short, long)]
+    output: Option<String>,
+    #[arg(long, group = "format")]
+    json: bool,
+    #[arg(long, group = "format")]
+    yaml: bool,
+    #[arg(long, group = "format")]
+    md: bool,
+}
+
+#[derive(clap::Args)]
+struct CancelArgs {
+    id: String,
+}
+
+#[derive(clap::Args)]
+struct ContainersArgs {
+    #[command(subcommand)]
+    sub: ContainersSub,
+}
+
+#[derive(Subcommand)]
+enum ContainersSub {
+    Build {
+        path: Option<String>,
+    },
+    #[command(alias = "ls")]
+    List,
+    Prune,
+}
+
+#[derive(clap::Args)]
+struct UpdateArgs {
+    #[arg(long)]
+    check: bool,
+}
+
+#[derive(clap::Args)]
+struct TransformArgs {
+    file: String,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    Run(RunArgs),
+    Inspect(InspectArgs),
+    Validate(ValidateArgs),
+    Doctor(DoctorArgs),
+    Pending(PendingArgs),
+    Resume(ResumeArgs),
+    Cancel(CancelArgs),
+    Containers(ContainersArgs),
+    Update(UpdateArgs),
+    Version,
+    /// Hidden — frontmatter scaffolding helper, kept for backwards compat.
+    #[command(hide = true)]
+    Transform(TransformArgs),
+    /// Hidden placeholder; real generation lands with clap_complete.
+    #[command(hide = true)]
+    Completion {
+        shell: Option<String>,
+    },
+    /// Hidden placeholder; real generation lands with clap_mangen.
+    #[command(hide = true)]
+    Man,
+}
+
+/// Bare-run args: the flags that work when the user types `wb file.md` without
+/// a subcommand. Mirrors RunArgs plus `--inspect` for backward compatibility.
+#[derive(clap::Args)]
+struct BareRunArgs {
+    file: Option<String>,
+    #[arg(short, long)]
+    output: Option<String>,
+    #[arg(long, group = "format")]
+    json: bool,
+    #[arg(long, group = "format")]
+    yaml: bool,
+    #[arg(long, group = "format")]
+    md: bool,
+    #[arg(long)]
+    secrets: Option<String>,
+    #[arg(long)]
+    project: Option<String>,
+    #[arg(long = "secrets-cmd")]
+    secrets_cmd: Option<String>,
+    #[arg(short = 'C', long)]
+    dir: Option<String>,
+    #[arg(short, long)]
+    quiet: bool,
+    #[arg(short, long, hide = true)]
+    verbose: bool,
+    #[arg(long)]
+    bail: bool,
+    #[arg(long)]
+    no_setup: bool,
+    /// Inspect workbook structure without executing (kept for backward compat)
+    #[arg(short, long, hide = true)]
+    inspect: bool,
+    #[arg(long, default_value = "a-z")]
+    order: String,
+    #[arg(long)]
+    checkpoint: Option<String>,
+    #[arg(long, env = "WB_CALLBACK_URL")]
+    callback: Option<String>,
+    #[arg(long = "callback-secret", env = "WB_CALLBACK_SECRET")]
+    callback_secret: Option<String>,
+    #[arg(long = "callback-key", env = "WB_CALLBACK_KEY")]
+    callback_key: Option<String>,
+    #[arg(short = 'e', long = "set", value_name = "KEY=VALUE")]
+    set_vars: Vec<String>,
+    #[arg(long = "env-file", value_name = "PATH")]
+    env_files: Vec<String>,
+    #[arg(long = "env-file-relative")]
+    env_file_relative: bool,
+    #[arg(long)]
+    redact: Vec<String>,
+}
+
+#[derive(Parser)]
+#[command(name = "wb", version, about = "Run markdown workbooks")]
+struct Cli {
+    #[command(subcommand)]
+    command: Option<Command>,
+
+    #[command(flatten)]
+    bare_run: BareRunArgs,
+}
+
+fn main() -> std::process::ExitCode {
+    let cli = Cli::parse();
+    let exit = match cli.command {
+        Some(Command::Run(args)) => cmd_run(args),
+        Some(Command::Inspect(args)) => cmd_inspect(args),
+        Some(Command::Validate(args)) => cmd_validate(args),
+        Some(Command::Doctor(args)) => cmd_doctor(args),
+        Some(Command::Pending(args)) => cmd_pending_cmd(args),
+        Some(Command::Resume(args)) => cmd_resume_cmd(args),
+        Some(Command::Cancel(args)) => cmd_cancel_cmd(args),
+        Some(Command::Containers(args)) => cmd_containers_cmd(args),
+        Some(Command::Update(args)) => {
+            update::cmd_update(args.check);
+            WbExit::Success
+        }
+        Some(Command::Version) => {
+            update::cmd_version();
+            WbExit::Success
+        }
+        Some(Command::Transform(args)) => {
+            transform_workbook(&args.file);
+            WbExit::Success
+        }
+        Some(Command::Completion { shell }) => WbExit::Usage(format!(
+            "completion generation for {} is not implemented yet; pending clap_complete",
+            shell.unwrap_or_else(|| "the requested shell".to_string())
+        )),
+        Some(Command::Man) => WbExit::Usage(
+            "man page generation is not implemented yet; pending clap_mangen".to_string(),
+        ),
         None => {
-            eprintln!("usage: wb <file.md>");
-            eprintln!("       wb run <folder/> -o report.json");
-            eprintln!("       wb <file.md> --json");
-            eprintln!("       wb update");
-            std::process::exit(1);
+            let mut bare = cli.bare_run;
+            let Some(file) = bare.file.take() else {
+                print_short_usage();
+                return std::process::ExitCode::from(2u8);
+            };
+            if bare.inspect {
+                cmd_inspect(InspectArgs {
+                    file,
+                    json: bare.json,
+                })
+            } else {
+                cmd_run(RunArgs {
+                    file,
+                    output: bare.output,
+                    json: bare.json,
+                    yaml: bare.yaml,
+                    md: bare.md,
+                    secrets: bare.secrets,
+                    project: bare.project,
+                    secrets_cmd: bare.secrets_cmd,
+                    dir: bare.dir,
+                    quiet: bare.quiet,
+                    verbose: bare.verbose,
+                    bail: bare.bail,
+                    no_setup: bare.no_setup,
+                    order: bare.order,
+                    checkpoint: bare.checkpoint,
+                    callback: bare.callback,
+                    callback_secret: bare.callback_secret,
+                    callback_key: bare.callback_key,
+                    set_vars: bare.set_vars,
+                    env_files: bare.env_files,
+                    env_file_relative: bare.env_file_relative,
+                    redact: bare.redact,
+                })
+            }
         }
     };
+    if let Some(msg) = exit.message() {
+        eprintln!("wb: {}", msg);
+    }
+    std::process::ExitCode::from(exit.code() as u8)
+}
 
-    let format_flag = if cli.json {
+fn print_short_usage() {
+    eprintln!("usage: wb <file.md>");
+    eprintln!("       wb run <folder/> -o report.json");
+    eprintln!("       wb <file.md> --json");
+    eprintln!("       wb update");
+}
+
+fn cmd_run(args: RunArgs) -> WbExit {
+    let format_flag = if args.json {
         Some(OutputFormat::Json)
-    } else if cli.yaml {
+    } else if args.yaml {
         Some(OutputFormat::Yaml)
-    } else if cli.md {
+    } else if args.md {
         Some(OutputFormat::Markdown)
     } else {
         None
     };
 
-    let file_format = cli.output.as_deref().and_then(OutputFormat::from_path);
+    let file_format = args.output.as_deref().and_then(OutputFormat::from_path);
     let output_format = format_flag.or(file_format);
-    let stdout_output = format_flag.is_some() && cli.output.is_none();
+    let stdout_output = format_flag.is_some() && args.output.is_none();
 
-    let cli_vars: std::collections::HashMap<String, String> = cli
+    let cli_vars: std::collections::HashMap<String, String> = args
         .set_vars
         .iter()
         .filter_map(|s| {
@@ -279,56 +445,131 @@ fn dispatch(cli: Cli) {
         })
         .collect();
 
-    let p = Path::new(path);
+    let p = Path::new(&args.file);
 
     if p.is_dir() {
         run_folder(
-            path,
-            cli.output,
+            &args.file,
+            args.output,
             output_format,
             stdout_output,
-            cli.secrets,
-            cli.project,
-            cli.secrets_cmd,
-            cli.dir,
-            cli.quiet,
-            cli.bail,
-            &cli.order,
-            cli.no_setup,
+            args.secrets,
+            args.project,
+            args.secrets_cmd,
+            args.dir,
+            args.quiet,
+            args.bail,
+            &args.order,
+            args.no_setup,
             cli_vars,
-            cli.redact,
-            cli.env_files,
-            cli.env_file_relative,
+            args.redact,
+            args.env_files,
+            args.env_file_relative,
         );
-    } else if cli.inspect {
-        if cli.json {
-            inspect_workbook_json(path);
-        } else {
-            inspect_workbook(path);
-        }
     } else {
         run_single(RunConfig {
-            file: path.to_string(),
-            output_path: cli.output,
+            file: args.file,
+            output_path: args.output,
             output_format,
             stdout_output,
-            secrets_override: cli.secrets.clone(),
-            project: cli.project.clone(),
-            secrets_cmd: cli.secrets_cmd.clone(),
-            dir: cli.dir,
-            quiet: cli.quiet,
-            bail: cli.bail,
-            no_setup: cli.no_setup,
-            checkpoint_id: cli.checkpoint,
-            callback_url: cli.callback,
-            callback_secret: cli.callback_secret,
-            callback_key: cli.callback_key,
+            secrets_override: args.secrets.clone(),
+            project: args.project.clone(),
+            secrets_cmd: args.secrets_cmd.clone(),
+            dir: args.dir,
+            quiet: args.quiet,
+            bail: args.bail,
+            no_setup: args.no_setup,
+            checkpoint_id: args.checkpoint,
+            callback_url: args.callback,
+            callback_secret: args.callback_secret,
+            callback_key: args.callback_key,
             cli_vars,
-            cli_redact: cli.redact,
-            env_files: cli.env_files,
-            env_file_relative: cli.env_file_relative,
+            cli_redact: args.redact,
+            env_files: args.env_files,
+            env_file_relative: args.env_file_relative,
         });
     }
+    WbExit::Success
+}
+
+fn cmd_inspect(args: InspectArgs) -> WbExit {
+    if args.json {
+        inspect_workbook_json(&args.file);
+    } else {
+        inspect_workbook(&args.file);
+    }
+    WbExit::Success
+}
+
+fn cmd_validate(args: ValidateArgs) -> WbExit {
+    let opts = validate::ValidateOptions {
+        strict: args.strict,
+    };
+
+    let path = std::path::Path::new(&args.file);
+    let diags = if path.is_dir() {
+        validate::validate_dir(path, &opts)
+    } else {
+        validate::validate_file(path, &opts)
+    };
+
+    let output = if args.format == "json" {
+        diagnostic::render_json(&diags)
+    } else {
+        diagnostic::render_text(&diags)
+    };
+
+    if !output.is_empty() {
+        print!("{output}");
+    }
+
+    let code = validate::exit_code_for(&diags, args.strict);
+    if code == exit_codes::EXIT_SUCCESS {
+        WbExit::Success
+    } else {
+        WbExit::WorkbookInvalid(String::new())
+    }
+}
+
+fn cmd_doctor(args: DoctorArgs) -> WbExit {
+    let opts = doctor::DoctorOptions {
+        deep: args.deep,
+        json: args.format == "json",
+    };
+    let (results, code) = doctor::run(&opts);
+    let output = if opts.json {
+        doctor::render_json(&results)
+    } else {
+        doctor::render_text(&results)
+    };
+    print!("{output}");
+    if code == exit_codes::EXIT_SUCCESS {
+        WbExit::Success
+    } else {
+        WbExit::WorkbookInvalid(String::new())
+    }
+}
+
+fn cmd_pending_cmd(args: PendingArgs) -> WbExit {
+    let json_out = args.format == "json";
+    cmd_pending_impl(json_out, args.no_reap);
+    WbExit::Success
+}
+
+fn cmd_cancel_cmd(args: CancelArgs) -> WbExit {
+    cmd_cancel(&args.id);
+    WbExit::Success
+}
+
+fn cmd_containers_cmd(args: ContainersArgs) -> WbExit {
+    match args.sub {
+        ContainersSub::Build { path } => {
+            cmd_containers_build(path.as_deref().unwrap_or("."));
+        }
+        ContainersSub::List => cmd_containers_list(),
+        ContainersSub::Prune => cmd_containers_prune(),
+    }
+    WbExit::Success
 }
 
 /// Collect .md files from a directory, sorted by --order
@@ -488,6 +729,7 @@ fn run_folder(
 }
 
 /// Run a single workbook and return its summary (no output/printing)
+#[allow(clippy::too_many_arguments)]
 fn run_single_collect(
     file: &str,
     secrets_override: Option<String>,
@@ -769,9 +1011,7 @@ fn run_single_collect(
                 if block.skip_execution {
                     continue;
                 }
-                let policy = workbook
-                    .frontmatter
-                    .block_policy((block_idx + 1) as u32);
+                let policy = workbook.frontmatter.block_policy((block_idx + 1) as u32);
                 let result = execute_block_with_policy(
                     &mut session,
                     block,
@@ -1307,13 +1547,7 @@ fn run_single(cfg: RunConfig) {
         lock_guard: _checkpoint_lock,
     } = prepare_checkpoint(checkpoint_id, file, block_count, &mut ctx);
 
-    let cb = resolve_callback_config(
-        callback_url,
-        callback_secret,
-        callback_key,
-        &ctx,
-        &run_id,
-    );
+    let cb = resolve_callback_config(callback_url, callback_secret, callback_key, &ctx, &run_id);
 
     // Artifacts: same semantics as the non-checkpoint path — create/read the
     // dir, inject WB_ARTIFACTS_DIR, upload new files after each cell.
@@ -1434,12 +1668,7 @@ fn run_single(cfg: RunConfig) {
             // step.started. We push to rebuild the stack silently.
             if block_idx >= replay_until {
                 if let Some(ref cb) = cb {
-                    cb.step_started(
-                        file,
-                        checkpoint_id.as_deref(),
-                        frame,
-                        parent_id.as_deref(),
-                    );
+                    cb.step_started(file, checkpoint_id.as_deref(), frame, parent_id.as_deref());
                 }
             }
             continue;
@@ -1616,9 +1845,7 @@ fn run_single(cfg: RunConfig) {
                 );
             }
 
-            let policy = workbook
-                .frontmatter
-                .block_policy((block_idx + 1) as u32);
+            let policy = workbook.frontmatter.block_policy((block_idx + 1) as u32);
             let result = execute_block_with_policy(
                 &mut session,
                 block,
@@ -1870,10 +2097,11 @@ fn run_single(cfg: RunConfig) {
             }
 
             if let Some(pause) = pause_info {
-                // pause_browser_slice diverges via std::process::exit, which
-                // skips Drop on `session`. Drop first so the sidecar gets
-                // its shutdown frame (flushing recording + closing the
-                // browser context cleanly) before the process dies.
+                // pause_browser_slice diverges via std::process::exit. For a
+                // human-in-the-loop browser pause we must keep the remote
+                // browser session alive, so suspend the sidecar instead of
+                // dropping it through the normal shutdown/release path.
+                session.suspend_browser_sidecar();
                 drop(session);
                 pause_browser_slice(
                     spec,
@@ -2013,7 +2241,13 @@ fn run_single(cfg: RunConfig) {
     };
 
     output::print_summary(&summary);
-    write_run_output(&workbook, &summary, output_format, output_path.as_deref(), stdout_output);
+    write_run_output(
+        &workbook,
+        &summary,
+        output_format,
+        output_path.as_deref(),
+        stdout_output,
+    );
 
     if failed > 0 {
         // std::process::exit skips Drop, which would orphan the browser
@@ -2240,7 +2474,9 @@ fn inspect_workbook_json(file: &str) {
                 let bind_val = spec.bind.as_ref().map(|b| match b {
                     parser::BindSpec::Single(s) => serde_json::Value::String(s.clone()),
                     parser::BindSpec::Multiple(v) => serde_json::Value::Array(
-                        v.iter().map(|s| serde_json::Value::String(s.clone())).collect(),
+                        v.iter()
+                            .map(|s| serde_json::Value::String(s.clone()))
+                            .collect(),
                     ),
                 });
                 blocks.push(serde_json::json!({
@@ -2807,49 +3043,7 @@ fn transform_workbook(file: &str) {
 
 // ─── containers subcommand ──────────────────────────────────────────
 
-fn cmd_containers(args: &[String]) {
-    let sub = args.first().map(|s| s.as_str());
-    match sub {
-        Some("build") => cmd_containers_build(&args[1..]),
-        Some("list") | Some("ls") => cmd_containers_list(),
-        Some("prune") => cmd_containers_prune(),
-        None | Some("help") | Some("--help") | Some("-h") => {
-            print_containers_usage();
-        }
-        Some(other) => {
-            eprintln!("error: unknown subcommand '{}'", other);
-            eprintln!();
-            print_containers_usage_stderr();
-            std::process::exit(1);
-        }
-    }
-}
-
-fn print_containers_usage() {
-    println!("usage: wb containers <build|list|prune>");
-    println!();
-    println!("Manage cached Docker images for sandboxed workbooks.");
-    println!();
-    println!("Subcommands:");
-    println!("  build [path]   Build sandbox images for workbooks (file or directory)");
-    println!("  list           List cached sandbox images");
-    println!("  prune          Remove all sandbox images");
-    println!();
-    println!("Workbooks with a `requires:` frontmatter block build a Docker image on first run.");
-    println!("Docker must be installed and running. If missing, `wb` exits with code 5.");
-}
-
-fn print_containers_usage_stderr() {
-    eprintln!("usage: wb containers <build|list|prune>");
-    eprintln!();
-    eprintln!("  build [path]   Build sandbox images for workbooks (file or directory)");
-    eprintln!("  list           List cached sandbox images");
-    eprintln!("  prune          Remove all sandbox images");
-}
-
-fn cmd_containers_build(args: &[String]) {
-    let path = args.first().map(|s| s.as_str()).unwrap_or(".");
-
+fn cmd_containers_build(path: &str) {
     let files = if Path::new(path).is_dir() {
         collect_workbooks(path, "a-z")
     } else {
@@ -2891,7 +3085,7 @@ fn cmd_containers_build(args: &[String]) {
 
         let tag = sandbox::image_tag(requires);
         if sandbox::image_exists(&tag) {
-            eprintln!("  {} {} (cached: {})", "✓", filename, tag);
+            eprintln!("  ✓ {} (cached: {})", filename, tag);
             skipped += 1;
             continue;
         }
@@ -2904,11 +3098,11 @@ fn cmd_containers_build(args: &[String]) {
 
         match sandbox::build_image(requires, &workbook_dir) {
             Ok(t) => {
-                eprintln!("  {} {} -> {}", "✓", filename, t);
+                eprintln!("  ✓ {} -> {}", filename, t);
                 built += 1;
             }
             Err(e) => {
-                eprintln!("  {} {} — {}", "✗", filename, e);
+                eprintln!("  ✗ {} — {}", filename, e);
                 errors += 1;
             }
         }
@@ -2942,13 +3136,7 @@ fn cmd_containers_prune() {
     }
 }
 
-fn cmd_pending(args: &[String]) {
-    let json_out = args.iter().any(|a| a == "--format=json" || a == "--json")
-        || args
-            .windows(2)
-            .any(|w| w[0] == "--format" && w[1] == "json");
-    let no_reap = args.iter().any(|a| a == "--no-reap");
-
+fn cmd_pending_impl(json_out: bool, no_reap: bool) {
     if !no_reap {
         let reaped = pending::reap_expired();
         if !reaped.is_empty() {
@@ -3020,75 +3208,7 @@ fn cmd_cancel(id: &str) {
     eprintln!("cancelled '{}'", id);
 }
 
-#[derive(Parser)]
-#[command(
-    name = "wb resume",
-    about = "Resume a paused workbook with a signal payload"
-)]
-struct ResumeCli {
-    /// Checkpoint id to resume (omit to auto-detect from pending signals)
-    id: Option<String>,
-
-    /// Signal payload JSON file (use `-` for stdin)
-    #[arg(long)]
-    signal: Option<String>,
-
-    /// Provide a single value for the bound var directly (shorthand for simple waits)
-    #[arg(long)]
-    value: Option<String>,
-
-    /// Secret provider override
-    #[arg(long)]
-    secrets: Option<String>,
-    #[arg(long)]
-    project: Option<String>,
-    #[arg(long = "secrets-cmd")]
-    secrets_cmd: Option<String>,
-
-    #[arg(short = 'C', long)]
-    dir: Option<String>,
-    #[arg(short, long)]
-    quiet: bool,
-    #[arg(long)]
-    bail: bool,
-    #[arg(long)]
-    no_setup: bool,
-
-    #[arg(long, env = "WB_CALLBACK_URL")]
-    callback: Option<String>,
-    #[arg(long = "callback-secret", env = "WB_CALLBACK_SECRET")]
-    callback_secret: Option<String>,
-    #[arg(long = "callback-key", env = "WB_CALLBACK_KEY")]
-    callback_key: Option<String>,
-
-    #[arg(short = 'e', long = "set", value_name = "KEY=VALUE")]
-    set_vars: Vec<String>,
-
-    #[arg(long = "env-file", value_name = "PATH")]
-    env_files: Vec<String>,
-
-    #[arg(long = "env-file-relative")]
-    env_file_relative: bool,
-
-    #[arg(long)]
-    redact: Vec<String>,
-
-    /// Output file
-    #[arg(short, long)]
-    output: Option<String>,
-    #[arg(long, group = "format")]
-    json: bool,
-    #[arg(long, group = "format")]
-    yaml: bool,
-    #[arg(long, group = "format")]
-    md: bool,
-}
-
-fn cmd_resume(args: &[String]) {
-    let mut parse_args = vec!["wb-resume".to_string()];
-    parse_args.extend_from_slice(args);
-    let cli = ResumeCli::parse_from(parse_args);
-
+fn cmd_resume_cmd(cli: ResumeArgs) -> WbExit {
     // Build env table: process env first, then --env-file overlays. Used to
     // resolve signal config when the user omits an id (auto-detect mode).
     // env-file paths are treated as cwd-relative here because the workbook
@@ -3284,7 +3404,7 @@ fn cmd_resume(args: &[String]) {
             env_files: cli.env_files,
             env_file_relative: cli.env_file_relative,
         });
-        return;
+        return WbExit::Success;
     }
 
     let expired = pending::is_expired(&desc);
@@ -3523,6 +3643,7 @@ fn cmd_resume(args: &[String]) {
         env_files: cli.env_files,
         env_file_relative: cli.env_file_relative,
     });
+    WbExit::Success
 }
 
 /// Populate `out` with values from a signal JSON payload, keyed by bind names.
@@ -3682,6 +3803,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::approx_constant)]
     fn scalar_number_float() {
         let v = serde_json::json!(3.14);
         assert_eq!(json_scalar_to_string(&v), Some("3.14".to_string()));
@@ -4061,6 +4183,7 @@ echo "step-2-got: $my_var"
         .unwrap();
 
         let ckpt_id = "integration-wait-test";
+        let checkpoint_dir = checkpoint::checkpoint_dir();
         let _ = checkpoint::delete(ckpt_id);
         let _ = pending::delete(ckpt_id);
 
@@ -4072,6 +4195,7 @@ echo "step-2-got: $my_var"
                 "--checkpoint",
                 ckpt_id,
             ])
+            .env("WB_CHECKPOINT_DIR", &checkpoint_dir)
             .output()
             .expect("wb run should execute");
 
@@ -4107,6 +4231,7 @@ echo "step-2-got: $my_var"
 
         let resume_output = std::process::Command::new(&wb_bin)
             .args(["resume", ckpt_id, "--signal", signal_path.to_str().unwrap()])
+            .env("WB_CHECKPOINT_DIR", &checkpoint_dir)
             .output()
             .expect("wb resume should execute");
 
@@ -4185,6 +4310,7 @@ echo "pin=$pin"
         .unwrap();
 
         let ckpt_id = "integration-value-test";
+        let checkpoint_dir = checkpoint::checkpoint_dir();
         let _ = checkpoint::delete(ckpt_id);
         let _ = pending::delete(ckpt_id);
 
@@ -4196,6 +4322,7 @@ echo "pin=$pin"
                 "--checkpoint",
                 ckpt_id,
             ])
+            .env("WB_CHECKPOINT_DIR", &checkpoint_dir)
             .output()
             .expect("wb run");
         assert_eq!(run.status.code().unwrap_or(-1), 42);
@@ -4203,6 +4330,7 @@ echo "pin=$pin"
         // Resume with --value instead of --signal
         let resume = std::process::Command::new(&wb_bin)
             .args(["resume", ckpt_id, "--value", "9999"])
+            .env("WB_CHECKPOINT_DIR", &checkpoint_dir)
             .output()
             .expect("wb resume");
 
@@ -4362,7 +4490,10 @@ echo "pin=$pin"
             executor::DEFAULT_BLOCK_TIMEOUT,
             true,
         );
-        assert!(result.stdout_partial, "timeout_secs=1 should trigger partial");
+        assert!(
+            result.stdout_partial,
+            "timeout_secs=1 should trigger partial"
+        );
         assert_eq!(result.error_type.as_deref(), Some("timeout"));
         assert!(
             result.stdout.contains("before-sleep"),
@@ -4447,5 +4578,132 @@ echo "pin=$pin"
         let parsed: serde_json::Value = serde_json::from_str(&content).unwrap();
         assert!(parsed["value"].is_null());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ─── CLI arg parsing ──────────────────────────────────────────────
+
+    #[test]
+    fn parses_bare_run() {
+        let cli = Cli::parse_from(["wb", "file.md"]);
+        assert!(cli.command.is_none());
+        assert_eq!(cli.bare_run.file.as_deref(), Some("file.md"));
+    }
+
+    #[test]
+    fn parses_bare_run_with_json() {
+        let cli = Cli::parse_from(["wb", "file.md", "--json"]);
+        assert!(cli.command.is_none());
+        assert_eq!(cli.bare_run.file.as_deref(), Some("file.md"));
+        assert!(cli.bare_run.json);
+    }
+
+    #[test]
+    fn parses_run_subcommand() {
+        let cli = Cli::parse_from(["wb", "run", "file.md", "--bail"]);
+        let Some(Command::Run(args)) = cli.command else {
+            panic!("expected Run subcommand");
+        };
+        assert_eq!(args.file, "file.md");
+        assert!(args.bail);
+    }
+
+    #[test]
+    fn parses_inspect_subcommand() {
+        let cli = Cli::parse_from(["wb", "inspect", "file.md"]);
+        let Some(Command::Inspect(args)) = cli.command else {
+            panic!("expected Inspect subcommand");
+        };
+        assert_eq!(args.file, "file.md");
+        assert!(!args.json);
+
+        let cli2 = Cli::parse_from(["wb", "inspect", "file.md", "--json"]);
+        let Some(Command::Inspect(args2)) = cli2.command else {
+            panic!("expected Inspect subcommand");
+        };
+        assert!(args2.json);
+    }
+
+    #[test]
+    fn parses_containers_subcommands() {
+        let cli = Cli::parse_from(["wb", "containers", "list"]);
+        let Some(Command::Containers(args)) = cli.command else {
+            panic!("expected Containers");
+        };
+        assert!(matches!(args.sub, ContainersSub::List));
+
+        let cli2 = Cli::parse_from(["wb", "containers", "ls"]);
+        let Some(Command::Containers(args2)) = cli2.command else {
+            panic!("expected Containers");
+        };
+        assert!(matches!(args2.sub, ContainersSub::List));
+
+        let cli3 = Cli::parse_from(["wb", "containers", "build", "some/dir"]);
+        let Some(Command::Containers(args3)) = cli3.command else {
+            panic!("expected Containers");
+        };
+        assert!(matches!(args3.sub, ContainersSub::Build { path: Some(_) }));
+
+        let cli4 = Cli::parse_from(["wb", "containers", "prune"]);
+        let Some(Command::Containers(args4)) = cli4.command else {
+            panic!("expected Containers");
+        };
+        assert!(matches!(args4.sub, ContainersSub::Prune));
+    }
+
+    #[test]
+    fn parses_resume_with_value() {
+        let cli = Cli::parse_from(["wb", "resume", "my-id", "--value", "12345"]);
+        let Some(Command::Resume(args)) = cli.command else {
+            panic!("expected Resume");
+        };
+        assert_eq!(args.id.as_deref(), Some("my-id"));
+        assert_eq!(args.value.as_deref(), Some("12345"));
+    }
+
+    #[test]
+    fn parses_pending_no_reap() {
+        let cli = Cli::parse_from(["wb", "pending", "--no-reap"]);
+        let Some(Command::Pending(args)) = cli.command else {
+            panic!("expected Pending");
+        };
+        assert!(args.no_reap);
+    }
+
+    #[test]
+    fn parses_hidden_generation_stubs() {
+        let cli = Cli::parse_from(["wb", "completion", "bash"]);
+        let Some(Command::Completion { shell }) = cli.command else {
+            panic!("expected Completion");
+        };
+        assert_eq!(shell.as_deref(), Some("bash"));
+
+        let cli = Cli::parse_from(["wb", "man"]);
+        assert!(matches!(cli.command, Some(Command::Man)));
+    }
+
+    #[test]
+    fn wb_exit_codes_match_documented() {
+        use exit::WbExit;
+        assert_eq!(WbExit::Success.code(), exit_codes::EXIT_SUCCESS);
+        assert_eq!(WbExit::BlockFailed.code(), exit_codes::EXIT_BLOCK_FAILED);
+        assert_eq!(WbExit::Usage("x".into()).code(), exit_codes::EXIT_USAGE);
+        assert_eq!(
+            WbExit::WorkbookInvalid("x".into()).code(),
+            exit_codes::EXIT_WORKBOOK_INVALID
+        );
+        assert_eq!(
+            WbExit::SandboxUnavailable("x".into()).code(),
+            exit_codes::EXIT_SANDBOX_UNAVAILABLE
+        );
+        assert_eq!(
+            WbExit::CheckpointBusy("x".into()).code(),
+            exit_codes::EXIT_CHECKPOINT_BUSY
+        );
+        assert_eq!(
+            WbExit::SignalTimeout("x".into()).code(),
+            exit_codes::EXIT_SIGNAL_TIMEOUT
+        );
+        assert_eq!(WbExit::Paused.code(), exit_codes::EXIT_PAUSED);
+        assert_eq!(WbExit::Io("x".into()).code(), 1);
     }
 }

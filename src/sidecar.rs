@@ -115,10 +115,14 @@ pub struct Sidecar {
     stdin: BufWriter<ChildStdin>,
     events: Receiver<String>,
     binary: String,
+    suspended: bool,
 }
 
 impl Drop for Sidecar {
     fn drop(&mut self) {
+        if self.suspended {
+            return;
+        }
         // Best-effort shutdown. Send a `shutdown` frame so the sidecar can
         // flush recordings + close browser contexts cleanly, then give it a
         // bounded window to exit on its own before falling back to SIGKILL.
@@ -180,7 +184,7 @@ impl Sidecar {
         let tx_out = tx.clone();
         thread::spawn(move || {
             let reader = BufReader::new(stdout);
-            for line in reader.lines().flatten() {
+            for line in reader.lines().map_while(Result::ok) {
                 if tx_out.send(line).is_err() {
                     break;
                 }
@@ -189,7 +193,7 @@ impl Sidecar {
 
         thread::spawn(move || {
             let reader = BufReader::new(stderr);
-            for line in reader.lines().flatten() {
+            for line in reader.lines().map_while(Result::ok) {
                 crate::output::print_stderr_dim(&format!("[sidecar] {}", line));
             }
         });
@@ -199,10 +203,45 @@ impl Sidecar {
             stdin,
             events: rx,
             binary,
+            suspended: false,
         };
 
         sc.handshake()?;
         Ok(sc)
+    }
+
+    /// Ask the sidecar to suspend instead of shutting down.
+    ///
+    /// Used for browser-slice pauses: the remote browser must remain alive so
+    /// the operator can complete the handoff in the live inspector and a later
+    /// `wb resume` can reconnect to the same vendor session. Unlike Drop's
+    /// shutdown path, the sidecar must not close the browser or release the
+    /// vendor session.
+    pub fn suspend(&mut self) -> Result<(), String> {
+        writeln!(self.stdin, "{}", json!({ "type": "suspend" }))
+            .map_err(|e| format!("sidecar suspend write failed: {}", e))?;
+        self.stdin
+            .flush()
+            .map_err(|e| format!("sidecar suspend flush failed: {}", e))?;
+
+        let deadline = Instant::now() + shutdown_timeout();
+        loop {
+            match self.child.try_wait() {
+                Ok(Some(_)) => {
+                    self.suspended = true;
+                    return Ok(());
+                }
+                Ok(None) if Instant::now() >= deadline => {
+                    return Err(format!(
+                        "sidecar {} did not suspend within {}s",
+                        self.binary,
+                        shutdown_timeout().as_secs()
+                    ));
+                }
+                Ok(None) => thread::sleep(Duration::from_millis(100)),
+                Err(e) => return Err(format!("sidecar suspend wait failed: {}", e)),
+            }
+        }
     }
 
     fn handshake(&mut self) -> Result<(), String> {
@@ -363,14 +402,10 @@ impl Sidecar {
                             // callback + return a Paused outcome so wb writes the
                             // pending descriptor and exits EXIT_PAUSED.
                             if !quiet {
-                                let reason = v
-                                    .get("reason")
-                                    .and_then(|x| x.as_str())
-                                    .unwrap_or("paused");
-                                let url = v
-                                    .get("resume_url")
-                                    .and_then(|x| x.as_str())
-                                    .unwrap_or("");
+                                let reason =
+                                    v.get("reason").and_then(|x| x.as_str()).unwrap_or("paused");
+                                let url =
+                                    v.get("resume_url").and_then(|x| x.as_str()).unwrap_or("");
                                 crate::output::print_stderr_dim(&format!(
                                     "  ⏸ {} — {}",
                                     reason, url
@@ -393,7 +428,10 @@ impl Sidecar {
                             };
                         }
                         "slice.failed" => {
-                            let err = v.get("error").and_then(|x| x.as_str()).unwrap_or("slice failed");
+                            let err = v
+                                .get("error")
+                                .and_then(|x| x.as_str())
+                                .unwrap_or("slice failed");
                             stderr_buf.push_str(err);
                             stderr_buf.push('\n');
                             return SliceOutcome {
@@ -455,7 +493,7 @@ fn fire_lifecycle(ctx: &SliceCallbackContext, event: &str, sidecar_msg: &Value) 
         Value::Object(map) => {
             let mut out = serde_json::Map::new();
             for (k, v) in map {
-                if k != "type" {
+                if k != "type" && k != "sidecar_state" {
                     out.insert(k.clone(), v.clone());
                 }
             }
@@ -626,7 +664,10 @@ mod tests {
         });
         let info = extract_pause_info(&msg);
         assert_eq!(info.reason.as_deref(), Some("airbase_totp"));
-        assert_eq!(info.resume_url.as_deref(), Some("https://browserbase/live/xyz"));
+        assert_eq!(
+            info.resume_url.as_deref(),
+            Some("https://browserbase/live/xyz")
+        );
         assert_eq!(info.verb_index, Some(7));
         assert!(info.sidecar_state.is_some());
     }
@@ -710,6 +751,9 @@ mod tests {
     fn derive_event_name_passes_through_non_slice_prefix() {
         // Defensive: shouldn't be reachable from the dispatcher, but the
         // helper is total — non-slice inputs round-trip unchanged.
-        assert_eq!(derive_lifecycle_event_name("verb.complete"), "verb.complete");
+        assert_eq!(
+            derive_lifecycle_event_name("verb.complete"),
+            "verb.complete"
+        );
     }
 }

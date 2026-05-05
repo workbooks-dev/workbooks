@@ -95,7 +95,9 @@ pub fn cmd_update(check_only: bool) {
             eprintln!("downloaded update is at: {}", tmp.display());
             eprintln!();
             eprintln!("to fix, reinstall to a user-writable location, e.g.:");
-            eprintln!("  WB_INSTALL_DIR=$HOME/.local/bin curl -fsSL https://get.workbooks.dev | sh");
+            eprintln!(
+                "  WB_INSTALL_DIR=$HOME/.local/bin curl -fsSL https://get.workbooks.dev | sh"
+            );
             std::process::exit(1);
         }
     }
@@ -115,11 +117,9 @@ fn fetch_latest_version() -> Result<String, String> {
     let output = Command::new("curl")
         .args([
             "-fsSL",
-            "-H", "Accept: application/vnd.github.v3+json",
-            &format!(
-                "https://api.github.com/repos/{}/releases?per_page=30",
-                REPO
-            ),
+            "-H",
+            "Accept: application/vnd.github.v3+json",
+            &format!("https://api.github.com/repos/{}/releases?per_page=30", REPO),
         ])
         .output()
         .map_err(|e| format!("curl failed: {}", e))?;
@@ -153,10 +153,7 @@ fn fetch_latest_version() -> Result<String, String> {
 /// and must not be returned to the update flow.
 fn is_wb_cli_tag(tag: &str) -> bool {
     let mut chars = tag.chars();
-    match (chars.next(), chars.next()) {
-        (Some('v'), Some(c)) if c.is_ascii_digit() => true,
-        _ => false,
-    }
+    matches!((chars.next(), chars.next()), (Some('v'), Some(c)) if c.is_ascii_digit())
 }
 
 fn download(url: &str, dest: &std::path::Path) -> bool {
@@ -179,10 +176,7 @@ fn download(url: &str, dest: &std::path::Path) -> bool {
     matches!(status, Ok(s) if s.success())
 }
 
-fn replace_binary(
-    src: &std::path::Path,
-    dest: &std::path::Path,
-) -> Result<(), String> {
+fn replace_binary(src: &std::path::Path, dest: &std::path::Path) -> Result<(), String> {
     // Rename old binary first (atomic on same filesystem)
     let backup = dest.with_extension("old");
     let _ = fs::remove_file(&backup); // ignore if doesn't exist

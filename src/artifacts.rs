@@ -282,7 +282,11 @@ fn upload_secret(env: &HashMap<String, String>) -> Option<String> {
     env.get(ENV_UPLOAD_SECRET)
         .filter(|s| !s.is_empty())
         .cloned()
-        .or_else(|| std::env::var(ENV_UPLOAD_SECRET).ok().filter(|s| !s.is_empty()))
+        .or_else(|| {
+            std::env::var(ENV_UPLOAD_SECRET)
+                .ok()
+                .filter(|s| !s.is_empty())
+        })
 }
 
 fn default_dir(run_id: &str) -> PathBuf {
@@ -293,13 +297,18 @@ fn default_dir(run_id: &str) -> PathBuf {
             .join(sanitize(run_id))
             .join("artifacts");
     }
-    std::env::temp_dir()
-        .join(format!("wb-artifacts-{}", sanitize(run_id)))
+    std::env::temp_dir().join(format!("wb-artifacts-{}", sanitize(run_id)))
 }
 
 fn sanitize(s: &str) -> String {
     s.chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect()
 }
 
@@ -386,7 +395,10 @@ fn read_sidecar(artifact_path: &Path) -> (Option<String>, Option<String>) {
         Err(_) => return (None, None),
     };
 
-    let label = v.get("label").and_then(|x| x.as_str()).map(|s| s.to_string());
+    let label = v
+        .get("label")
+        .and_then(|x| x.as_str())
+        .map(|s| s.to_string());
     let description = v
         .get("description")
         .and_then(|x| x.as_str())
@@ -408,7 +420,10 @@ mod tests {
 
         let _a = Artifacts::init(&mut env);
         assert!(tmp.exists(), "artifacts dir should be created");
-        assert_eq!(env.get(ENV_DIR).unwrap(), &tmp.to_string_lossy().to_string());
+        assert_eq!(
+            env.get(ENV_DIR).unwrap(),
+            &tmp.to_string_lossy().to_string()
+        );
 
         let _ = fs::remove_dir_all(&tmp);
     }
@@ -428,7 +443,10 @@ mod tests {
 
         // Second call should be a no-op (same mtime).
         let second = a.sync();
-        assert!(second.is_empty(), "second sync with same mtime should be empty");
+        assert!(
+            second.is_empty(),
+            "second sync with same mtime should be empty"
+        );
         assert!(a.seen.contains_key(&p));
 
         let _ = fs::remove_dir_all(&tmp);
@@ -490,7 +508,10 @@ mod tests {
         .unwrap();
 
         let records = a.sync();
-        let statement = records.iter().find(|r| r.filename == "statement.csv").unwrap();
+        let statement = records
+            .iter()
+            .find(|r| r.filename == "statement.csv")
+            .unwrap();
         assert_eq!(statement.label.as_deref(), Some("April HSBC statement"));
         assert_eq!(statement.description.as_deref(), Some("reconciled"));
 

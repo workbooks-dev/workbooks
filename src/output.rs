@@ -55,7 +55,12 @@ pub fn print_stderr_dim(line: &str) {
 }
 
 /// Print a dim separator rule before a block, with heading, language, and line number
-pub fn print_block_header(heading: Option<&str>, language: &str, line_number: usize, code_preview: Option<&str>) {
+pub fn print_block_header(
+    heading: Option<&str>,
+    language: &str,
+    line_number: usize,
+    code_preview: Option<&str>,
+) {
     let label = match heading {
         Some(h) => format!("{} ({}, L{})", h, language, line_number),
         None => format!("{} (L{})", language, line_number),
@@ -196,16 +201,18 @@ fn build_json_output(workbook: &Workbook, summary: &RunSummary) -> JsonOutput {
         .results
         .iter()
         .map(|r| {
-            let (heading, line_number) = block_meta
-                .get(r.block_index)
-                .cloned()
-                .unwrap_or((None, 0));
+            let (heading, line_number) =
+                block_meta.get(r.block_index).cloned().unwrap_or((None, 0));
             JsonBlockResult {
                 index: r.block_index,
                 language: r.language.clone(),
                 heading,
                 line_number,
-                status: if r.success() { "pass".into() } else { "fail".into() },
+                status: if r.success() {
+                    "pass".into()
+                } else {
+                    "fail".into()
+                },
                 exit_code: r.exit_code,
                 duration_ms: r.duration.as_millis() as u64,
                 stdout: r.stdout.clone(),
@@ -223,7 +230,11 @@ fn build_json_output(workbook: &Workbook, summary: &RunSummary) -> JsonOutput {
         run_id: summary.run_id.clone(),
         ran_at: Utc::now().to_rfc3339(),
         duration_ms: summary.total_duration.as_millis() as u64,
-        status: if summary.failed == 0 { "pass".into() } else { "fail".into() },
+        status: if summary.failed == 0 {
+            "pass".into()
+        } else {
+            "fail".into()
+        },
         blocks: JsonBlocksSummary {
             total: summary.total_blocks,
             passed: summary.passed,
@@ -399,7 +410,11 @@ pub fn format_batch_output(
     }
 }
 
-fn build_batch_output(summaries: &[RunSummary], dir: &str, total_duration: Duration) -> JsonBatchOutput {
+fn build_batch_output(
+    summaries: &[RunSummary],
+    dir: &str,
+    total_duration: Duration,
+) -> JsonBatchOutput {
     let total = summaries.len();
     let failed_count = summaries.iter().filter(|s| s.failed > 0).count();
 
@@ -428,7 +443,11 @@ fn build_batch_output(summaries: &[RunSummary], dir: &str, total_duration: Durat
 
             JsonBatchEntry {
                 file: s.source_file.clone(),
-                status: if s.failed == 0 { "pass".into() } else { "fail".into() },
+                status: if s.failed == 0 {
+                    "pass".into()
+                } else {
+                    "fail".into()
+                },
                 blocks: JsonBlocksSummary {
                     total: s.total_blocks,
                     passed: s.passed,
@@ -444,7 +463,11 @@ fn build_batch_output(summaries: &[RunSummary], dir: &str, total_duration: Durat
         source: dir.to_string(),
         ran_at: Utc::now().to_rfc3339(),
         duration_ms: total_duration.as_millis() as u64,
-        status: if failed_count == 0 { "pass".into() } else { "fail".into() },
+        status: if failed_count == 0 {
+            "pass".into()
+        } else {
+            "fail".into()
+        },
         workbooks: JsonBatchWorkbooks {
             total,
             passed: total - failed_count,
@@ -512,7 +535,12 @@ fn format_batch_markdown(summaries: &[RunSummary], dir: &str, total_duration: Du
         for s in summaries.iter().filter(|s| s.failed > 0) {
             out.push_str(&format!("### {}\n\n", s.source_file));
             for r in s.results.iter().filter(|r| !r.success()) {
-                out.push_str(&format!("Block {} [{}] — exit {}\n", r.block_index + 1, r.language, r.exit_code));
+                out.push_str(&format!(
+                    "Block {} [{}] — exit {}\n",
+                    r.block_index + 1,
+                    r.language,
+                    r.exit_code
+                ));
                 if !r.stderr.is_empty() {
                     out.push_str("```\n");
                     out.push_str(&r.stderr);

@@ -123,6 +123,7 @@ pub fn archive_signal(
 
 /// Scan all pending descriptors and check Redis for signals.
 /// Returns the first (checkpoint_id, vars) that has a signal ready.
+#[allow(clippy::type_complexity)]
 pub fn find_ready_signal(
     config: &SignalConfig,
 ) -> Result<Option<(String, HashMap<String, String>)>, String> {

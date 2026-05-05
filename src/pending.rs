@@ -127,9 +127,9 @@ pub fn build(
 ) -> PendingDescriptor {
     let now = Utc::now();
     let timeout_at = spec.timeout.as_deref().and_then(|t| {
-        parser::parse_duration_secs(t).ok().map(|secs| {
-            (now + ChronoDuration::seconds(secs as i64)).to_rfc3339()
-        })
+        parser::parse_duration_secs(t)
+            .ok()
+            .map(|secs| (now + ChronoDuration::seconds(secs as i64)).to_rfc3339())
     });
     let ckpt_path = checkpoint::checkpoint_path(checkpoint_id)
         .to_string_lossy()
@@ -178,9 +178,9 @@ pub fn build_for_browser_pause(
     // If the verb supplied a `timeout:` string we parse it here so the
     // reaper's `timeout_at` comparison is a plain ISO-8601 compare.
     let timeout_at = pause.timeout.as_deref().and_then(|t| {
-        parser::parse_duration_secs(t).ok().map(|secs| {
-            (now + ChronoDuration::seconds(secs as i64)).to_rfc3339()
-        })
+        parser::parse_duration_secs(t)
+            .ok()
+            .map(|secs| (now + ChronoDuration::seconds(secs as i64)).to_rfc3339())
     });
     // `resume_on: timeout` → auto-abort on expiry (reaper picks it up).
     // `resume_on: operator_click` / `poll` → leave on_timeout unset so the
@@ -413,7 +413,9 @@ mod tests {
         let desc = build(&id, "deploy.md", 2, &spec);
 
         save(&id, &desc).expect("save should succeed");
-        let loaded = load(&id).expect("load should not error").expect("should find descriptor");
+        let loaded = load(&id)
+            .expect("load should not error")
+            .expect("should find descriptor");
 
         assert_eq!(loaded.checkpoint_id, desc.checkpoint_id);
         assert_eq!(loaded.workbook, desc.workbook);
@@ -431,8 +433,7 @@ mod tests {
 
     #[test]
     fn test_load_nonexistent_returns_none() {
-        let result = load("test_pending_nonexistent_999999")
-            .expect("load should not error");
+        let result = load("test_pending_nonexistent_999999").expect("load should not error");
         assert!(result.is_none());
     }
 
@@ -679,7 +680,10 @@ mod tests {
         save(&id_b, &desc_b).expect("save b");
 
         let all = list_all();
-        let our_entries: Vec<_> = all.iter().filter(|(id, _)| id.starts_with(&prefix)).collect();
+        let our_entries: Vec<_> = all
+            .iter()
+            .filter(|(id, _)| id.starts_with(&prefix))
+            .collect();
         assert_eq!(our_entries.len(), 2, "should find both descriptors");
         assert_eq!(our_entries[0].0, id_a, "first should be _aaa");
         assert_eq!(our_entries[1].0, id_b, "second should be _bbb");
@@ -694,7 +698,9 @@ mod tests {
     /// Build an already-expired pending descriptor suitable for reaper tests.
     fn expired_desc(id: &str, workbook: &str, on_timeout: Option<&str>) -> PendingDescriptor {
         PendingDescriptor {
-            checkpoint: checkpoint::checkpoint_path(id).to_string_lossy().to_string(),
+            checkpoint: checkpoint::checkpoint_path(id)
+                .to_string_lossy()
+                .to_string(),
             checkpoint_id: id.to_string(),
             workbook: workbook.to_string(),
             next_block: 1,
@@ -735,7 +741,10 @@ mod tests {
 
         let _ = reap_expired();
 
-        assert!(load(&id).expect("load").is_none(), "pending descriptor should be gone");
+        assert!(
+            load(&id).expect("load").is_none(),
+            "pending descriptor should be gone"
+        );
         let loaded_ckpt = checkpoint::load(&id).expect("load ckpt").expect("ckpt");
         assert_eq!(loaded_ckpt.status, checkpoint::CheckpointStatus::Failed);
 
@@ -750,7 +759,10 @@ mod tests {
         save(&id, &desc).expect("save");
 
         let _ = reap_expired();
-        assert!(load(&id).expect("load").is_none(), "unset on_timeout should be reaped");
+        assert!(
+            load(&id).expect("load").is_none(),
+            "unset on_timeout should be reaped"
+        );
     }
 
     #[test]
@@ -761,7 +773,10 @@ mod tests {
         save(&id, &desc).expect("save");
 
         let _ = reap_expired();
-        assert!(load(&id).expect("load").is_none(), "unknown on_timeout should be reaped");
+        assert!(
+            load(&id).expect("load").is_none(),
+            "unknown on_timeout should be reaped"
+        );
     }
 
     #[test]
@@ -788,7 +803,9 @@ mod tests {
         // Post-condition 2: ckpt is Failed (or absent if a prior cleanup removed it).
         let ckpt_final = checkpoint::load(&id).expect("load ckpt");
         assert!(
-            ckpt_final.as_ref().map_or(true, |c| c.status == checkpoint::CheckpointStatus::Failed),
+            ckpt_final
+                .as_ref()
+                .is_none_or(|c| c.status == checkpoint::CheckpointStatus::Failed),
             "ckpt should be Failed after reap, got {:?}",
             ckpt_final.as_ref().map(|c| &c.status)
         );
@@ -815,7 +832,10 @@ mod tests {
             reaped.iter().all(|r| r.id != id),
             "skip mode must not be reaped"
         );
-        assert!(load(&id).expect("load").is_some(), "descriptor should remain");
+        assert!(
+            load(&id).expect("load").is_some(),
+            "descriptor should remain"
+        );
 
         delete(&id).expect("cleanup");
     }
@@ -828,7 +848,10 @@ mod tests {
         save(&id, &desc).expect("save");
 
         let reaped = reap_expired();
-        assert!(reaped.iter().all(|r| r.id != id), "prompt mode must not be reaped");
+        assert!(
+            reaped.iter().all(|r| r.id != id),
+            "prompt mode must not be reaped"
+        );
         assert!(load(&id).expect("load").is_some());
 
         delete(&id).expect("cleanup");
@@ -843,7 +866,10 @@ mod tests {
         save(&id, &desc).expect("save");
 
         let reaped = reap_expired();
-        assert!(reaped.iter().all(|r| r.id != id), "unexpired must not be reaped");
+        assert!(
+            reaped.iter().all(|r| r.id != id),
+            "unexpired must not be reaped"
+        );
         assert!(load(&id).expect("load").is_some());
 
         delete(&id).expect("cleanup");

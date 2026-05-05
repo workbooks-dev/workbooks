@@ -552,7 +552,11 @@ pub fn evaluate_condition(expr: &str, env: &HashMap<String, String>) -> bool {
             false
         }
     };
-    if negate { !result } else { result }
+    if negate {
+        !result
+    } else {
+        result
+    }
 }
 
 fn is_truthy(v: Option<&String>) -> bool {
@@ -563,7 +567,10 @@ fn is_truthy(v: Option<&String>) -> bool {
             if t.is_empty() {
                 return false;
             }
-            !matches!(t.to_ascii_lowercase().as_str(), "0" | "false" | "no" | "off")
+            !matches!(
+                t.to_ascii_lowercase().as_str(),
+                "0" | "false" | "no" | "off"
+            )
         }
     }
 }
@@ -672,11 +679,7 @@ fn extract_sections(body: &str) -> Vec<Section> {
                 let mut spec: IncludeSpec = match serde_yaml::from_str(&yaml) {
                     Ok(s) => s,
                     Err(e) => {
-                        eprintln!(
-                            "wb: include block parse error at L{}: {}",
-                            line_num + 1,
-                            e
-                        );
+                        eprintln!("wb: include block parse error at L{}: {}", line_num + 1, e);
                         IncludeSpec::default()
                     }
                 };
@@ -788,6 +791,10 @@ pub struct BlockPolicy {
 impl Frontmatter {
     /// Resolve the per-block policy for a given 1-based block number.
     /// Unknown numbers return the all-default policy.
+    ///
+    /// Migration plan: the step IR (`src/step_ir.rs`) will replace this
+    /// block-number-keyed lookup with stable step IDs once that wave lands.
+    /// See TODO.md #13/#29.
     pub fn block_policy(&self, block_number: u32) -> BlockPolicy {
         let timeout_secs = self
             .timeouts
@@ -967,7 +974,6 @@ echo "hello"
     }
 
     #[test]
-    #[test]
     fn test_reserved_bind_name_exact() {
         assert_eq!(reserved_bind_name(std::iter::once("PATH")), Some("PATH"));
         assert_eq!(reserved_bind_name(std::iter::once("Home")), Some("Home"));
@@ -990,7 +996,7 @@ echo "hello"
 
     #[test]
     fn test_reserved_bind_name_first_hit() {
-        let names = vec!["otp_code", "PATH", "sender"];
+        let names = ["otp_code", "PATH", "sender"];
         assert_eq!(reserved_bind_name(names.iter().copied()), Some("PATH"));
     }
 
@@ -1042,7 +1048,6 @@ echo "$otp_code" | ./login --otp
         }
     }
 
-    #[test]
     #[test]
     fn test_parse_wait_rejects_reserved_bind() {
         let input = "```wait\nkind: email\nbind: PATH\n```\n";
@@ -1568,7 +1573,10 @@ verbs:
     }
 
     fn env_map(pairs: &[(&str, &str)]) -> HashMap<String, String> {
-        pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect()
+        pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect()
     }
 
     #[test]
@@ -1681,7 +1689,13 @@ echo three
         let blocks: Vec<&CodeBlock> = wb
             .sections
             .iter()
-            .filter_map(|s| if let Section::Code(b) = s { Some(b) } else { None })
+            .filter_map(|s| {
+                if let Section::Code(b) = s {
+                    Some(b)
+                } else {
+                    None
+                }
+            })
             .collect();
         assert_eq!(blocks.len(), 3);
         assert_eq!(blocks[0].when.as_deref(), Some("$X"));
@@ -1704,7 +1718,13 @@ verbs: []
         let b = wb
             .sections
             .iter()
-            .find_map(|s| if let Section::Browser(b) = s { Some(b) } else { None })
+            .find_map(|s| {
+                if let Section::Browser(b) = s {
+                    Some(b)
+                } else {
+                    None
+                }
+            })
             .expect("browser slice parsed");
         assert_eq!(b.when.as_deref(), Some("$BROWSER_ON"));
         assert!(b.skip_if.is_none());
@@ -1752,7 +1772,10 @@ echo ok
             .sections
             .iter()
             .any(|s| matches!(s, Section::Include(spec) if spec.path == "./login.md"));
-        assert!(has_include, "include fence should parse into Section::Include");
+        assert!(
+            has_include,
+            "include fence should parse into Section::Include"
+        );
         // Include does not contribute to code_block_count (it expands away).
         assert_eq!(wb.code_block_count(), 1);
     }
@@ -1836,16 +1859,8 @@ echo "after login"
     fn test_resolve_includes_detects_cycle() {
         // A → B → A: resolution must fail, not loop.
         let dir = fresh_tempdir("cycle");
-        let a = write_temp(
-            &dir,
-            "a.md",
-            "```include\npath: ./b.md\n```\n",
-        );
-        write_temp(
-            &dir,
-            "b.md",
-            "```include\npath: ./a.md\n```\n",
-        );
+        let a = write_temp(&dir, "a.md", "```include\npath: ./b.md\n```\n");
+        write_temp(&dir, "b.md", "```include\npath: ./a.md\n```\n");
         let wb = parse(&std::fs::read_to_string(&a).unwrap());
         let err = resolve_includes(wb, &a).expect_err("should detect cycle");
         assert!(
@@ -1859,11 +1874,7 @@ echo "after login"
     #[test]
     fn test_resolve_includes_missing_file() {
         let dir = fresh_tempdir("missing");
-        let parent = write_temp(
-            &dir,
-            "a.md",
-            "```include\npath: ./does-not-exist.md\n```\n",
-        );
+        let parent = write_temp(&dir, "a.md", "```include\npath: ./does-not-exist.md\n```\n");
         let wb = parse(&std::fs::read_to_string(&parent).unwrap());
         let err = resolve_includes(wb, &parent).expect_err("should fail on missing file");
         assert!(
@@ -1965,11 +1976,7 @@ path: ./shared.md
     fn test_resolve_includes_nested_sentinel_nesting() {
         // A includes B includes C → sentinels must nest: enterB, enterC, code, exitC, exitB
         let dir = fresh_tempdir("nested_sent");
-        write_temp(
-            &dir,
-            "c.md",
-            "---\ntitle: C\n---\n\n```bash\necho C\n```\n",
-        );
+        write_temp(&dir, "c.md", "---\ntitle: C\n---\n\n```bash\necho C\n```\n");
         write_temp(
             &dir,
             "b.md",

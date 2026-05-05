@@ -20,7 +20,8 @@ pub fn generate_dockerfile(config: &RequiresConfig) -> Result<String, String> {
 }
 
 /// Install wb inside the container via the public installer.
-const WB_INSTALL: &str = "RUN curl -fsSL https://get.workbooks.dev | WB_INSTALL_DIR=/usr/local/bin sh";
+const WB_INSTALL: &str =
+    "RUN curl -fsSL https://get.workbooks.dev | WB_INSTALL_DIR=/usr/local/bin sh";
 
 fn generate_python_dockerfile(config: &RequiresConfig) -> String {
     let mut lines = Vec::new();
@@ -89,10 +90,7 @@ fn generate_node_dockerfile(config: &RequiresConfig) -> String {
     ));
 
     if !config.node.is_empty() {
-        lines.push(format!(
-            "RUN npm install -g {}",
-            config.node.join(" ")
-        ));
+        lines.push(format!("RUN npm install -g {}", config.node.join(" ")));
     }
 
     lines.push(WB_INSTALL.to_string());
@@ -211,7 +209,9 @@ pub fn build_image(config: &RequiresConfig, workbook_dir: &str) -> Result<String
                         .map_err(|e| format!("write dockerfile: {}", e))?;
                 }
                 drop(child.stdin.take());
-                child.wait_with_output().map_err(|e| format!("docker: {}", e))
+                child
+                    .wait_with_output()
+                    .map_err(|e| format!("docker: {}", e))
             })?;
 
         if !output.status.success() {
@@ -254,16 +254,10 @@ pub fn run_in_sandbox(
     cmd.args(["run", "--rm"]);
 
     // Mount workbook directory
-    cmd.args([
-        "-v",
-        &format!("{}:/work", workbook_dir.display()),
-    ]);
+    cmd.args(["-v", &format!("{}:/work", workbook_dir.display())]);
 
     // Mount checkpoints directory
-    cmd.args([
-        "-v",
-        &format!("{}:/root/.wb/checkpoints", checkpoints_dir),
-    ]);
+    cmd.args(["-v", &format!("{}:/root/.wb/checkpoints", checkpoints_dir)]);
 
     cmd.args(["-w", "/work"]);
 
@@ -278,7 +272,7 @@ pub fn run_in_sandbox(
     cmd.arg(image_tag);
 
     // wb run <file> inside container
-    cmd.args(["wb", "run", &workbook_filename.to_string()]);
+    cmd.args(["wb", "run", workbook_filename.as_ref()]);
     cmd.args(extra_args);
 
     // Inherit stdio so output streams through
@@ -286,9 +280,7 @@ pub fn run_in_sandbox(
     cmd.stdout(std::process::Stdio::inherit());
     cmd.stderr(std::process::Stdio::inherit());
 
-    let status = cmd
-        .status()
-        .map_err(|e| format!("docker run: {}", e))?;
+    let status = cmd.status().map_err(|e| format!("docker run: {}", e))?;
 
     Ok(status.code().unwrap_or(-1))
 }
@@ -439,7 +431,11 @@ mod tests {
         // curl should appear only once in the apt-get line, not duplicated
         let curl_count = df.matches("curl").count();
         // curl appears in apt-get line + in the wb install URL + in the uv install URL = 3
-        assert!(curl_count >= 2, "curl should appear in apt and install lines, got {} occurrences", curl_count);
+        assert!(
+            curl_count >= 2,
+            "curl should appear in apt and install lines, got {} occurrences",
+            curl_count
+        );
     }
 
     #[test]

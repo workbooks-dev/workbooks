@@ -69,7 +69,7 @@ pub fn classify_exit(exit_code: i32) -> &'static str {
     }
     // Unix convention: values ≥ 128 encode a signal (e.g. 137 = SIGKILL, 143 = SIGTERM).
     #[cfg(unix)]
-    if exit_code >= 128 && exit_code < 128 + 64 {
+    if (128..128 + 64).contains(&exit_code) {
         return "signal_killed";
     }
     "nonzero_exit"
@@ -157,14 +157,16 @@ fn resolve_exec(config: &Option<ExecConfig>, lang: &str) -> Option<ExecMode> {
     config.as_ref().and_then(|c| match c {
         ExecConfig::Global(s) => {
             let parts: Vec<String> = s.split_whitespace().map(|w| w.to_string()).collect();
-            if parts.is_empty() { None } else { Some(ExecMode::Prefix(parts)) }
+            if parts.is_empty() {
+                None
+            } else {
+                Some(ExecMode::Prefix(parts))
+            }
         }
-        ExecConfig::PerLanguage(map) => {
-            map.get(lang).map(|s| {
-                let parts: Vec<String> = s.split_whitespace().map(|w| w.to_string()).collect();
-                ExecMode::Replace(parts)
-            })
-        }
+        ExecConfig::PerLanguage(map) => map.get(lang).map(|s| {
+            let parts: Vec<String> = s.split_whitespace().map(|w| w.to_string()).collect();
+            ExecMode::Replace(parts)
+        }),
     })
 }
 
@@ -187,13 +189,17 @@ fn build_command(exec: Option<&ExecMode>, program: &str) -> Command {
     match exec {
         Some(ExecMode::Prefix(parts)) => {
             let mut cmd = Command::new(&parts[0]);
-            for p in &parts[1..] { cmd.arg(p); }
+            for p in &parts[1..] {
+                cmd.arg(p);
+            }
             cmd.arg(program);
             cmd
         }
         Some(ExecMode::Replace(parts)) => {
             let mut cmd = Command::new(&parts[0]);
-            for p in &parts[1..] { cmd.arg(p); }
+            for p in &parts[1..] {
+                cmd.arg(p);
+            }
             cmd
         }
         None => Command::new(program),
@@ -316,6 +322,17 @@ impl Session {
         self.ctx.quiet = quiet;
     }
 
+    pub fn suspend_browser_sidecar(&mut self) {
+        let Some(mut sidecar) = self.browser_sidecar.take() else {
+            return;
+        };
+        if let Err(e) = sidecar.suspend() {
+            if !self.ctx.quiet {
+                crate::output::print_stderr_dim(&format!("warning: {}", e));
+            }
+        }
+    }
+
     /// Override the per-block timeout for the *next* `execute_block` call.
     /// The caller is expected to reset it back to the default after the
     /// block finishes, since the session object is long-lived.
@@ -420,7 +437,13 @@ impl Session {
         // Ensure persistent process exists
         if !self.processes.contains_key(&lang) {
             let work_dir = resolve_working_dir(&self.ctx.dir_config, &lang, &self.ctx.working_dir);
-            match spawn_persistent(&lang, &self.ctx.env, &work_dir, &self.ctx.venv, &self.ctx.exec_config) {
+            match spawn_persistent(
+                &lang,
+                &self.ctx.env,
+                &work_dir,
+                &self.ctx.venv,
+                &self.ctx.exec_config,
+            ) {
                 Ok(proc) => {
                     self.processes.insert(lang.clone(), proc);
                 }
@@ -541,10 +564,7 @@ impl Session {
                         );
                     }
                     _ => {
-                        spawn_env.insert(
-                            "WB_BROWSER_VENDOR".to_string(),
-                            declared.clone(),
-                        );
+                        spawn_env.insert("WB_BROWSER_VENDOR".to_string(), declared.clone());
                     }
                 }
             }
@@ -591,11 +611,12 @@ impl Session {
             spec
         };
 
-        let outcome = self
-            .browser_sidecar
-            .as_mut()
-            .unwrap()
-            .run_slice(resolved_spec, self.ctx.quiet, ctx, restore);
+        let outcome = self.browser_sidecar.as_mut().unwrap().run_slice(
+            resolved_spec,
+            self.ctx.quiet,
+            ctx,
+            restore,
+        );
 
         let mut block = BlockResult {
             block_index: index,
@@ -675,14 +696,8 @@ fn spawn_persistent(
         "bash" => ("bash", vec![]),
         "sh" => ("sh", vec![]),
         "zsh" => ("zsh", vec![]),
-        "node" => (
-            "node",
-            vec!["-e".to_string(), NODE_HARNESS.to_string()],
-        ),
-        "ruby" => (
-            "ruby",
-            vec!["-e".to_string(), RUBY_HARNESS.to_string()],
-        ),
+        "node" => ("node", vec!["-e".to_string(), NODE_HARNESS.to_string()]),
+        "ruby" => ("ruby", vec!["-e".to_string(), RUBY_HARNESS.to_string()]),
         _ => return Err(format!("No session support for {}", lang)),
     };
 
@@ -718,7 +733,7 @@ fn spawn_persistent(
 
     thread::spawn(move || {
         let reader = BufReader::new(stdout);
-        for line in reader.lines().flatten() {
+        for line in reader.lines().map_while(Result::ok) {
             if stdout_tx.send(line).is_err() {
                 break;
             }
@@ -727,7 +742,7 @@ fn spawn_persistent(
 
     thread::spawn(move || {
         let reader = BufReader::new(stderr);
-        for line in reader.lines().flatten() {
+        for line in reader.lines().map_while(Result::ok) {
             if stderr_tx.send(line).is_err() {
                 break;
             }
@@ -865,7 +880,7 @@ fn collect_until_sentinel(
     }
 
     // Trim trailing empty lines (artifact of sentinel newline prefix)
-    while lines.last().map_or(false, |l| l.is_empty()) {
+    while lines.last().is_some_and(|l| l.is_empty()) {
         lines.pop();
     }
 
@@ -927,10 +942,7 @@ pub fn execute_block_oneshot(
             };
             let bin_dir = Path::new(&venv_path).join("bin");
             let current_path = std::env::var("PATH").unwrap_or_default();
-            cmd.env(
-                "PATH",
-                format!("{}:{}", bin_dir.display(), current_path),
-            );
+            cmd.env("PATH", format!("{}:{}", bin_dir.display(), current_path));
             cmd.env("VIRTUAL_ENV", &venv_path);
         }
     }
@@ -954,7 +966,7 @@ pub fn execute_block_oneshot(
                 thread::spawn(move || {
                     let reader = BufReader::new(out);
                     let mut buf = String::new();
-                    for line in reader.lines().flatten() {
+                    for line in reader.lines().map_while(Result::ok) {
                         if !quiet {
                             println!("{}", line);
                         }
@@ -968,7 +980,7 @@ pub fn execute_block_oneshot(
                 thread::spawn(move || {
                     let reader = BufReader::new(err);
                     let mut buf = String::new();
-                    for line in reader.lines().flatten() {
+                    for line in reader.lines().map_while(Result::ok) {
                         if !quiet {
                             crate::output::print_stderr_dim(&line);
                         }
@@ -1063,17 +1075,9 @@ fn resolve_runtime(
             vec!["-".to_string()],
             code.to_string(),
         ),
-        "bash" | "shell" => (
-            "bash".to_string(),
-            vec!["-s".to_string()],
-            code.to_string(),
-        ),
+        "bash" | "shell" => ("bash".to_string(), vec!["-s".to_string()], code.to_string()),
         "sh" => ("sh".to_string(), vec!["-s".to_string()], code.to_string()),
-        "zsh" => (
-            "zsh".to_string(),
-            vec!["-s".to_string()],
-            code.to_string(),
-        ),
+        "zsh" => ("zsh".to_string(), vec!["-s".to_string()], code.to_string()),
         "node" | "javascript" | "js" => (
             "node".to_string(),
             vec!["-e".to_string(), code.to_string()],
@@ -1166,7 +1170,10 @@ mod tests {
     #[test]
     fn test_substitute_vars_empty() {
         let vars = HashMap::new();
-        assert_eq!(substitute_vars("echo {{cluster}}", &vars), "echo {{cluster}}");
+        assert_eq!(
+            substitute_vars("echo {{cluster}}", &vars),
+            "echo {{cluster}}"
+        );
     }
 
     #[test]
@@ -1188,7 +1195,10 @@ mod tests {
     #[test]
     fn test_redact_output_empty() {
         let values: Vec<String> = vec![];
-        assert_eq!(redact_output("token: secret123", &values), "token: secret123");
+        assert_eq!(
+            redact_output("token: secret123", &values),
+            "token: secret123"
+        );
     }
 
     #[test]

@@ -328,8 +328,13 @@ impl CallbackConfig {
         frame: &IncludeFrame,
         parent_step_id: Option<&str>,
     ) {
-        let payload =
-            build_step_started_payload(workbook, checkpoint_id, frame, parent_step_id, &self.run_id);
+        let payload = build_step_started_payload(
+            workbook,
+            checkpoint_id,
+            frame,
+            parent_step_id,
+            &self.run_id,
+        );
         self.send("step.started", &payload.to_string());
     }
 
@@ -852,9 +857,8 @@ mod tests {
             id: "services/airbase/login.md".into(),
             title: Some("Airbase login".into()),
         };
-        let p = build_step_finished_payload(
-            "task.md", None, &frame, None, 12340, "paused", "run-xyz",
-        );
+        let p =
+            build_step_finished_payload("task.md", None, &frame, None, 12340, "paused", "run-xyz");
         assert_eq!(p["event"], "step.finished");
         assert_eq!(p["step_kind"], "include");
         assert_eq!(p["step_id"], "services/airbase/login.md");
@@ -916,9 +920,8 @@ mod tests {
                 title: Some("Airbase login".into()),
             },
         ];
-        let payload = build_step_complete_payload(
-            &result, 1, 1, "t.md", None, None, 0, "run-1", &chain,
-        );
+        let payload =
+            build_step_complete_payload(&result, 1, 1, "t.md", None, None, 0, "run-1", &chain);
         let arr = payload["include_chain"].as_array().unwrap();
         assert_eq!(arr.len(), 2);
         assert_eq!(arr[0]["step_id"], "tasks/month-end-close/README.md");
@@ -999,7 +1002,10 @@ mod tests {
         assert_eq!(payload["progress"]["completed"], 4);
         assert_eq!(payload["progress"]["total"], 12);
         assert_eq!(payload["artifact"]["filename"], "statement.csv");
-        assert_eq!(payload["artifact"]["path"], "/tmp/scout-artifacts/run-abc/statement.csv");
+        assert_eq!(
+            payload["artifact"]["path"],
+            "/tmp/scout-artifacts/run-abc/statement.csv"
+        );
         assert_eq!(payload["artifact"]["bytes"], 18234);
         assert_eq!(payload["artifact"]["content_type"], "text/csv");
         assert_eq!(payload["artifact"]["label"], "April HSBC statement");
@@ -1013,8 +1019,22 @@ mod tests {
     #[test]
     fn test_build_step_artifact_saved_payload_null_label() {
         let payload = build_step_artifact_saved_payload(
-            "t.md", None, 0, "bash", None, 0, 1, 1, "x.bin", "/x.bin", 0,
-            "application/octet-stream", None, None, "r", &[],
+            "t.md",
+            None,
+            0,
+            "bash",
+            None,
+            0,
+            1,
+            1,
+            "x.bin",
+            "/x.bin",
+            0,
+            "application/octet-stream",
+            None,
+            None,
+            "r",
+            &[],
         );
         assert!(payload["artifact"]["label"].is_null());
         assert!(payload["artifact"]["description"].is_null());

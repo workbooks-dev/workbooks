@@ -117,18 +117,15 @@ fn resolve_prompt(provider: &SecretProvider) -> Result<HashMap<String, String>, 
 
 /// Load secrets from a .env / dotenv file
 fn resolve_dotenv(provider: &SecretProvider) -> Result<HashMap<String, String>, String> {
-    let path = provider
-        .command
-        .as_deref()
-        .unwrap_or(".env");
+    let path = provider.command.as_deref().unwrap_or(".env");
 
     load_env_file(path)
 }
 
 /// Read a .env-style file from disk and parse it into a map of env vars.
 pub fn load_env_file(path: &str) -> Result<HashMap<String, String>, String> {
-    let contents = std::fs::read_to_string(path)
-        .map_err(|e| format!("Failed to read {}: {}", path, e))?;
+    let contents =
+        std::fs::read_to_string(path).map_err(|e| format!("Failed to read {}: {}", path, e))?;
     Ok(parse_env_lines(&contents))
 }
 
@@ -152,12 +149,12 @@ fn resolve_shell_command(command: &str) -> Result<HashMap<String, String>, Strin
         if let Ok(map) = serde_json::from_str::<HashMap<String, serde_json::Value>>(trimmed) {
             return Ok(map
                 .into_iter()
-                .filter_map(|(k, v)| {
+                .map(|(k, v)| {
                     let s = match v {
                         serde_json::Value::String(s) => s,
                         other => other.to_string(),
                     };
-                    Some((k, s))
+                    (k, s)
                 })
                 .collect());
         }
