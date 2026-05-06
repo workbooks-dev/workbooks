@@ -16,6 +16,15 @@ pub struct Frontmatter {
     pub exec: Option<ExecConfig>,
     pub working_dir: Option<DirConfig>,
     pub requires: Option<RequiresConfig>,
+    /// Declarative prerequisites: paths to other workbooks that should run
+    /// before this one's blocks. Sugar over a leading ` ```include``` ` fence —
+    /// each entry is prepended as a synthetic `Section::Include` at position 0
+    /// before include resolution. Order in the list = execution order. The
+    /// included workbooks' frontmatter is ignored (parent controls
+    /// runtime/secrets/env) and their `required:` lists are *not* recursively
+    /// honored; treat this like a flat "needs:" list, not transitive deps.
+    /// Note: distinct from `requires` (Docker sandbox config).
+    pub required: Option<Vec<String>>,
     /// Per-block timeout map, keyed by 1-based block number. Values are
     /// duration strings ("30s", "5m", "2h") — bare integers are seconds.
     /// Missing keys fall back to the 300s default.
@@ -256,6 +265,18 @@ pub struct BrowserSliceSpec {
     pub skip_if: Option<String>,
 }
 
+/// Where an `IncludeSpec` came from. `Fence` is the explicit
+/// ` ```include path: X``` ` fence; `RequiredFrontmatter` is a synthesized entry
+/// generated from a `required: [...]` frontmatter list. Drives error message
+/// formatting so users see `required: 'login.md'` instead of
+/// `include at L0: 'login.md'` for synthesized entries.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum IncludeOrigin {
+    #[default]
+    Fence,
+    RequiredFrontmatter,
+}
+
 /// Workbook-composition fence (```include ```). Body is YAML with a `path:`
 /// pointing at another workbook. Resolved away before execution via
 /// `resolve_includes` — downstream code never sees `Section::Include`.
@@ -266,6 +287,8 @@ pub struct IncludeSpec {
     pub line_number: usize,
     #[serde(skip, default)]
     pub section_index: usize,
+    #[serde(skip, default)]
+    pub origin: IncludeOrigin,
 }
 
 /// Identity of an included workbook, carried on `Section::IncludeEnter` /
@@ -357,11 +380,47 @@ pub fn resolve_includes(wb: Workbook, parent_path: &Path) -> Result<Workbook, St
     // keeps ids readable (`services/airbase/login.md`) rather than canonical
     // absolute paths.
     let id_root = std::env::current_dir().unwrap_or_else(|_| base_dir.clone());
-    let resolved = resolve_sections(wb.sections, &base_dir, &id_root, &mut visiting)?;
+
+    // `required:` sugar — prepend each entry as a synthetic include at
+    // position 0 so prerequisites run before the parent's first block. Reuses
+    // the include pipeline for cycle detection, path resolution, and
+    // IncludeEnter/Exit sentinels. Inner workbooks' `required:` is ignored
+    // (their frontmatter is ignored entirely, matching the include-fence
+    // contract).
+    let sections = match &wb.frontmatter.required {
+        Some(reqs) if !reqs.is_empty() => {
+            let mut prefix: Vec<Section> = reqs
+                .iter()
+                .map(|p| {
+                    Section::Include(IncludeSpec {
+                        path: p.clone(),
+                        line_number: 0,
+                        section_index: 0,
+                        origin: IncludeOrigin::RequiredFrontmatter,
+                    })
+                })
+                .collect();
+            prefix.extend(wb.sections);
+            prefix
+        }
+        _ => wb.sections,
+    };
+
+    let resolved = resolve_sections(sections, &base_dir, &id_root, &mut visiting)?;
     Ok(Workbook {
         frontmatter: wb.frontmatter,
         sections: resolved,
     })
+}
+
+/// Human-readable error prefix for an `IncludeSpec` — distinguishes
+/// `required:` frontmatter entries from explicit include fences so missing-file
+/// / cycle / read errors point at the user's actual source of the include.
+fn include_origin_label(spec: &IncludeSpec) -> String {
+    match spec.origin {
+        IncludeOrigin::Fence => format!("include at L{}", spec.line_number),
+        IncludeOrigin::RequiredFrontmatter => format!("required '{}'", spec.path),
+    }
 }
 
 /// Compute a readable step_id for an included workbook: path relative to
@@ -385,11 +444,12 @@ fn resolve_sections(
     for section in sections {
         match section {
             Section::Include(spec) => {
+                let where_ = include_origin_label(&spec);
                 let target = base_dir.join(&spec.path);
                 let target_canonical = target.canonicalize().map_err(|e| {
                     format!(
-                        "include at L{}: cannot resolve path '{}' (relative to {}): {}",
-                        spec.line_number,
+                        "{}: cannot resolve path '{}' (relative to {}): {}",
+                        where_,
                         spec.path,
                         base_dir.display(),
                         e
@@ -397,15 +457,15 @@ fn resolve_sections(
                 })?;
                 if visiting.contains(&target_canonical) {
                     return Err(format!(
-                        "include at L{}: circular include of '{}' (already being resolved)",
-                        spec.line_number,
+                        "{}: circular include of '{}' (already being resolved)",
+                        where_,
                         target_canonical.display()
                     ));
                 }
                 let content = fs::read_to_string(&target_canonical).map_err(|e| {
                     format!(
-                        "include at L{}: cannot read '{}': {}",
-                        spec.line_number,
+                        "{}: cannot read '{}': {}",
+                        where_,
                         target_canonical.display(),
                         e
                     )
@@ -2053,6 +2113,182 @@ path: ./shared.md
             .count();
         assert_eq!(enters, 2);
         assert_eq!(exits, 2);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // --- `required:` frontmatter --------------------------------------------
+
+    #[test]
+    fn test_required_frontmatter_prepends_includes_in_order() {
+        let dir = fresh_tempdir("required_basic");
+        write_temp(&dir, "a.md", "```bash\necho A\n```\n");
+        write_temp(&dir, "b.md", "```bash\necho B\n```\n");
+        let parent = write_temp(
+            &dir,
+            "main.md",
+            r#"---
+required:
+  - ./a.md
+  - ./b.md
+---
+
+```bash
+echo MAIN
+```
+"#,
+        );
+        let wb = parse(&std::fs::read_to_string(&parent).unwrap());
+        let resolved = resolve_includes(wb, &parent).expect("resolve");
+        // Trace shows execution order: a first, then b, then main.
+        let trace: Vec<String> = resolved
+            .sections
+            .iter()
+            .filter_map(|s| match s {
+                Section::Code(b) => Some(format!("code:{}", b.code.trim())),
+                Section::IncludeEnter(f) => Some(format!("enter:{}", f.id)),
+                Section::IncludeExit(f) => Some(format!("exit:{}", f.id)),
+                _ => None,
+            })
+            .collect();
+        // Expect: enter a, code A, exit a, enter b, code B, exit b, code MAIN
+        assert!(trace[0].starts_with("enter:") && trace[0].ends_with("a.md"), "{trace:?}");
+        assert_eq!(trace[1], "code:echo A");
+        assert!(trace[2].starts_with("exit:") && trace[2].ends_with("a.md"), "{trace:?}");
+        assert!(trace[3].starts_with("enter:") && trace[3].ends_with("b.md"), "{trace:?}");
+        assert_eq!(trace[4], "code:echo B");
+        assert!(trace[5].starts_with("exit:") && trace[5].ends_with("b.md"), "{trace:?}");
+        assert_eq!(trace[6], "code:echo MAIN");
+        assert_eq!(resolved.code_block_count(), 3);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_required_composes_with_explicit_include_fence() {
+        // `required:` runs first, then any explicit `include` fences in body order.
+        let dir = fresh_tempdir("required_with_fence");
+        write_temp(&dir, "pre.md", "```bash\necho PRE\n```\n");
+        write_temp(&dir, "mid.md", "```bash\necho MID\n```\n");
+        let parent = write_temp(
+            &dir,
+            "main.md",
+            r#"---
+required: [./pre.md]
+---
+
+```bash
+echo before-include
+```
+
+```include
+path: ./mid.md
+```
+
+```bash
+echo after-include
+```
+"#,
+        );
+        let wb = parse(&std::fs::read_to_string(&parent).unwrap());
+        let resolved = resolve_includes(wb, &parent).expect("resolve");
+        let codes: Vec<&str> = resolved
+            .sections
+            .iter()
+            .filter_map(|s| match s {
+                Section::Code(b) => Some(b.code.trim()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            codes,
+            vec!["echo PRE", "echo before-include", "echo MID", "echo after-include"]
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_required_missing_target_errors() {
+        let dir = fresh_tempdir("required_missing");
+        let parent = write_temp(
+            &dir,
+            "main.md",
+            "---\nrequired: [./nope.md]\n---\n\n```bash\necho hi\n```\n",
+        );
+        let wb = parse(&std::fs::read_to_string(&parent).unwrap());
+        let err = resolve_includes(wb, &parent).expect_err("missing required");
+        // Error mentions "required" not "include at L0".
+        assert!(err.contains("required"), "error: {err}");
+        assert!(err.contains("nope.md"), "error: {err}");
+        assert!(!err.contains("L0"), "L0 leaked into error: {err}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_required_circular_detected() {
+        // main.md required=[a.md], a.md required=[main.md] — wait, actually
+        // inner workbooks' `required:` is intentionally NOT honored. So the
+        // cycle here has to be via include fence inside the prerequisite.
+        let dir = fresh_tempdir("required_cycle");
+        write_temp(&dir, "a.md", "```include\npath: ./main.md\n```\n");
+        let parent = write_temp(
+            &dir,
+            "main.md",
+            "---\nrequired: [./a.md]\n---\n\n```bash\necho hi\n```\n",
+        );
+        let wb = parse(&std::fs::read_to_string(&parent).unwrap());
+        let err = resolve_includes(wb, &parent).expect_err("should detect cycle");
+        assert!(err.contains("circular"), "error: {err}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_required_in_included_workbook_is_ignored() {
+        // Parent includes B. B has its own `required: [c.md]`. That `required`
+        // is in B's frontmatter, which is intentionally ignored when B is
+        // included from a parent — same contract as runtime/secrets/env.
+        // c.md should NOT run when we resolve via the parent.
+        let dir = fresh_tempdir("required_inner_ignored");
+        write_temp(&dir, "c.md", "```bash\necho C\n```\n");
+        write_temp(
+            &dir,
+            "b.md",
+            "---\nrequired: [./c.md]\n---\n\n```bash\necho B\n```\n",
+        );
+        let parent = write_temp(
+            &dir,
+            "main.md",
+            "```include\npath: ./b.md\n```\n",
+        );
+        let wb = parse(&std::fs::read_to_string(&parent).unwrap());
+        let resolved = resolve_includes(wb, &parent).expect("resolve");
+        let codes: Vec<&str> = resolved
+            .sections
+            .iter()
+            .filter_map(|s| match s {
+                Section::Code(b) => Some(b.code.trim()),
+                _ => None,
+            })
+            .collect();
+        // Only B ran; C was skipped because B's required: was ignored.
+        assert_eq!(codes, vec!["echo B"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_required_empty_list_is_noop() {
+        let dir = fresh_tempdir("required_empty");
+        let parent = write_temp(
+            &dir,
+            "main.md",
+            "---\nrequired: []\n---\n\n```bash\necho hi\n```\n",
+        );
+        let wb = parse(&std::fs::read_to_string(&parent).unwrap());
+        let resolved = resolve_includes(wb, &parent).expect("resolve");
+        assert_eq!(resolved.code_block_count(), 1);
+        // No IncludeEnter sentinels.
+        assert!(!resolved
+            .sections
+            .iter()
+            .any(|s| matches!(s, Section::IncludeEnter(_))));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

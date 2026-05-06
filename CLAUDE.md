@@ -167,6 +167,33 @@ See `examples/include-demo.md` + `examples/include-login.md` for a minimal examp
 Passing parameters into an included workbook (beyond env vars the parent exports) is
 scoped for a later milestone.
 
+### Declarative prerequisites: `required:`
+
+Sugar over `include:` for "this runbook needs A and B to run first." Each entry
+in the `required:` frontmatter list is prepended at position 0 as a synthetic
+include — same execution path, same cycle/missing-file errors, same
+`IncludeEnter`/`IncludeExit` sentinels — but expressed as configuration rather
+than an inline fence:
+
+```yaml
+---
+required:
+  - ./login.md
+  - ./warm-cache.md
+---
+```
+
+Order in the list = execution order. Notes:
+
+- *Not recursive*: an included workbook's own `required:` is ignored (its
+  frontmatter is ignored entirely, matching the include contract). Treat this
+  like a flat "needs:" list, not transitive deps.
+- An empty list is a no-op.
+- Distinct from the existing `requires:` field (Docker sandbox config) — note
+  the trailing `d`.
+
+See `examples/required-demo.md` for a runnable example.
+
 ## CLI Usage
 
 ```bash

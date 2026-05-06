@@ -186,6 +186,7 @@ fn check_frontmatter_yaml(
         exec: Option<serde_yaml::Value>,
         working_dir: Option<serde_yaml::Value>,
         requires: Option<serde_yaml::Value>,
+        required: Option<serde_yaml::Value>,
         timeouts: Option<serde_yaml::Value>,
         retries: Option<serde_yaml::Value>,
         continue_on_error: Option<serde_yaml::Value>,
@@ -307,10 +308,11 @@ fn check_fence_yaml(sections: &[Section], _source: &str, _path: &Path, _out: &mu
 // ─── Include resolution check ────────────────────────────────────────────────
 
 fn check_includes(wb: &Workbook, path: &Path, out: &mut Vec<Diagnostic>) {
+    let parent_dir = path.parent().unwrap_or(Path::new("."));
+
     // Check Section::Include entries (unresolved in the pre-resolve parse).
     for section in &wb.sections {
         if let Section::Include(spec) = section {
-            let parent_dir = path.parent().unwrap_or(Path::new("."));
             let target = parent_dir.join(&spec.path);
             if !target.exists() {
                 out.push(
@@ -324,6 +326,21 @@ fn check_includes(wb: &Workbook, path: &Path, out: &mut Vec<Diagnostic>) {
                     )
                     .with_span(Span::point(spec.line_number as u32, 1)),
                 );
+            }
+        }
+    }
+
+    // Frontmatter `required:` entries (synthesized into Section::Include during
+    // resolve_includes, so the loop above doesn't see them yet).
+    if let Some(reqs) = &wb.frontmatter.required {
+        for req in reqs {
+            let target = parent_dir.join(req);
+            if !target.exists() {
+                out.push(Diagnostic::error(
+                    "wb-inc-001",
+                    path,
+                    format!("required '{req}': missing target"),
+                ));
             }
         }
     }

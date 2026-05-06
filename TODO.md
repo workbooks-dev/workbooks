@@ -46,14 +46,14 @@ Suggested product sequencing after the 2026-04-29 multi-agent battle test:
 - [ ] **16. Inline `expect` / `assert` fences.** Turn runbooks into test suites. `expect exit 0`, `expect stdout contains "ok"`.
 - [ ] **18. Source-hash execution cache.** Skip blocks whose source + env + inputs haven't changed. Massive for iterative agent re-runs.
 - [x] **27. `include:` fence — workbook composition.** Shipped — `Section::Include` + parse-time expansion via `parser::resolve_includes`. Target workbook's blocks splice into the parent's section list, inheriting env + `$WB_ARTIFACTS_DIR`. Cycle detection + missing-file errors exit with code 3 at load time. Target frontmatter is ignored (parent controls runtime/secrets/env). Params still scoped for #14. Example: `examples/include-demo.md` + `examples/include-login.md`.
-- [ ] **28. `required:` frontmatter — declarative prerequisites** *(long-term; depends on #27)*. Sugar for "prepend these workbooks as `include` blocks at position 0; bail if any fail." Shape mirrors GitHub Actions `needs:`. Example: `required: [login.md, warm-cache.md]`. Same execution path as #27 — different ergonomics (order-independent, declarative vs positional fence).
+- [x] **28. `required:` frontmatter — declarative prerequisites.** Shipped — `Frontmatter::required: Option<Vec<String>>` synthesized into `Section::Include` entries at position 0 in `resolve_includes`. Reuses the include pipeline (cycle detection, path resolution, IncludeEnter/Exit sentinels). Inner workbooks' `required:` is intentionally not recursive (mirrors include's "target frontmatter ignored" contract). Errors say `required 'login.md': ...` rather than `include at L0: ...` via a new `IncludeOrigin` enum. `wb validate` understands the field. Example: `examples/required-demo.md`.
 
 ## 🌐 Browser runtime
 
 - [ ] **19. `wait_for_network_idle` verb.** Every SPA workbook is fragile without this.
 - [ ] **20. Text-fallback selectors.** `click: { selector, text_fallback: "Send" }`. One change, ~half fewer brittle workbooks.
 - [ ] **21. Auto-screenshot + console buffer on verb failure.** Current failures = single line of stderr; post-hoc debugging is impossible.
-- [ ] **22. `WB_BROWSER_MODE=local` fallback.** Dev iteration without Browserbase cost/latency.
+- [x] **22. `WB_BROWSER_VENDOR=local` provider.** Shipped — third provider alongside browserbase/browser-use that drives a host-installed Playwright Chromium directly via `chromium.launch()`. No API keys, no network calls, no per-session cost. The provider returns a pre-built `Browser` handle in `_browser`; the sidecar entry point uses it directly instead of `connectOverCDP(cdpUrl)`. Trade-offs documented: no live URL, no persistent profile, no resume-after-pause (in-process browser dies with the sidecar). Knobs: `WB_BROWSER_LOCAL_HEADLESS` (default 1), `WB_BROWSER_LOCAL_EXECUTABLE_PATH`, `WB_BROWSER_LOCAL_CHANNEL`. First-run hint points at `npx playwright install chromium`.
 - [ ] **23. Structured error codes in sidecar events.** `SELECTOR_NOT_FOUND`, `NAV_TIMEOUT`, `AUTH_FAILED` — not freeform strings.
 
 ## 🧹 Code-health (do alongside, not instead)
