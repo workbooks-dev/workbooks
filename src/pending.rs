@@ -388,10 +388,7 @@ pub fn reap_expired() -> Vec<ReapedEntry> {
                     let completed = desc_now.next_block.saturating_sub(1);
                     let result = crate::executor::BlockResult {
                         block_index: desc_now.next_block,
-                        language: desc_now
-                            .kind
-                            .clone()
-                            .unwrap_or_else(|| "wait".to_string()),
+                        language: desc_now.kind.clone().unwrap_or_else(|| "wait".to_string()),
                         stdout: String::new(),
                         stderr: format!(
                             "wait timed out (timeout_at={})",
@@ -412,6 +409,12 @@ pub fn reap_expired() -> Vec<ReapedEntry> {
                         None,
                         desc_now.line_number,
                         &[],
+                        // Reap path doesn't have access to the original
+                        // workbook's step list — descriptors don't persist
+                        // step ids today. Leaving None until we either
+                        // persist the id on the descriptor or rebuild the
+                        // step list from the workbook file at reap time.
+                        None,
                     );
                 }
             }
@@ -1350,9 +1353,7 @@ mod tests {
 
         let (tx, rx) = mpsc::channel::<String>();
         let handle = thread::spawn(move || {
-            listener
-                .set_nonblocking(false)
-                .expect("set blocking");
+            listener.set_nonblocking(false).expect("set blocking");
             // Accept one connection — the reaper's curl call.
             if let Ok((mut stream, _)) = listener.accept() {
                 let _ = stream.set_read_timeout(Some(StdDuration::from_secs(2)));

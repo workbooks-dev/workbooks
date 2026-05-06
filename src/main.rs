@@ -48,6 +48,26 @@ fn parse_and_resolve(content: &str, file: &str) -> parser::Workbook {
 /// The session's block_timeout is always set before each attempt (to either
 /// the per-block override or the run-wide default) so state can't leak
 /// across blocks with different timeouts.
+/// Look up the resolved per-step policy for `block_idx` and translate it to
+/// the `parser::BlockPolicy` shape used by `execute_block_with_policy`. Falls
+/// back to defaults when the index is out of bounds — that only happens if
+/// the workbook somehow advanced past `steps.len()`, which would already be
+/// a serious bug.
+fn step_policy_for(
+    resolved: &[step_ir::ResolvedStepPolicy],
+    block_idx: usize,
+) -> parser::BlockPolicy {
+    let p = resolved
+        .get(block_idx)
+        .map(|r| r.policy)
+        .unwrap_or_default();
+    parser::BlockPolicy {
+        timeout_secs: p.timeout_secs,
+        retries: p.retries,
+        continue_on_error: p.continue_on_error,
+    }
+}
+
 fn execute_block_with_policy(
     session: &mut executor::Session,
     block: &parser::CodeBlock,
@@ -1003,6 +1023,8 @@ fn run_single_collect(
     let start = Instant::now();
     let mut results = Vec::new();
     let mut block_idx = 0;
+    let resolved_step_policies =
+        step_ir::resolve_step_policies(&workbook.build_steps(), &workbook.frontmatter);
     let mut session = executor::Session::new(ctx);
 
     for section in &workbook.sections {
@@ -1011,7 +1033,7 @@ fn run_single_collect(
                 if block.skip_execution {
                     continue;
                 }
-                let policy = workbook.frontmatter.block_policy((block_idx + 1) as u32);
+                let policy = step_policy_for(&resolved_step_policies, block_idx);
                 let result = execute_block_with_policy(
                     &mut session,
                     block,
@@ -1042,6 +1064,7 @@ fn run_single_collect(
                     // Folder mode doesn't emit callbacks, so the chain is
                     // never serialized. An empty slice keeps the type happy.
                     include_chain: &[],
+                    step_id: None,
                 };
                 let (result, pause) = session.execute_browser_slice(spec, block_idx, &ctx, None);
                 // Folder mode: no callback, so we don't emit
@@ -1500,6 +1523,12 @@ fn run_single(cfg: RunConfig) {
 
     let workbook = parse_and_resolve(&content, &cfg.file);
     let block_count = workbook.code_block_count();
+    // Stable step IDs + per-step policies. `steps[i]` is index-aligned with the
+    // run loop's `block_idx` (i.e. matches the legacy `(block_idx + 1)`-based
+    // block number used by `frontmatter.block_policy`). Built once here so the
+    // ids remain stable across replay/resume of this run.
+    let steps = workbook.build_steps();
+    let resolved_step_policies = step_ir::resolve_step_policies(&steps, &workbook.frontmatter);
 
     if block_count == 0 {
         eprintln!(
@@ -1846,7 +1875,8 @@ fn run_single(cfg: RunConfig) {
                 );
             }
 
-            let policy = workbook.frontmatter.block_policy((block_idx + 1) as u32);
+            let policy = step_policy_for(&resolved_step_policies, block_idx);
+            let step_id = steps.get(block_idx).map(|s| s.id.as_str());
             let result = execute_block_with_policy(
                 &mut session,
                 block,
@@ -1880,6 +1910,7 @@ fn run_single(cfg: RunConfig) {
                             art.label.as_deref(),
                             art.description.as_deref(),
                             &include_stack,
+                            step_id,
                         );
                     }
                 }
@@ -1913,6 +1944,7 @@ fn run_single(cfg: RunConfig) {
                         block_heading.as_deref(),
                         block.line_number,
                         &include_stack,
+                        step_id,
                     );
                 }
             }
@@ -1932,6 +1964,7 @@ fn run_single(cfg: RunConfig) {
                         block_heading.as_deref(),
                         block.line_number,
                         &include_stack,
+                        step_id,
                     );
                 }
 
@@ -2052,6 +2085,7 @@ fn run_single(cfg: RunConfig) {
                 );
             }
 
+            let step_id = steps.get(block_idx).map(|s| s.id.as_str());
             let slice_ctx = sidecar::SliceCallbackContext {
                 cb: cb.as_ref(),
                 workbook: file,
@@ -2062,6 +2096,7 @@ fn run_single(cfg: RunConfig) {
                 completed: block_idx + 1,
                 total: block_count,
                 include_chain: &include_stack,
+                step_id,
             };
             // Take a one-shot restore, if the resume path handed us one earlier.
             let restore = browser_restore.take();
@@ -2092,6 +2127,7 @@ fn run_single(cfg: RunConfig) {
                             art.label.as_deref(),
                             art.description.as_deref(),
                             &include_stack,
+                            step_id,
                         );
                     }
                 }
@@ -2116,6 +2152,7 @@ fn run_single(cfg: RunConfig) {
                     pause,
                     &include_stack,
                     &frame_starts,
+                    step_id,
                 );
                 // Unreachable — pause_browser_slice exits.
             }
@@ -2146,6 +2183,7 @@ fn run_single(cfg: RunConfig) {
                         block_heading.as_deref(),
                         spec.line_number,
                         &include_stack,
+                        step_id,
                     );
                 }
             }
@@ -2161,6 +2199,7 @@ fn run_single(cfg: RunConfig) {
                         block_heading.as_deref(),
                         spec.line_number,
                         &include_stack,
+                        step_id,
                     );
                 }
 
@@ -2441,6 +2480,8 @@ fn inspect_workbook_json(file: &str) {
 
     let mut blocks = Vec::new();
     let mut idx: usize = 0;
+    let steps = workbook.build_steps();
+    let mut step_idx: usize = 0;
     for section in &workbook.sections {
         match section {
             parser::Section::Code(block) => {
@@ -2459,9 +2500,17 @@ fn inspect_workbook_json(file: &str) {
                     }
                     None => default_program(&lang).to_string(),
                 };
+                let step_id = if !block.skip_execution {
+                    let id = steps.get(step_idx).map(|s| s.id.0.clone());
+                    step_idx += 1;
+                    id
+                } else {
+                    None
+                };
                 blocks.push(serde_json::json!({
                     "index": idx,
                     "kind": "code",
+                    "step_id": step_id,
                     "language": block.language,
                     "line": block.line_number,
                     "flags": {
@@ -2491,9 +2540,17 @@ fn inspect_workbook_json(file: &str) {
             }
             parser::Section::Browser(spec) => {
                 idx += 1;
+                let step_id = if !spec.skip_execution {
+                    let id = steps.get(step_idx).map(|s| s.id.0.clone());
+                    step_idx += 1;
+                    id
+                } else {
+                    None
+                };
                 blocks.push(serde_json::json!({
                     "index": idx,
                     "kind": "browser",
+                    "step_id": step_id,
                     "language": "browser",
                     "line": spec.line_number,
                     "flags": {
@@ -2786,6 +2843,7 @@ fn pause_browser_slice(
     pause: sidecar::PauseInfo,
     include_chain: &[parser::IncludeFrame],
     frame_starts: &[Instant],
+    step_id: Option<&str>,
 ) -> ! {
     let id = match checkpoint_id.as_deref() {
         Some(id) => id,
@@ -2900,6 +2958,7 @@ fn pause_browser_slice(
             0,
             serde_json::Value::Object(extra),
             include_chain,
+            step_id,
         );
         // Same bubble-up as pause_for_signal: close active frames with
         // outcome=paused so the run-page timeline freezes.
@@ -4382,6 +4441,7 @@ echo "pin=$pin"
             silent: false,
             when: None,
             skip_if: None,
+            attrs: Default::default(),
         }
     }
 

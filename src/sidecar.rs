@@ -98,6 +98,10 @@ pub struct SliceCallbackContext<'a> {
     /// / `step.recovered` events so consumers can correlate mid-slice
     /// lifecycle with the operator-visible step timeline.
     pub include_chain: &'a [crate::parser::IncludeFrame],
+    /// Stable step id of the executing browser slice. Forwarded on lifecycle
+    /// events (paused/resumed/recovered) so consumers correlate with the
+    /// step.complete fired by the run loop.
+    pub step_id: Option<&'a str>,
 }
 
 /// Extra payload sent to the sidecar to resume a previously-paused slice.
@@ -513,6 +517,7 @@ fn fire_lifecycle(ctx: &SliceCallbackContext, event: &str, sidecar_msg: &Value) 
         ctx.total,
         extra,
         ctx.include_chain,
+        ctx.step_id,
     );
 }
 

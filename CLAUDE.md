@@ -72,7 +72,23 @@ print("runs in python")
 
 ## Per-block timeouts, retries, and continue-on-error
 
-Frontmatter maps keyed by **1-based block number** (matching the `[N/total]` UI):
+Two equivalent ways to set per-block policy. The fence-attr form is preferred —
+the policy stays attached to the block across edits, so inserting a block
+above doesn't shift every downstream entry.
+
+**Fence attrs** (Pandoc-style `{key=value}` cluster):
+
+```markdown
+```bash {#health timeout=30s retries=2}
+curl -sf https://example.com
+```
+
+```bash {#cleanup continue_on_error}
+rm -rf $TMPDIR
+```
+```
+
+**Frontmatter maps** (legacy, keyed by 1-based block number):
 
 ```yaml
 ---
@@ -89,7 +105,25 @@ continue_on_error: [4] # block 4 failure doesn't trigger --bail
 - **`retries`** — number of *additional* attempts after the first failure (`0`/missing = no retry). Retries run with a 500ms delay between attempts. Useful for flaky HTTP calls; combine with `timeouts:` to cap individual attempts.
 - **`continue_on_error`** — block numbers whose failure should not halt a `--bail` run. The block's failure is still recorded and emitted via callbacks; execution just continues to the next block.
 
+When a block has both a fence attr and a legacy frontmatter entry for the same field, **the fence attr wins** and `wb validate` emits a `wb-step-002` warning so you know to drop the legacy entry.
+
 Callback payloads (`step.complete`, `checkpoint.failed`) include `stdout_partial` / `stderr_partial` fields so downstream agents can distinguish "block failed" from "block was cut off mid-run".
+
+## Stable step IDs
+
+Every executable block gets a stable identifier that flows into callback
+payloads (`block.step_id`), `wb inspect --json` (`blocks[].step_id`), and
+future selective-run flags. Two ways to set it:
+
+- **Explicit**: `{#login}` — Pandoc-style id attribute. Survives edits.
+- **Auto-derived**: a deterministic `auto-<12-hex-chars>` hash of the include
+  chain + position + language + first 64 bytes of the body. Same workbook
+  produces the same auto ids on every parse.
+
+Duplicate explicit ids are a `wb validate` error (`wb-step-001`). Auto ids
+won't collide in practice since position is part of the hash.
+
+See `examples/step-ids-demo.md`.
 
 ## Conditional cells: `{when=…}` and `{skip_if=…}`
 

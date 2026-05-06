@@ -82,6 +82,10 @@ pub fn validate_content(content: &str, path: &Path, opts: &ValidateOptions) -> V
     // 6. Check secret provider names (wb-secret-001).
     check_secrets_config(&wb.frontmatter, path, &mut diags);
 
+    // 7. Check step ids: duplicate explicit ids (wb-step-001) and fence-attr/
+    //    legacy-map shadowing (wb-step-002).
+    check_step_ids(&wb, path, &mut diags);
+
     // If --strict: promote warnings to errors.
     if opts.strict {
         for d in &mut diags {
@@ -395,6 +399,74 @@ fn check_secrets_config(fm: &Frontmatter, path: &Path, out: &mut Vec<Diagnostic>
     }
 }
 
+// ─── Step-id checks (wb-step-001, wb-step-002) ───────────────────────────────
+
+fn check_step_ids(wb: &Workbook, path: &Path, out: &mut Vec<Diagnostic>) {
+    use crate::step_ir;
+    use std::collections::HashMap;
+
+    let steps = wb.build_steps();
+
+    // wb-step-001: duplicate explicit ids. Auto-derived ids are deterministic
+    // but include position+body, so accidental collisions there are extremely
+    // unlikely; if they did occur it would be a hash bug, not a user error.
+    let mut seen: HashMap<String, Vec<usize>> = HashMap::new();
+    for (idx, step) in steps.iter().enumerate() {
+        if let Some(explicit) = step.attrs.explicit_id.as_ref() {
+            seen.entry(explicit.clone()).or_default().push(idx);
+        }
+    }
+    for (id, indices) in seen {
+        if indices.len() > 1 {
+            let lines: Vec<String> = indices
+                .iter()
+                .map(|i| format!("L{}", steps[*i].span.line))
+                .collect();
+            out.push(
+                Diagnostic::error(
+                    "wb-step-001",
+                    path,
+                    format!(
+                        "duplicate step id '{id}' on {} blocks ({})",
+                        indices.len(),
+                        lines.join(", ")
+                    ),
+                )
+                .with_help("rename one of the colliding `{#id}` attrs"),
+            );
+        }
+    }
+
+    // wb-step-002: fence-attr policy shadows a legacy block-number entry. The
+    // fence attr wins; emit a warning so users can decide which to keep.
+    let resolved = step_ir::resolve_step_policies(&steps, &wb.frontmatter);
+    for (idx, r) in resolved.iter().enumerate() {
+        for (field, legacy_value) in &r.shadowed_legacy {
+            let line = steps[idx].span.line;
+            out.push(
+                Diagnostic::warning(
+                    "wb-step-002",
+                    path,
+                    format!(
+                        "block at L{line}: fence attr `{field}=` shadows legacy `{}: {{{}: {}}}`",
+                        field_to_legacy_key(field),
+                        idx + 1,
+                        legacy_value
+                    ),
+                )
+                .with_help("remove the legacy entry; the fence attr is the source of truth"),
+            );
+        }
+    }
+}
+
+fn field_to_legacy_key(field: &str) -> &str {
+    match field {
+        "timeout" => "timeouts",
+        _ => field,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -492,6 +564,65 @@ mod tests {
         assert!(
             diags.iter().any(|d| d.code == "wb-inc-001"),
             "expected wb-inc-001, got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn duplicate_explicit_step_id_emits_wb_step_001() {
+        let content = "```bash {#login}\necho one\n```\n\n```bash {#login}\necho two\n```\n";
+        let diags = validate_content(
+            content,
+            Path::new("test.md"),
+            &ValidateOptions { strict: false },
+        );
+        assert!(
+            diags.iter().any(|d| d.code == "wb-step-001"),
+            "expected wb-step-001, got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn unique_step_ids_no_wb_step_001() {
+        let content = "```bash {#login}\necho one\n```\n\n```bash {#deploy}\necho two\n```\n";
+        let diags = validate_content(
+            content,
+            Path::new("test.md"),
+            &ValidateOptions { strict: false },
+        );
+        assert!(
+            !diags.iter().any(|d| d.code == "wb-step-001"),
+            "should not emit wb-step-001 for unique ids: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn fence_attr_shadows_legacy_emits_wb_step_002() {
+        // Block 1 has a legacy `timeouts: {1: 30s}` AND a fence attr `timeout=2m`.
+        // The fence attr wins; we warn so the user can drop the legacy entry.
+        let content = "---\ntimeouts:\n  1: 30s\n---\n\n```bash {timeout=2m}\necho hi\n```\n";
+        let diags = validate_content(
+            content,
+            Path::new("test.md"),
+            &ValidateOptions { strict: false },
+        );
+        assert!(
+            diags.iter().any(|d| d.code == "wb-step-002"),
+            "expected wb-step-002, got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn fence_attr_alone_does_not_emit_wb_step_002() {
+        // Just the fence attr, no legacy entry — no shadowing, no warning.
+        let content = "```bash {timeout=2m}\necho hi\n```\n";
+        let diags = validate_content(
+            content,
+            Path::new("test.md"),
+            &ValidateOptions { strict: false },
+        );
+        assert!(
+            !diags.iter().any(|d| d.code == "wb-step-002"),
+            "should not emit wb-step-002 when no legacy shadowing: {diags:?}"
         );
     }
 

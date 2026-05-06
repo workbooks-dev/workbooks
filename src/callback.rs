@@ -83,6 +83,7 @@ fn build_step_complete_payload(
     line_number: usize,
     run_id: &str,
     include_chain: &[IncludeFrame],
+    step_id: Option<&str>,
 ) -> serde_json::Value {
     json!({
         "event": "step.complete",
@@ -92,6 +93,7 @@ fn build_step_complete_payload(
         "workbook": workbook,
         "block": {
             "index": result.block_index,
+            "step_id": step_id,
             "language": &result.language,
             "heading": heading,
             "line_number": line_number,
@@ -177,6 +179,7 @@ fn build_step_artifact_saved_payload(
     description: Option<&str>,
     run_id: &str,
     include_chain: &[IncludeFrame],
+    step_id: Option<&str>,
 ) -> serde_json::Value {
     json!({
         "event": "step.artifact_saved",
@@ -186,6 +189,7 @@ fn build_step_artifact_saved_payload(
         "workbook": workbook,
         "block": {
             "index": block_index,
+            "step_id": step_id,
             "language": language,
             "heading": heading,
             "line_number": line_number,
@@ -245,7 +249,10 @@ impl CallbackConfig {
         self.url.starts_with("redis://") || self.url.starts_with("rediss://")
     }
 
-    /// Fired after each block finishes executing (pass or fail)
+    /// Fired after each block finishes executing (pass or fail). `step_id` is
+    /// the stable id of the executed step (Pandoc-style `{#id}` if explicit,
+    /// otherwise an `auto-<hash>` derived from include chain + position +
+    /// language + body prefix). See `crate::step_ir`.
     #[allow(clippy::too_many_arguments)]
     pub fn step_complete(
         &self,
@@ -257,6 +264,7 @@ impl CallbackConfig {
         heading: Option<&str>,
         line_number: usize,
         include_chain: &[IncludeFrame],
+        step_id: Option<&str>,
     ) {
         let payload = build_step_complete_payload(
             result,
@@ -268,11 +276,13 @@ impl CallbackConfig {
             line_number,
             &self.run_id,
             include_chain,
+            step_id,
         );
         self.send("step.complete", &payload.to_string());
     }
 
-    /// Fired when --bail triggers on a failure with checkpointing active
+    /// Fired when --bail triggers on a failure with checkpointing active.
+    /// `step_id` matches the failed block's stable id. See `step_complete`.
     #[allow(clippy::too_many_arguments)]
     pub fn checkpoint_failed(
         &self,
@@ -284,6 +294,7 @@ impl CallbackConfig {
         heading: Option<&str>,
         line_number: usize,
         include_chain: &[IncludeFrame],
+        step_id: Option<&str>,
     ) {
         let payload = json!({
             "event": "checkpoint.failed",
@@ -293,6 +304,7 @@ impl CallbackConfig {
             "workbook": workbook,
             "failed_block": {
                 "index": result.block_index,
+                "step_id": step_id,
                 "language": &result.language,
                 "heading": heading,
                 "line_number": line_number,
@@ -407,6 +419,7 @@ impl CallbackConfig {
         total: usize,
         extra: serde_json::Value,
         include_chain: &[IncludeFrame],
+        step_id: Option<&str>,
     ) {
         let mut payload = json!({
             "event": event,
@@ -416,6 +429,7 @@ impl CallbackConfig {
             "workbook": workbook,
             "block": {
                 "index": block_index,
+                "step_id": step_id,
                 "language": language,
                 "heading": heading,
                 "line_number": line_number,
@@ -461,6 +475,7 @@ impl CallbackConfig {
         label: Option<&str>,
         description: Option<&str>,
         include_chain: &[IncludeFrame],
+        step_id: Option<&str>,
     ) {
         let payload = build_step_artifact_saved_payload(
             workbook,
@@ -479,6 +494,7 @@ impl CallbackConfig {
             description,
             &self.run_id,
             include_chain,
+            step_id,
         );
         self.send("step.artifact_saved", &payload.to_string());
     }
@@ -847,9 +863,11 @@ mod tests {
             42,
             "run-abc",
             &[],
+            Some("auto-deadbeef0001"),
         );
         assert_eq!(payload["event"], "step.complete");
         assert_eq!(payload["event_version"], "1");
+        assert_eq!(payload["block"]["step_id"], "auto-deadbeef0001");
         assert_eq!(payload["run_id"], "run-abc");
         assert_eq!(payload["checkpoint_id"], "ckpt-1");
         assert_eq!(payload["workbook"], "health-check");
@@ -972,8 +990,9 @@ mod tests {
                 title: Some("Airbase login".into()),
             },
         ];
-        let payload =
-            build_step_complete_payload(&result, 1, 1, "t.md", None, None, 0, "run-1", &chain);
+        let payload = build_step_complete_payload(
+            &result, 1, 1, "t.md", None, None, 0, "run-1", &chain, None,
+        );
         let arr = payload["include_chain"].as_array().unwrap();
         assert_eq!(arr.len(), 2);
         assert_eq!(arr[0]["step_id"], "tasks/month-end-close/README.md");
@@ -1041,6 +1060,7 @@ mod tests {
             None,
             "run-abc",
             &chain,
+            Some("export"),
         );
         assert_eq!(payload["event"], "step.artifact_saved");
         assert_eq!(payload["event_version"], "1");
@@ -1048,6 +1068,7 @@ mod tests {
         assert_eq!(payload["checkpoint_id"], "ckpt-7");
         assert_eq!(payload["workbook"], "tasks/month-end-close/hsbc.md");
         assert_eq!(payload["block"]["index"], 3);
+        assert_eq!(payload["block"]["step_id"], "export");
         assert_eq!(payload["block"]["language"], "bash");
         assert_eq!(payload["block"]["heading"], "Export");
         assert_eq!(payload["block"]["line_number"], 42);
@@ -1087,6 +1108,7 @@ mod tests {
             None,
             "r",
             &[],
+            None,
         );
         assert!(payload["artifact"]["label"].is_null());
         assert!(payload["artifact"]["description"].is_null());
@@ -1107,7 +1129,8 @@ mod tests {
             stdout_partial: false,
             stderr_partial: false,
         };
-        let payload = build_step_complete_payload(&result, 4, 10, "wb", None, None, 0, "", &[]);
+        let payload =
+            build_step_complete_payload(&result, 4, 10, "wb", None, None, 0, "", &[], None);
         let stdout = payload["block"]["stdout"].as_str().unwrap();
         assert!(stdout.contains("…[truncated 50 bytes]"));
         assert!(stdout.len() < huge.len());

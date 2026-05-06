@@ -1,3 +1,4 @@
+use crate::step_ir::FenceAttrs;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -156,6 +157,10 @@ pub struct CodeBlock {
     /// if EXPR evaluates true. Composes with `when` via AND — a block runs when
     /// `when` is true *and* `skip_if` is false.
     pub skip_if: Option<String>,
+    /// Pandoc-style fence attributes: `{#id .class key=value}`. Drives stable
+    /// step IDs (`#id`), classes/tags, and per-block policy (`timeout=`,
+    /// `retries=`, `continue_on_error`). See `crate::step_ir`.
+    pub attrs: FenceAttrs,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -263,6 +268,9 @@ pub struct BrowserSliceSpec {
     pub when: Option<String>,
     #[serde(skip, default)]
     pub skip_if: Option<String>,
+    /// Pandoc-style fence attributes — see `CodeBlock::attrs`.
+    #[serde(skip, default)]
+    pub attrs: FenceAttrs,
 }
 
 /// Where an `IncludeSpec` came from. `Fence` is the explicit
@@ -340,6 +348,93 @@ impl Workbook {
                 _ => false,
             })
             .count()
+    }
+
+    /// Materialize the executable section list as a `Vec<Step>` with stable
+    /// ids. `{no-run}` blocks are excluded — they're not executable, so they
+    /// don't get step ids. The resulting slice is index-aligned with the
+    /// run-loop's iteration over `Section::Code | Browser` (filtered on
+    /// `!skip_execution`), which means `steps[block_idx]` matches the legacy
+    /// `(block_idx + 1)` block number used by the frontmatter policy maps.
+    ///
+    /// Step ids are deterministic — the same workbook produces the same ids
+    /// on every parse. See `crate::step_ir` for the hashing rules.
+    pub fn build_steps(&self) -> Vec<crate::step_ir::Step> {
+        use crate::step_ir::{IncludeFrame as StepFrame, Source, Span, Step};
+        let mut steps = Vec::new();
+        let mut chain: Vec<StepFrame> = Vec::new();
+        // Position counter per scope. `scope_positions[0]` is the root file,
+        // each pushed include frame appends its own counter.
+        let mut scope_positions: Vec<u32> = vec![0];
+        for section in &self.sections {
+            match section {
+                Section::IncludeEnter(frame) => {
+                    let call_site = *scope_positions.last().unwrap_or(&0);
+                    chain.push(StepFrame {
+                        id: frame.id.clone(),
+                        title: frame.title.clone(),
+                        call_site,
+                    });
+                    scope_positions.push(0);
+                }
+                Section::IncludeExit(_) => {
+                    chain.pop();
+                    scope_positions.pop();
+                }
+                Section::Code(b) if !b.skip_execution => {
+                    let position = *scope_positions.last().unwrap_or(&0);
+                    let id = Step::compute_id(
+                        &chain,
+                        position,
+                        &b.language,
+                        &b.code,
+                        b.attrs.explicit_id.as_deref(),
+                    );
+                    steps.push(Step {
+                        id,
+                        attrs: b.attrs.clone(),
+                        span: Span::point(b.line_number as u32),
+                        source: Source {
+                            file: PathBuf::new(),
+                            position,
+                        },
+                        language: b.language.clone(),
+                        body: b.code.clone(),
+                        include_chain: chain.clone(),
+                    });
+                    if let Some(p) = scope_positions.last_mut() {
+                        *p += 1;
+                    }
+                }
+                Section::Browser(spec) if !spec.skip_execution => {
+                    let position = *scope_positions.last().unwrap_or(&0);
+                    let id = Step::compute_id(
+                        &chain,
+                        position,
+                        "browser",
+                        &spec.raw,
+                        spec.attrs.explicit_id.as_deref(),
+                    );
+                    steps.push(Step {
+                        id,
+                        attrs: spec.attrs.clone(),
+                        span: Span::point(spec.line_number as u32),
+                        source: Source {
+                            file: PathBuf::new(),
+                            position,
+                        },
+                        language: "browser".to_string(),
+                        body: spec.raw.clone(),
+                        include_chain: chain.clone(),
+                    });
+                    if let Some(p) = scope_positions.last_mut() {
+                        *p += 1;
+                    }
+                }
+                _ => {}
+            }
+        }
+        steps
     }
 }
 
@@ -526,7 +621,14 @@ fn extract_frontmatter(input: &str) -> (Frontmatter, String) {
     }
 }
 
-/// Parsed info string: language token + optional `{no-run, silent, when=, skip_if=, ...}` attrs.
+/// Parsed info string: language token + Pandoc-style fence attrs.
+///
+/// Recognized attrs:
+///   - bare flags: `no-run`, `silent`, `continue_on_error`
+///   - explicit step id: `#id` (Pandoc-style)
+///   - class/tag: `.class`
+///   - runtime conditionals: `when=EXPR`, `skip_if=EXPR`
+///   - kv attrs: any other `key=value` (e.g. `timeout=30s`, `retries=2`)
 #[derive(Debug, Default, PartialEq, Eq)]
 struct InfoString {
     language: String,
@@ -536,14 +638,16 @@ struct InfoString {
     when: Option<String>,
     /// `skip_if=EXPR` — skip if EXPR is truthy at runtime.
     skip_if: Option<String>,
+    /// `#id`, `.class`, and `key=value` attrs.
+    attrs: FenceAttrs,
 }
 
-/// Split a fence info string like `bash {no-run, silent, when=$X}` into language + attrs.
-///
-/// Brace cluster is optional and can appear anywhere after the language token. Attrs
-/// inside braces are comma or whitespace separated; unknown attrs are currently
-/// ignored so the parser stays forward-compatible. Key/value attrs (`when=`, `skip_if=`)
-/// must have no whitespace in the value — the split would fracture the expression.
+/// Split a fence info string like `bash {#login .critical timeout=30s}` into
+/// language + attrs. Brace cluster is optional and can appear anywhere after
+/// the language token. Attrs inside braces are comma or whitespace separated;
+/// unknown bare attrs are ignored so the parser stays forward-compatible.
+/// Key/value attrs must have no whitespace in the value — the split would
+/// fracture the expression.
 fn parse_info_string(info: &str) -> InfoString {
     let info = info.trim();
     let (lang_part, flag_part) = match (info.find('{'), info.rfind('}')) {
@@ -562,14 +666,31 @@ fn parse_info_string(info: &str) -> InfoString {
             .map(str::trim)
             .filter(|s| !s.is_empty())
         {
-            if let Some(expr) = flag.strip_prefix("when=") {
+            if let Some(id) = flag.strip_prefix('#') {
+                if !id.is_empty() {
+                    out.attrs.explicit_id = Some(id.to_string());
+                }
+            } else if let Some(class) = flag.strip_prefix('.') {
+                if !class.is_empty() {
+                    out.attrs.classes.push(class.to_string());
+                }
+            } else if let Some(expr) = flag.strip_prefix("when=") {
                 out.when = Some(expr.to_string());
             } else if let Some(expr) = flag.strip_prefix("skip_if=") {
                 out.skip_if = Some(expr.to_string());
+            } else if let Some((key, value)) = flag.split_once('=') {
+                if !key.is_empty() {
+                    out.attrs.kv.insert(key.to_string(), value.to_string());
+                }
             } else {
                 match flag {
                     "no-run" => out.skip_execution = true,
                     "silent" => out.silent = true,
+                    "continue_on_error" => {
+                        out.attrs
+                            .kv
+                            .insert("continue_on_error".into(), "true".into());
+                    }
                     _ => {}
                 }
             }
@@ -777,6 +898,7 @@ fn extract_sections(body: &str) -> Vec<Section> {
                 spec.silent = info.silent;
                 spec.when = info.when.clone();
                 spec.skip_if = info.skip_if.clone();
+                spec.attrs = info.attrs.clone();
                 sections.push(Section::Browser(spec));
                 continue;
             }
@@ -820,6 +942,7 @@ fn extract_sections(body: &str) -> Vec<Section> {
                 silent: info.silent,
                 when: info.when,
                 skip_if: info.skip_if,
+                attrs: info.attrs,
             }));
         } else {
             current_text.push_str(line);
@@ -852,9 +975,11 @@ impl Frontmatter {
     /// Resolve the per-block policy for a given 1-based block number.
     /// Unknown numbers return the all-default policy.
     ///
-    /// Migration plan: the step IR (`src/step_ir.rs`) will replace this
-    /// block-number-keyed lookup with stable step IDs once that wave lands.
-    /// See TODO.md #13/#29.
+    /// Superseded by `crate::step_ir::resolve_step_policies` for the run path,
+    /// which folds in fence-attr overrides (`{timeout=30s}` etc). Kept as a
+    /// thin lookup for tests and any tooling that still indexes by block
+    /// number.
+    #[allow(dead_code)]
     pub fn block_policy(&self, block_number: u32) -> BlockPolicy {
         let timeout_secs = self
             .timeouts
@@ -1492,6 +1617,107 @@ echo "this runs"
         assert_eq!(info.language, "bash");
         assert!(info.skip_execution);
         assert!(!info.silent);
+    }
+
+    // --- Pandoc-style fence attrs: {#id .class key=value} ---
+
+    #[test]
+    fn test_parse_info_string_explicit_id() {
+        let info = parse_info_string("bash {#login}");
+        assert_eq!(info.language, "bash");
+        assert_eq!(info.attrs.explicit_id.as_deref(), Some("login"));
+    }
+
+    #[test]
+    fn test_parse_info_string_class() {
+        let info = parse_info_string("bash {.critical}");
+        assert_eq!(info.attrs.classes, vec!["critical".to_string()]);
+    }
+
+    #[test]
+    fn test_parse_info_string_kv_attrs() {
+        let info = parse_info_string("bash {timeout=30s retries=2}");
+        assert_eq!(info.attrs.kv.get("timeout"), Some(&"30s".to_string()));
+        assert_eq!(info.attrs.kv.get("retries"), Some(&"2".to_string()));
+    }
+
+    #[test]
+    fn test_parse_info_string_continue_on_error_bare_flag() {
+        let info = parse_info_string("bash {continue_on_error}");
+        // Bare `continue_on_error` normalizes to kv=true so policy resolver
+        // can treat it the same as the explicit form.
+        assert_eq!(
+            info.attrs.kv.get("continue_on_error"),
+            Some(&"true".to_string())
+        );
+    }
+
+    #[test]
+    fn test_parse_info_string_full_pandoc_cluster() {
+        let info = parse_info_string("python {#deploy .critical timeout=2m retries=1}");
+        assert_eq!(info.language, "python");
+        assert_eq!(info.attrs.explicit_id.as_deref(), Some("deploy"));
+        assert_eq!(info.attrs.classes, vec!["critical".to_string()]);
+        assert_eq!(info.attrs.kv.get("timeout"), Some(&"2m".to_string()));
+        assert_eq!(info.attrs.kv.get("retries"), Some(&"1".to_string()));
+    }
+
+    #[test]
+    fn test_parse_info_string_preserves_existing_when_skip_if() {
+        // Pandoc attrs coexist with the legacy `when=`/`skip_if=` keys.
+        let info = parse_info_string("bash {#health when=$DEPLOY=prod}");
+        assert_eq!(info.attrs.explicit_id.as_deref(), Some("health"));
+        assert_eq!(info.when.as_deref(), Some("$DEPLOY=prod"));
+    }
+
+    #[test]
+    fn test_build_steps_assigns_explicit_ids() {
+        let input = r#"```bash {#login}
+echo first
+```
+
+```bash
+echo second
+```
+"#;
+        let wb = parse(input);
+        let steps = wb.build_steps();
+        assert_eq!(steps.len(), 2);
+        assert_eq!(steps[0].id.as_str(), "login");
+        assert!(steps[1].id.as_str().starts_with("auto-"));
+    }
+
+    #[test]
+    fn test_build_steps_skips_no_run_blocks() {
+        let input = r#"```bash {no-run}
+echo skipped
+```
+
+```bash
+echo runs
+```
+"#;
+        let wb = parse(input);
+        let steps = wb.build_steps();
+        assert_eq!(steps.len(), 1);
+        assert_eq!(steps[0].body, "echo runs");
+    }
+
+    #[test]
+    fn test_build_steps_deterministic_across_parses() {
+        let input = r#"```bash
+echo one
+```
+
+```python
+print("two")
+```
+"#;
+        let a = parse(input).build_steps();
+        let b = parse(input).build_steps();
+        assert_eq!(a.len(), b.len());
+        assert_eq!(a[0].id, b[0].id);
+        assert_eq!(a[1].id, b[1].id);
     }
 
     #[test]
@@ -2151,12 +2377,24 @@ echo MAIN
             })
             .collect();
         // Expect: enter a, code A, exit a, enter b, code B, exit b, code MAIN
-        assert!(trace[0].starts_with("enter:") && trace[0].ends_with("a.md"), "{trace:?}");
+        assert!(
+            trace[0].starts_with("enter:") && trace[0].ends_with("a.md"),
+            "{trace:?}"
+        );
         assert_eq!(trace[1], "code:echo A");
-        assert!(trace[2].starts_with("exit:") && trace[2].ends_with("a.md"), "{trace:?}");
-        assert!(trace[3].starts_with("enter:") && trace[3].ends_with("b.md"), "{trace:?}");
+        assert!(
+            trace[2].starts_with("exit:") && trace[2].ends_with("a.md"),
+            "{trace:?}"
+        );
+        assert!(
+            trace[3].starts_with("enter:") && trace[3].ends_with("b.md"),
+            "{trace:?}"
+        );
         assert_eq!(trace[4], "code:echo B");
-        assert!(trace[5].starts_with("exit:") && trace[5].ends_with("b.md"), "{trace:?}");
+        assert!(
+            trace[5].starts_with("exit:") && trace[5].ends_with("b.md"),
+            "{trace:?}"
+        );
         assert_eq!(trace[6], "code:echo MAIN");
         assert_eq!(resolved.code_block_count(), 3);
         let _ = std::fs::remove_dir_all(&dir);
@@ -2200,7 +2438,12 @@ echo after-include
             .collect();
         assert_eq!(
             codes,
-            vec!["echo PRE", "echo before-include", "echo MID", "echo after-include"]
+            vec![
+                "echo PRE",
+                "echo before-include",
+                "echo MID",
+                "echo after-include"
+            ]
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -2253,11 +2496,7 @@ echo after-include
             "b.md",
             "---\nrequired: [./c.md]\n---\n\n```bash\necho B\n```\n",
         );
-        let parent = write_temp(
-            &dir,
-            "main.md",
-            "```include\npath: ./b.md\n```\n",
-        );
+        let parent = write_temp(&dir, "main.md", "```include\npath: ./b.md\n```\n");
         let wb = parse(&std::fs::read_to_string(&parent).unwrap());
         let resolved = resolve_includes(wb, &parent).expect("resolve");
         let codes: Vec<&str> = resolved
