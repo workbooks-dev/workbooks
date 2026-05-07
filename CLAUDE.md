@@ -303,6 +303,19 @@ wrote it completes, with `Authorization: Bearer $WB_RECORDING_UPLOAD_SECRET`.
 
 See `examples/artifacts-demo.md`.
 
+### Browser-runtime auto-capture
+
+Anything the `browser` runtime downloads during a session — clicked
+attachments, redirect chains that end in a file, popup downloads — is
+saved to `$WB_ARTIFACTS_DIR` automatically by the sidecar's context-level
+listener. No `download:` verb to call. Provenance (source URL, page URL,
+which verb was running) rides along on the `slice.artifact_saved` frame
+so the run-page event feed shows *why* a file appeared.
+
+Filter with `WB_BROWSER_DOWNLOAD_EXTENSIONS` (comma-separated, e.g.
+`pdf,xlsx,csv`). Unset = capture everything. Skipped downloads still
+emit `slice.download_skipped` for visibility.
+
 ## Checkpointing
 
 Resume workbook runs from where they stopped. Designed for agent workflows where blocks may fail due to external issues (API down, missing input, rate limits).
