@@ -208,12 +208,33 @@ pub fn hash_code(code: &str) -> String {
 }
 
 pub fn checkpoint_dir() -> PathBuf {
+    #[cfg(test)]
+    if let Some(dir) = test_checkpoint_dir_override() {
+        return dir;
+    }
+
     if let Ok(dir) = std::env::var("WB_CHECKPOINT_DIR") {
         if !dir.trim().is_empty() {
             return PathBuf::from(dir);
         }
     }
     default_checkpoint_dir()
+}
+
+#[cfg(test)]
+thread_local! {
+    static TEST_CHECKPOINT_DIR_OVERRIDE: std::cell::RefCell<Option<PathBuf>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+pub(crate) fn set_test_checkpoint_dir(dir: Option<PathBuf>) -> Option<PathBuf> {
+    TEST_CHECKPOINT_DIR_OVERRIDE.with(|slot| slot.replace(dir))
+}
+
+#[cfg(test)]
+fn test_checkpoint_dir_override() -> Option<PathBuf> {
+    TEST_CHECKPOINT_DIR_OVERRIDE.with(|slot| slot.borrow().clone())
 }
 
 #[cfg(not(test))]

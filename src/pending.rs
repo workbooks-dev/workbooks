@@ -503,6 +503,18 @@ mod tests {
         format!("{}_{}_{}_{}", prefix, std::process::id(), ts, n)
     }
 
+    struct CheckpointDirGuard(Option<PathBuf>);
+
+    impl Drop for CheckpointDirGuard {
+        fn drop(&mut self) {
+            checkpoint::set_test_checkpoint_dir(self.0.take());
+        }
+    }
+
+    fn set_thread_checkpoint_dir(dir: PathBuf) -> CheckpointDirGuard {
+        CheckpointDirGuard(checkpoint::set_test_checkpoint_dir(Some(dir)))
+    }
+
     fn make_wait_spec() -> WaitSpec {
         WaitSpec {
             kind: Some("email".to_string()),
@@ -1102,6 +1114,8 @@ mod tests {
         use std::sync::Barrier;
 
         let prefix = unique_id("test_reap_concurrent");
+        let checkpoint_dir = std::env::temp_dir().join(format!("wb_reap_concurrent_{}", prefix));
+        let _checkpoint_dir_guard = set_thread_checkpoint_dir(checkpoint_dir.clone());
         const N: usize = 5;
         let mut our_ids: HashSet<String> = HashSet::new();
         for n in 0..N {
@@ -1121,12 +1135,16 @@ mod tests {
         let barrier = Arc::new(Barrier::new(2));
         let b1 = Arc::clone(&barrier);
         let b2 = Arc::clone(&barrier);
+        let t1_checkpoint_dir = checkpoint_dir.clone();
+        let t2_checkpoint_dir = checkpoint_dir.clone();
 
         let t1 = std::thread::spawn(move || {
+            let _checkpoint_dir_guard = set_thread_checkpoint_dir(t1_checkpoint_dir);
             b1.wait();
             reap_expired()
         });
         let t2 = std::thread::spawn(move || {
+            let _checkpoint_dir_guard = set_thread_checkpoint_dir(t2_checkpoint_dir);
             b2.wait();
             reap_expired()
         });
