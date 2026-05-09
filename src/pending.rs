@@ -531,6 +531,7 @@ mod tests {
             on_timeout: Some("abort".to_string()),
             line_number: 42,
             section_index: 3,
+            attrs: Default::default(),
         }
     }
 
@@ -583,6 +584,7 @@ mod tests {
             match_: None,
             line_number: 10,
             section_index: 1,
+            attrs: Default::default(),
         };
         let desc = build("ckpt-2", "manual.md", 1, &spec, None);
         assert!(desc.timeout_at.is_none());
@@ -869,6 +871,7 @@ mod tests {
 
         let spec = WaitSpec {
             kind: Some("manual".to_string()),
+            attrs: Default::default(),
             ..WaitSpec::default()
         };
         let desc_a = build(&id_a, "a.md", 1, &spec, None);

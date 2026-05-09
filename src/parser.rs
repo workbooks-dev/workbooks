@@ -239,6 +239,8 @@ pub struct WaitSpec {
     pub line_number: usize,
     #[serde(skip, default)]
     pub section_index: usize,
+    #[serde(skip, default)]
+    pub attrs: crate::step_ir::FenceAttrs,
 }
 
 /// Browser slice — body parsed into a structured envelope (`session`, `on_pause`)
@@ -838,6 +840,7 @@ fn extract_sections(body: &str) -> Vec<Section> {
                 }
                 spec.line_number = line_num + 1;
                 spec.section_index = sections.len();
+                spec.attrs = info.attrs.clone();
                 sections.push(Section::Wait(spec));
                 continue;
             }
@@ -1251,6 +1254,22 @@ echo "$otp_code" | ./login --otp
             waits[0].bind.is_none(),
             "reserved bind name should be cleared, not preserved"
         );
+    }
+
+    #[test]
+    fn test_parse_wait_preserves_explicit_id() {
+        let input = "```wait {#approval}\nkind: manual\nbind: approved\n```\n";
+        let wb = parse(input);
+        let waits: Vec<&WaitSpec> = wb
+            .sections
+            .iter()
+            .filter_map(|s| match s {
+                Section::Wait(w) => Some(w),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(waits.len(), 1);
+        assert_eq!(waits[0].attrs.explicit_id.as_deref(), Some("approval"));
     }
 
     #[test]

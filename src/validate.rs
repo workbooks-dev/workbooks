@@ -415,26 +415,34 @@ fn check_step_ids(wb: &Workbook, path: &Path, out: &mut Vec<Diagnostic>) {
     // wb-step-001: duplicate explicit ids. Auto-derived ids are deterministic
     // but include position+body, so accidental collisions there are extremely
     // unlikely; if they did occur it would be a hash bug, not a user error.
-    let mut seen: HashMap<String, Vec<usize>> = HashMap::new();
-    for (idx, step) in steps.iter().enumerate() {
+    let mut seen: HashMap<String, Vec<u32>> = HashMap::new();
+    for step in &steps {
         if let Some(explicit) = step.attrs.explicit_id.as_ref() {
-            seen.entry(explicit.clone()).or_default().push(idx);
+            seen.entry(explicit.clone())
+                .or_default()
+                .push(step.span.line);
         }
     }
-    for (id, indices) in seen {
-        if indices.len() > 1 {
-            let lines: Vec<String> = indices
-                .iter()
-                .map(|i| format!("L{}", steps[*i].span.line))
-                .collect();
+    for section in &wb.sections {
+        if let crate::parser::Section::Wait(spec) = section {
+            if let Some(explicit) = spec.attrs.explicit_id.as_ref() {
+                seen.entry(explicit.clone())
+                    .or_default()
+                    .push(spec.line_number as u32);
+            }
+        }
+    }
+    for (id, lines) in seen {
+        if lines.len() > 1 {
+            let line_labels: Vec<String> = lines.iter().map(|line| format!("L{}", line)).collect();
             out.push(
                 Diagnostic::error(
                     "wb-step-001",
                     path,
                     format!(
-                        "duplicate step id '{id}' on {} blocks ({})",
-                        indices.len(),
-                        lines.join(", ")
+                        "duplicate step id '{id}' on {} workflow nodes ({})",
+                        lines.len(),
+                        line_labels.join(", ")
                     ),
                 )
                 .with_help("rename one of the colliding `{#id}` attrs"),
@@ -477,18 +485,25 @@ fn check_workflow_nodes(wb: &Workbook, path: &Path, out: &mut Vec<Diagnostic>) {
     if declared.is_empty() {
         return;
     }
-    let step_ids: std::collections::BTreeSet<String> =
+    let mut step_ids: std::collections::BTreeSet<String> =
         wb.build_steps().into_iter().map(|s| s.id.0).collect();
+    for section in &wb.sections {
+        if let crate::parser::Section::Wait(spec) = section {
+            if let Some(id) = spec.attrs.explicit_id.as_ref() {
+                step_ids.insert(id.clone());
+            }
+        }
+    }
     for id in declared {
         if !step_ids.contains(&id) {
             out.push(
                 Diagnostic::warning(
                     "wb-workflow-001",
                     path,
-                    format!("workflow.nodes.{id} has no matching executable step id"),
+                    format!("workflow.nodes.{id} has no matching step or wait id"),
                 )
                 .with_help(format!(
-                    "add `{{#{id}}}` to the matching code/browser fence"
+                    "add `{{#{id}}}` to the matching code/browser/wait fence"
                 )),
             );
         }
@@ -624,6 +639,21 @@ mod tests {
     }
 
     #[test]
+    fn duplicate_wait_and_step_id_emits_wb_step_001() {
+        let content =
+            "```wait {#approval}\nkind: manual\nbind: ok\n```\n\n```bash {#approval}\necho ok\n```\n";
+        let diags = validate_content(
+            content,
+            Path::new("test.md"),
+            &ValidateOptions { strict: false },
+        );
+        assert!(
+            diags.iter().any(|d| d.code == "wb-step-001"),
+            "expected wb-step-001, got: {diags:?}"
+        );
+    }
+
+    #[test]
     fn workflow_nodes_without_matching_step_warn() {
         let diags = validate_content(
             r#"---
@@ -648,6 +678,30 @@ echo ok
             .collect();
         assert_eq!(workflow_warnings.len(), 1, "got: {diags:?}");
         assert!(workflow_warnings[0].message.contains("missing"));
+    }
+
+    #[test]
+    fn workflow_nodes_can_match_wait_id() {
+        let diags = validate_content(
+            r#"---
+workflow:
+  slug: demo
+  nodes:
+    approval:
+      primitive: wait/manual-approval
+---
+```wait {#approval}
+kind: manual
+bind: approved
+```
+"#,
+            Path::new("wf.md"),
+            &ValidateOptions { strict: false },
+        );
+        assert!(
+            !diags.iter().any(|d| d.code == "wb-workflow-001"),
+            "wait ids should satisfy workflow node declarations, got: {diags:?}"
+        );
     }
 
     #[test]

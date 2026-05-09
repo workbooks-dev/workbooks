@@ -296,6 +296,35 @@ fn build_step_skipped_payload(
     payload
 }
 
+#[allow(clippy::too_many_arguments)]
+fn build_workbook_paused_payload(
+    workbook: &str,
+    checkpoint_id: &str,
+    kind: Option<&str>,
+    bind: Option<&[String]>,
+    timeout_at: Option<&str>,
+    include_chain: &[IncludeFrame],
+    run_id: &str,
+    workflow: Option<&WorkflowPayload>,
+) -> serde_json::Value {
+    let mut payload = json!({
+        "event": "workbook.paused",
+        "event_version": EVENT_VERSION,
+        "run_id": run_id,
+        "checkpoint_id": checkpoint_id,
+        "workbook": workbook,
+        "wait": {
+            "kind": kind,
+            "bind": bind,
+            "timeout_at": timeout_at,
+        },
+        "include_chain": chain_to_json(include_chain),
+        "timestamp": Utc::now().to_rfc3339(),
+    });
+    attach_workflow(&mut payload, workflow);
+    payload
+}
+
 pub struct CallbackConfig {
     pub url: String,
     pub secret: Option<String>,
@@ -425,21 +454,18 @@ impl CallbackConfig {
         bind: Option<&[String]>,
         timeout_at: Option<&str>,
         include_chain: &[IncludeFrame],
+        workflow: Option<&WorkflowPayload>,
     ) {
-        let payload = json!({
-            "event": "workbook.paused",
-            "event_version": EVENT_VERSION,
-            "run_id": &self.run_id,
-            "checkpoint_id": checkpoint_id,
-            "workbook": workbook,
-            "wait": {
-                "kind": kind,
-                "bind": bind,
-                "timeout_at": timeout_at,
-            },
-            "include_chain": chain_to_json(include_chain),
-            "timestamp": Utc::now().to_rfc3339(),
-        });
+        let payload = build_workbook_paused_payload(
+            workbook,
+            checkpoint_id,
+            kind,
+            bind,
+            timeout_at,
+            include_chain,
+            &self.run_id,
+            workflow,
+        );
         self.send("workbook.paused", &payload.to_string());
     }
 
@@ -1136,21 +1162,49 @@ mod tests {
 
     #[test]
     fn test_workbook_paused_payload_carries_include_chain() {
-        // We rebuild the payload inline (same pattern as the lifecycle test
-        // above) since send() has network side effects we can't assert on.
         let chain = vec![IncludeFrame {
             id: "tasks/close/README.md".into(),
             title: Some("Close".into()),
         }];
-        let payload = json!({
-            "event": "workbook.paused",
-            "event_version": EVENT_VERSION,
-            "include_chain": chain_to_json(&chain),
-        });
+        let payload = build_workbook_paused_payload(
+            "task.md",
+            "run-1",
+            Some("manual"),
+            None,
+            None,
+            &chain,
+            "run-1",
+            None,
+        );
         let arr = payload["include_chain"].as_array().unwrap();
         assert_eq!(arr.len(), 1);
         assert_eq!(arr[0]["step_id"], "tasks/close/README.md");
         assert_eq!(arr[0]["step_title"], "Close");
+    }
+
+    #[test]
+    fn test_workbook_paused_payload_carries_workflow() {
+        let workflow = WorkflowPayload {
+            workflow: json!({"slug": "approval-flow", "version": "v1"}),
+            workflow_node: json!({
+                "id": "approval",
+                "primitive": "wait/manual-approval",
+                "title": "Manual approval"
+            }),
+        };
+        let payload = build_workbook_paused_payload(
+            "task.md",
+            "run-1",
+            Some("manual"),
+            None,
+            None,
+            &[],
+            "run-1",
+            Some(&workflow),
+        );
+        assert_eq!(payload["event"], "workbook.paused");
+        assert_eq!(payload["workflow"]["slug"], "approval-flow");
+        assert_eq!(payload["workflow_node"]["id"], "approval");
     }
 
     #[test]

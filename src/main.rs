@@ -179,6 +179,10 @@ fn no_run_skip_decision() -> SkipDecision {
     }
 }
 
+fn should_emit_skip_callback(silent: bool, workflow: Option<&callback::WorkflowPayload>) -> bool {
+    !silent || workflow.is_some()
+}
+
 use clap::{Parser, Subcommand};
 use exit::WbExit;
 use output::OutputFormat;
@@ -1881,6 +1885,11 @@ fn run_single(cfg: RunConfig) {
         }
 
         if let parser::Section::Wait(spec) = section {
+            let wait_step_id = spec.attrs.explicit_id.as_deref();
+            let workflow_payload = workflow_ctx
+                .as_ref()
+                .and_then(|w| w.payload_for_step(wait_step_id));
+
             // Skip waits already satisfied by a prior resume.
             let already_done = ckpt
                 .as_ref()
@@ -1926,6 +1935,7 @@ fn run_single(cfg: RunConfig) {
                 cb.as_ref(),
                 &include_stack,
                 &frame_starts,
+                workflow_payload.as_ref(),
             );
             // Unreachable — pause_for_signal exits.
         }
@@ -2036,7 +2046,7 @@ fn run_single(cfg: RunConfig) {
                     eprintln!("{}", output::style_dim(&label));
                 }
                 if let Some(ref cb) = cb {
-                    if !block.silent {
+                    if should_emit_skip_callback(block.silent, workflow_payload.as_ref()) {
                         cb.step_skipped(
                             file,
                             checkpoint_id.as_deref(),
@@ -2293,7 +2303,7 @@ fn run_single(cfg: RunConfig) {
                     eprintln!("{}", output::style_dim(&label));
                 }
                 if let Some(ref cb) = cb {
-                    if !spec.silent {
+                    if should_emit_skip_callback(spec.silent, workflow_payload.as_ref()) {
                         cb.step_skipped(
                             file,
                             checkpoint_id.as_deref(),
@@ -3131,6 +3141,7 @@ fn pause_for_signal(
     cb: Option<&callback::CallbackConfig>,
     include_chain: &[parser::IncludeFrame],
     frame_starts: &[Instant],
+    workflow: Option<&callback::WorkflowPayload>,
 ) -> ! {
     let id = match checkpoint_id.as_deref() {
         Some(id) => id,
@@ -3200,6 +3211,7 @@ fn pause_for_signal(
             bind_names.as_deref(),
             desc.timeout_at.as_deref(),
             include_chain,
+            workflow,
         );
         // Close active include frames with outcome=paused so the run-page
         // timeline flips them into a pause state. On resume, step.started
@@ -3280,6 +3292,7 @@ fn pause_browser_slice(
             None,
             None,
             include_chain,
+            workflow,
         );
         // Also fire step.paused with slice context for consumers that want
         // granular detail (verb index, live-view URL, heading, etc.).
@@ -4478,6 +4491,7 @@ mod tests {
             on_timeout: Some("abort".to_string()),
             line_number: 25,
             section_index: 3,
+            attrs: Default::default(),
         };
 
         let desc = pending::build(id, "test-workbook.md", 2, &spec, None);
@@ -4519,6 +4533,7 @@ mod tests {
             on_timeout: None,
             line_number: 10,
             section_index: 1,
+            attrs: Default::default(),
         };
         let desc = pending::build("no-timeout", "test.md", 0, &spec, None);
         assert!(desc.timeout_at.is_none());
@@ -4535,6 +4550,7 @@ mod tests {
             on_timeout: Some("skip".to_string()),
             line_number: 5,
             section_index: 2,
+            attrs: Default::default(),
         };
         let mut desc = pending::build("expired-test", "test.md", 0, &spec, None);
         desc.timeout_at = Some("2020-01-01T00:00:00+00:00".to_string());
@@ -5127,6 +5143,17 @@ echo "pin=$pin"
 
         let cli = Cli::parse_from(["wb", "man"]);
         assert!(matches!(cli.command, Some(Command::Man)));
+    }
+
+    #[test]
+    fn silent_skip_callbacks_emit_for_workflow_nodes_only() {
+        let workflow = callback::WorkflowPayload {
+            workflow: serde_json::json!({"slug": "wf"}),
+            workflow_node: serde_json::json!({"id": "node"}),
+        };
+        assert!(should_emit_skip_callback(false, None));
+        assert!(!should_emit_skip_callback(true, None));
+        assert!(should_emit_skip_callback(true, Some(&workflow)));
     }
 
     #[test]
