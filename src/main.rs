@@ -15,10 +15,13 @@ mod secrets;
 mod sidecar;
 mod signal;
 mod step_ir;
+mod step_outputs;
 mod update;
 mod validate;
+mod workflow;
 
-use std::path::Path;
+use std::collections::BTreeMap;
+use std::path::{Component, Path, PathBuf};
 use std::time::{Duration, Instant};
 
 /// Delay between retry attempts for per-block `retries:`. Short enough to
@@ -100,6 +103,79 @@ fn execute_block_with_policy(
             );
         }
         std::thread::sleep(RETRY_DELAY);
+    }
+}
+
+#[derive(Debug, Clone)]
+struct SkipDecision {
+    kind: String,
+    expression: Option<String>,
+    reason: String,
+}
+
+fn step_key(step_id: Option<&str>, block_idx: usize) -> String {
+    step_id
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| (block_idx + 1).to_string())
+}
+
+fn capture_outputs_for_result(
+    result: &mut executor::BlockResult,
+    continue_on_error: bool,
+) -> step_outputs::StepOutputMap {
+    match step_outputs::parse_outputs(&result.stdout) {
+        Ok(outputs) => outputs,
+        Err(e) if continue_on_error => {
+            eprintln!("warning: structured output ignored: {}", e);
+            step_outputs::StepOutputMap::new()
+        }
+        Err(e) => {
+            if !result.stderr.is_empty() {
+                result.stderr.push('\n');
+            }
+            result
+                .stderr
+                .push_str(&format!("wb: structured output parse failed: {}", e));
+            result.exit_code = 1;
+            result.error_type = Some("output_parse_failed".to_string());
+            step_outputs::StepOutputMap::new()
+        }
+    }
+}
+
+fn raw_outputs(outputs: &step_outputs::StepOutputMap) -> BTreeMap<String, serde_json::Value> {
+    outputs
+        .iter()
+        .map(|(k, v)| (k.clone(), v.value.clone()))
+        .collect()
+}
+
+fn conditional_skip_decision(
+    when: Option<&str>,
+    skip_if: Option<&str>,
+    env: &std::collections::HashMap<String, String>,
+) -> Option<SkipDecision> {
+    let reason = parser::should_skip_block(when, skip_if, env)?;
+    if reason.starts_with("when=") {
+        Some(SkipDecision {
+            kind: "when".to_string(),
+            expression: when.map(|s| s.to_string()),
+            reason,
+        })
+    } else {
+        Some(SkipDecision {
+            kind: "skip_if".to_string(),
+            expression: skip_if.map(|s| s.to_string()),
+            reason,
+        })
+    }
+}
+
+fn no_run_skip_decision() -> SkipDecision {
+    SkipDecision {
+        kind: "no_run".to_string(),
+        expression: None,
+        reason: "{no-run}".to_string(),
     }
 }
 
@@ -862,6 +938,7 @@ fn run_single_collect(
             let mut vars = workbook.frontmatter.vars.clone().unwrap_or_default();
             vars.extend(cli_vars);
             container_env.extend(vars);
+            let _ = artifacts::Artifacts::init(&mut container_env);
 
             let mut extra_args: Vec<String> = Vec::new();
             if quiet {
@@ -1019,22 +1096,33 @@ fn run_single_collect(
     // completes, `artifacts.sync()` picks up new files and uploads them when
     // WB_ARTIFACTS_UPLOAD_URL + WB_RECORDING_UPLOAD_SECRET are set.
     let mut artifacts = artifacts::Artifacts::init(&mut ctx.env);
+    let mut run_outputs = step_outputs::RawOutputsByStep::new();
+    let outputs_path = step_outputs::init_outputs_path(&mut ctx.env, artifacts.dir(), &run_outputs);
 
     let start = Instant::now();
     let mut results = Vec::new();
     let mut block_idx = 0;
-    let resolved_step_policies =
-        step_ir::resolve_step_policies(&workbook.build_steps(), &workbook.frontmatter);
+    let steps = workbook.build_steps();
+    let resolved_step_policies = step_ir::resolve_step_policies(&steps, &workbook.frontmatter);
     let mut session = executor::Session::new(ctx);
 
     for section in &workbook.sections {
         match section {
             parser::Section::Code(block) => {
-                if block.skip_execution {
+                if block.skip_execution
+                    || conditional_skip_decision(
+                        block.when.as_deref(),
+                        block.skip_if.as_deref(),
+                        &parser::resolved_env(session.env()),
+                    )
+                    .is_some()
+                {
+                    block_idx += 1;
                     continue;
                 }
                 let policy = step_policy_for(&resolved_step_policies, block_idx);
-                let result = execute_block_with_policy(
+                let step_id = steps.get(block_idx).map(|s| s.id.as_str());
+                let mut result = execute_block_with_policy(
                     &mut session,
                     block,
                     block_idx,
@@ -1042,6 +1130,15 @@ fn run_single_collect(
                     executor::DEFAULT_BLOCK_TIMEOUT,
                     quiet,
                 );
+                let current_outputs =
+                    capture_outputs_for_result(&mut result, policy.continue_on_error);
+                if !current_outputs.is_empty() {
+                    let key = step_key(step_id, block_idx);
+                    step_outputs::merge_step_outputs(&mut run_outputs, &key, &current_outputs);
+                    if let Err(e) = step_outputs::write_outputs_file(&outputs_path, &run_outputs) {
+                        eprintln!("warning: outputs file: {}", e);
+                    }
+                }
                 // Folder mode has no callback, so artifact records are
                 // discarded — no step.artifact_saved is emitted here.
                 let _ = artifacts.sync();
@@ -1049,9 +1146,18 @@ fn run_single_collect(
                 block_idx += 1;
             }
             parser::Section::Browser(spec) => {
-                if spec.skip_execution {
+                if spec.skip_execution
+                    || conditional_skip_decision(
+                        spec.when.as_deref(),
+                        spec.skip_if.as_deref(),
+                        &parser::resolved_env(session.env()),
+                    )
+                    .is_some()
+                {
+                    block_idx += 1;
                     continue;
                 }
+                let step_id = steps.get(block_idx).map(|s| s.id.as_str());
                 let ctx = sidecar::SliceCallbackContext {
                     cb: None,
                     workbook: file,
@@ -1064,9 +1170,37 @@ fn run_single_collect(
                     // Folder mode doesn't emit callbacks, so the chain is
                     // never serialized. An empty slice keeps the type happy.
                     include_chain: &[],
-                    step_id: None,
+                    step_id,
+                    workflow: None,
                 };
-                let (result, pause) = session.execute_browser_slice(spec, block_idx, &ctx, None);
+                let prepared_spec = match prepare_browser_spec(spec, artifacts.dir()) {
+                    Ok(prepared) => prepared,
+                    Err(e) => {
+                        results.push(executor::BlockResult {
+                            block_index: block_idx,
+                            language: "browser".to_string(),
+                            stdout: String::new(),
+                            stderr: e,
+                            exit_code: 1,
+                            duration: std::time::Duration::ZERO,
+                            error_type: Some("browser_verb_failed".to_string()),
+                            stdout_partial: false,
+                            stderr_partial: false,
+                        });
+                        block_idx += 1;
+                        continue;
+                    }
+                };
+                let (mut result, pause) =
+                    session.execute_browser_slice(&prepared_spec, block_idx, &ctx, None);
+                let current_outputs = capture_outputs_for_result(&mut result, false);
+                if !current_outputs.is_empty() {
+                    let key = step_key(step_id, block_idx);
+                    step_outputs::merge_step_outputs(&mut run_outputs, &key, &current_outputs);
+                    if let Err(e) = step_outputs::write_outputs_file(&outputs_path, &run_outputs) {
+                        eprintln!("warning: outputs file: {}", e);
+                    }
+                }
                 // Folder mode: no callback, so we don't emit
                 // step.artifact_saved for anything this slice produced.
                 let _ = artifacts.sync();
@@ -1218,6 +1352,7 @@ fn maybe_reenter_sandbox(workbook: &parser::Workbook, cfg: &RunConfig) {
     let mut vars = workbook.frontmatter.vars.clone().unwrap_or_default();
     vars.extend(cfg.cli_vars.clone());
     container_env.extend(vars);
+    let _ = artifacts::Artifacts::init(&mut container_env);
 
     // Forward CLI flags as extra args
     let mut extra_args: Vec<String> = Vec::new();
@@ -1528,6 +1663,7 @@ fn run_single(cfg: RunConfig) {
     // block number used by `frontmatter.block_policy`). Built once here so the
     // ids remain stable across replay/resume of this run.
     let steps = workbook.build_steps();
+    let workflow_ctx = workflow::WorkflowContext::from_frontmatter(&workbook.frontmatter);
     let resolved_step_policies = step_ir::resolve_step_policies(&steps, &workbook.frontmatter);
 
     if block_count == 0 {
@@ -1577,11 +1713,17 @@ fn run_single(cfg: RunConfig) {
         lock_guard: _checkpoint_lock,
     } = prepare_checkpoint(checkpoint_id, file, block_count, &mut ctx);
 
+    if let Some(ref mut c) = ckpt {
+        c.workflow = workbook.frontmatter.workflow.clone();
+    }
+    let mut run_outputs = ckpt.as_ref().map(|c| c.outputs.clone()).unwrap_or_default();
+
     let cb = resolve_callback_config(callback_url, callback_secret, callback_key, &ctx, &run_id);
 
     // Artifacts: same semantics as the non-checkpoint path — create/read the
     // dir, inject WB_ARTIFACTS_DIR, upload new files after each cell.
     let mut artifacts = artifacts::Artifacts::init(&mut ctx.env);
+    let outputs_path = step_outputs::init_outputs_path(&mut ctx.env, artifacts.dir(), &run_outputs);
 
     let start = Instant::now();
     let mut block_idx = 0;
@@ -1611,33 +1753,39 @@ fn run_single(cfg: RunConfig) {
             let mut stale_warned = false;
             let mut check_idx = 0;
             for section in &workbook.sections {
-                if let parser::Section::Code(block) = section {
-                    if check_idx >= replay_until {
-                        break;
-                    }
-                    if let Some(saved) = c.results.get(check_idx) {
-                        if let Some(ref saved_hash) = saved.code_hash {
-                            let current_hash = checkpoint::hash_code(&block.code);
-                            if *saved_hash != current_hash {
-                                if !stale_warned {
-                                    eprintln!(
+                if check_idx >= replay_until {
+                    break;
+                }
+                match section {
+                    parser::Section::Code(block) => {
+                        if let Some(saved) = c.results.iter().find(|r| r.block_index == check_idx) {
+                            if let Some(ref saved_hash) = saved.code_hash {
+                                let current_hash = checkpoint::hash_code(&block.code);
+                                if *saved_hash != current_hash {
+                                    if !stale_warned {
+                                        eprintln!(
                                         "{}",
                                         output::style_fail(
                                             "warning: block source changed since last checkpoint:"
                                         )
                                     );
-                                    stale_warned = true;
+                                        stale_warned = true;
+                                    }
+                                    eprintln!(
+                                        "  block {} [{}] L{}",
+                                        check_idx + 1,
+                                        block.language,
+                                        block.line_number
+                                    );
                                 }
-                                eprintln!(
-                                    "  block {} [{}] L{}",
-                                    check_idx + 1,
-                                    block.language,
-                                    block.line_number
-                                );
                             }
                         }
+                        check_idx += 1;
                     }
-                    check_idx += 1;
+                    parser::Section::Browser(_) => {
+                        check_idx += 1;
+                    }
+                    _ => {}
                 }
             }
         }
@@ -1783,48 +1931,35 @@ fn run_single(cfg: RunConfig) {
         }
 
         if let parser::Section::Code(block) = section {
-            // `{no-run}`: parsed for docs tooling but never executes. Doesn't
-            // advance block_idx (excluded from code_block_count), no callbacks,
-            // not checkpointed, not in results. A one-line hint keeps the skip
-            // visible in local runs.
-            if block.skip_execution {
-                if !quiet {
-                    eprintln!(
-                        "{}",
-                        output::style_dim(&format!(
-                            "  ⊘ skipped {{no-run}} [{}] (L{})",
-                            block.language, block.line_number
-                        ))
-                    );
-                }
-                continue;
-            }
-
-            // `{when=…}` / `{skip_if=…}`: runtime-conditional skip evaluated
-            // against the session env merged with process env (frontmatter
-            // wins). Same semantics as `{no-run}` — no execution, no callback,
-            // no checkpoint, block_idx does not advance. Block is still
-            // counted in `block_count` (can't be evaluated at parse time) so
-            // the UI progress shows a gap.
-            if let Some(reason) = parser::should_skip_block(
-                block.when.as_deref(),
-                block.skip_if.as_deref(),
-                &parser::resolved_env(session.env()),
-            ) {
-                if !quiet {
-                    eprintln!(
-                        "{}",
-                        output::style_dim(&format!(
-                            "  ⊘ skipped [{}] (L{}) — {}",
-                            block.language, block.line_number, reason
-                        ))
-                    );
-                }
-                continue;
-            }
+            let step_id = steps.get(block_idx).map(|s| s.id.as_str());
+            let workflow_payload = workflow_ctx
+                .as_ref()
+                .and_then(|w| w.payload_for_step(step_id));
 
             // Replay completed blocks to rebuild session state
             if block_idx < replay_until {
+                let replayed_skip = ckpt
+                    .as_ref()
+                    .and_then(|c| c.skipped_step(block_idx))
+                    .cloned();
+                if replayed_skip.is_some() || block.skip_execution {
+                    if !quiet {
+                        eprintln!(
+                            "{}",
+                            output::style_dim(&format!(
+                                "  ↻ skipped [{}/{}] {} (L{})",
+                                block_idx + 1,
+                                block_count,
+                                block.language,
+                                block.line_number
+                            ))
+                        );
+                    }
+                    last_heading = None;
+                    block_idx += 1;
+                    continue;
+                }
+
                 let replay_line = format!(
                     "  ↻ replaying [{}/{}] {} (L{})",
                     block_idx + 1,
@@ -1837,8 +1972,20 @@ fn run_single(cfg: RunConfig) {
                 // Execute with quiet=true and WB_REPLAY=1
                 session.set_quiet(true);
                 session.set_env("WB_REPLAY".to_string(), "1".to_string());
-                let replay_result = session.execute_block(block, block_idx);
+                let mut replay_result = session.execute_block(block, block_idx);
                 session.set_quiet(quiet);
+                let replay_outputs = capture_outputs_for_result(&mut replay_result, true);
+                if replay_result.success() && !replay_outputs.is_empty() {
+                    let key = step_key(step_id, block_idx);
+                    step_outputs::merge_step_outputs(&mut run_outputs, &key, &replay_outputs);
+                    if let Err(e) = step_outputs::write_outputs_file(&outputs_path, &run_outputs) {
+                        eprintln!("warning: outputs file: {}", e);
+                    }
+                    if let (Some(ref mut c), Some(ref ckpt_id)) = (&mut ckpt, &checkpoint_id) {
+                        c.add_outputs(&key, &raw_outputs(&replay_outputs));
+                        let _ = checkpoint::save(ckpt_id, c);
+                    }
+                }
 
                 if !replay_result.success() {
                     eprintln!(
@@ -1864,6 +2011,69 @@ fn run_single(cfg: RunConfig) {
             }
 
             let block_heading = last_heading.take();
+            let live_skip = if block.skip_execution {
+                Some(no_run_skip_decision())
+            } else {
+                conditional_skip_decision(
+                    block.when.as_deref(),
+                    block.skip_if.as_deref(),
+                    &parser::resolved_env(session.env()),
+                )
+            };
+            if let Some(skip) = live_skip {
+                if !quiet {
+                    let label = if skip.kind == "no_run" {
+                        format!(
+                            "  ⊘ skipped {{no-run}} [{}] (L{})",
+                            block.language, block.line_number
+                        )
+                    } else {
+                        format!(
+                            "  ⊘ skipped [{}] (L{}) — {}",
+                            block.language, block.line_number, skip.reason
+                        )
+                    };
+                    eprintln!("{}", output::style_dim(&label));
+                }
+                if let Some(ref cb) = cb {
+                    if !block.silent {
+                        cb.step_skipped(
+                            file,
+                            checkpoint_id.as_deref(),
+                            block_idx,
+                            step_id,
+                            &block.language,
+                            block_heading.as_deref(),
+                            block.line_number,
+                            block_idx + 1,
+                            block_count,
+                            &skip.kind,
+                            skip.expression.as_deref(),
+                            &skip.reason,
+                            &include_stack,
+                            workflow_payload.as_ref(),
+                        );
+                    }
+                }
+                if let (Some(ref mut c), Some(ref ckpt_id)) = (&mut ckpt, &checkpoint_id) {
+                    c.add_skip(checkpoint::SavedSkip {
+                        block_index: block_idx,
+                        step_id: step_id.map(|s| s.to_string()),
+                        language: block.language.clone(),
+                        line_number: block.line_number,
+                        heading: block_heading.clone(),
+                        kind: skip.kind,
+                        expression: skip.expression,
+                        reason: skip.reason,
+                        code_hash: Some(checkpoint::hash_code(&block.code)),
+                    });
+                    if let Err(e) = checkpoint::save(ckpt_id, c) {
+                        eprintln!("warning: checkpoint: {}", e);
+                    }
+                }
+                block_idx += 1;
+                continue;
+            }
 
             if !quiet {
                 let preview = block.code.lines().next();
@@ -1876,8 +2086,7 @@ fn run_single(cfg: RunConfig) {
             }
 
             let policy = step_policy_for(&resolved_step_policies, block_idx);
-            let step_id = steps.get(block_idx).map(|s| s.id.as_str());
-            let result = execute_block_with_policy(
+            let mut result = execute_block_with_policy(
                 &mut session,
                 block,
                 block_idx,
@@ -1885,6 +2094,23 @@ fn run_single(cfg: RunConfig) {
                 executor::DEFAULT_BLOCK_TIMEOUT,
                 quiet,
             );
+            let current_outputs = capture_outputs_for_result(&mut result, policy.continue_on_error);
+            if !current_outputs.is_empty() {
+                let key = step_key(step_id, block_idx);
+                step_outputs::merge_step_outputs(&mut run_outputs, &key, &current_outputs);
+                if let Err(e) = step_outputs::write_outputs_file(&outputs_path, &run_outputs) {
+                    eprintln!("warning: outputs file: {}", e);
+                }
+                if let (Some(ref mut c), Some(ref ckpt_id)) = (&mut ckpt, &checkpoint_id) {
+                    c.add_outputs(&key, &raw_outputs(&current_outputs));
+                    let _ = checkpoint::save(ckpt_id, c);
+                }
+            }
+            let callback_outputs = if current_outputs.is_empty() {
+                None
+            } else {
+                Some(step_outputs::callback_outputs(&current_outputs))
+            };
             let new_artifacts = artifacts.sync();
 
             // Emit step.artifact_saved for each new artifact produced by this
@@ -1911,6 +2137,7 @@ fn run_single(cfg: RunConfig) {
                             art.description.as_deref(),
                             &include_stack,
                             step_id,
+                            workflow_payload.as_ref(),
                         );
                     }
                 }
@@ -1945,6 +2172,8 @@ fn run_single(cfg: RunConfig) {
                         block.line_number,
                         &include_stack,
                         step_id,
+                        callback_outputs.as_ref(),
+                        workflow_payload.as_ref(),
                     );
                 }
             }
@@ -1965,6 +2194,7 @@ fn run_single(cfg: RunConfig) {
                         block.line_number,
                         &include_stack,
                         step_id,
+                        workflow_payload.as_ref(),
                     );
                 }
 
@@ -2014,42 +2244,10 @@ fn run_single(cfg: RunConfig) {
         }
 
         if let parser::Section::Browser(spec) = section {
-            // `{no-run}`: same semantics as code blocks — parsed but never
-            // dispatched to the sidecar. The sidecar isn't spawned for a
-            // run that has only no-run browser slices.
-            if spec.skip_execution {
-                if !quiet {
-                    eprintln!(
-                        "{}",
-                        output::style_dim(&format!(
-                            "  ⊘ skipped {{no-run}} [browser] (L{})",
-                            spec.line_number
-                        ))
-                    );
-                }
-                continue;
-            }
-
-            // `{when=…}` / `{skip_if=…}`: runtime-conditional skip. Browser
-            // slices share the same session env as code blocks, so we evaluate
-            // against it identically. Skipping here also avoids spawning the
-            // sidecar when every browser slice is conditionally off.
-            if let Some(reason) = parser::should_skip_block(
-                spec.when.as_deref(),
-                spec.skip_if.as_deref(),
-                &parser::resolved_env(session.env()),
-            ) {
-                if !quiet {
-                    eprintln!(
-                        "{}",
-                        output::style_dim(&format!(
-                            "  ⊘ skipped [browser] (L{}) — {}",
-                            spec.line_number, reason
-                        ))
-                    );
-                }
-                continue;
-            }
+            let step_id = steps.get(block_idx).map(|s| s.id.as_str());
+            let workflow_payload = workflow_ctx
+                .as_ref()
+                .and_then(|w| w.payload_for_step(step_id));
 
             // Replay path: browser sidecars rehydrate via persistent Browserbase
             // contexts, so a completed slice doesn't need to re-execute.
@@ -2073,6 +2271,66 @@ fn run_single(cfg: RunConfig) {
             }
 
             let block_heading = last_heading.take();
+            let live_skip = if spec.skip_execution {
+                Some(no_run_skip_decision())
+            } else {
+                conditional_skip_decision(
+                    spec.when.as_deref(),
+                    spec.skip_if.as_deref(),
+                    &parser::resolved_env(session.env()),
+                )
+            };
+            if let Some(skip) = live_skip {
+                if !quiet {
+                    let label = if skip.kind == "no_run" {
+                        format!("  ⊘ skipped {{no-run}} [browser] (L{})", spec.line_number)
+                    } else {
+                        format!(
+                            "  ⊘ skipped [browser] (L{}) — {}",
+                            spec.line_number, skip.reason
+                        )
+                    };
+                    eprintln!("{}", output::style_dim(&label));
+                }
+                if let Some(ref cb) = cb {
+                    if !spec.silent {
+                        cb.step_skipped(
+                            file,
+                            checkpoint_id.as_deref(),
+                            block_idx,
+                            step_id,
+                            "browser",
+                            block_heading.as_deref(),
+                            spec.line_number,
+                            block_idx + 1,
+                            block_count,
+                            &skip.kind,
+                            skip.expression.as_deref(),
+                            &skip.reason,
+                            &include_stack,
+                            workflow_payload.as_ref(),
+                        );
+                    }
+                }
+                if let (Some(ref mut c), Some(ref ckpt_id)) = (&mut ckpt, &checkpoint_id) {
+                    c.add_skip(checkpoint::SavedSkip {
+                        block_index: block_idx,
+                        step_id: step_id.map(|s| s.to_string()),
+                        language: "browser".to_string(),
+                        line_number: spec.line_number,
+                        heading: block_heading.clone(),
+                        kind: skip.kind,
+                        expression: skip.expression,
+                        reason: skip.reason,
+                        code_hash: Some(checkpoint::hash_code(&spec.raw)),
+                    });
+                    if let Err(e) = checkpoint::save(ckpt_id, c) {
+                        eprintln!("warning: checkpoint: {}", e);
+                    }
+                }
+                block_idx += 1;
+                continue;
+            }
 
             if !quiet {
                 let session_tag = spec.session.as_deref().unwrap_or("-");
@@ -2085,7 +2343,6 @@ fn run_single(cfg: RunConfig) {
                 );
             }
 
-            let step_id = steps.get(block_idx).map(|s| s.id.as_str());
             let slice_ctx = sidecar::SliceCallbackContext {
                 cb: cb.as_ref(),
                 workbook: file,
@@ -2097,11 +2354,49 @@ fn run_single(cfg: RunConfig) {
                 total: block_count,
                 include_chain: &include_stack,
                 step_id,
+                workflow: workflow_payload.as_ref(),
             };
             // Take a one-shot restore, if the resume path handed us one earlier.
             let restore = browser_restore.take();
-            let (result, pause_info) =
-                session.execute_browser_slice(spec, block_idx, &slice_ctx, restore.as_ref());
+            let (mut result, pause_info) = match prepare_browser_spec(spec, artifacts.dir()) {
+                Ok(prepared_spec) => session.execute_browser_slice(
+                    &prepared_spec,
+                    block_idx,
+                    &slice_ctx,
+                    restore.as_ref(),
+                ),
+                Err(e) => (
+                    executor::BlockResult {
+                        block_index: block_idx,
+                        language: "browser".to_string(),
+                        stdout: String::new(),
+                        stderr: e,
+                        exit_code: 1,
+                        duration: std::time::Duration::ZERO,
+                        error_type: Some("browser_verb_failed".to_string()),
+                        stdout_partial: false,
+                        stderr_partial: false,
+                    },
+                    None,
+                ),
+            };
+            let current_outputs = capture_outputs_for_result(&mut result, false);
+            if !current_outputs.is_empty() {
+                let key = step_key(step_id, block_idx);
+                step_outputs::merge_step_outputs(&mut run_outputs, &key, &current_outputs);
+                if let Err(e) = step_outputs::write_outputs_file(&outputs_path, &run_outputs) {
+                    eprintln!("warning: outputs file: {}", e);
+                }
+                if let (Some(ref mut c), Some(ref ckpt_id)) = (&mut ckpt, &checkpoint_id) {
+                    c.add_outputs(&key, &raw_outputs(&current_outputs));
+                    let _ = checkpoint::save(ckpt_id, c);
+                }
+            }
+            let callback_outputs = if current_outputs.is_empty() {
+                None
+            } else {
+                Some(step_outputs::callback_outputs(&current_outputs))
+            };
             let new_artifacts = artifacts.sync();
 
             // Emit step.artifact_saved for each artifact this slice produced,
@@ -2128,6 +2423,7 @@ fn run_single(cfg: RunConfig) {
                             art.description.as_deref(),
                             &include_stack,
                             step_id,
+                            workflow_payload.as_ref(),
                         );
                     }
                 }
@@ -2153,6 +2449,7 @@ fn run_single(cfg: RunConfig) {
                     &include_stack,
                     &frame_starts,
                     step_id,
+                    workflow_payload.as_ref(),
                 );
                 // Unreachable — pause_browser_slice exits.
             }
@@ -2184,6 +2481,8 @@ fn run_single(cfg: RunConfig) {
                         spec.line_number,
                         &include_stack,
                         step_id,
+                        callback_outputs.as_ref(),
+                        workflow_payload.as_ref(),
                     );
                 }
             }
@@ -2200,6 +2499,7 @@ fn run_single(cfg: RunConfig) {
                         spec.line_number,
                         &include_stack,
                         step_id,
+                        workflow_payload.as_ref(),
                     );
                 }
 
@@ -2500,13 +2800,8 @@ fn inspect_workbook_json(file: &str) {
                     }
                     None => default_program(&lang).to_string(),
                 };
-                let step_id = if !block.skip_execution {
-                    let id = steps.get(step_idx).map(|s| s.id.0.clone());
-                    step_idx += 1;
-                    id
-                } else {
-                    None
-                };
+                let step_id = steps.get(step_idx).map(|s| s.id.0.clone());
+                step_idx += 1;
                 blocks.push(serde_json::json!({
                     "index": idx,
                     "kind": "code",
@@ -2540,13 +2835,8 @@ fn inspect_workbook_json(file: &str) {
             }
             parser::Section::Browser(spec) => {
                 idx += 1;
-                let step_id = if !spec.skip_execution {
-                    let id = steps.get(step_idx).map(|s| s.id.0.clone());
-                    step_idx += 1;
-                    id
-                } else {
-                    None
-                };
+                let step_id = steps.get(step_idx).map(|s| s.id.0.clone());
+                step_idx += 1;
                 blocks.push(serde_json::json!({
                     "index": idx,
                     "kind": "browser",
@@ -2593,6 +2883,7 @@ fn inspect_workbook_json(file: &str) {
             "redact": fm.redact,
             "secrets": fm.secrets.is_some(),
             "sandbox": sandbox_obj,
+            "workflow": fm.workflow,
         },
         "blocks": blocks,
         "executable_count": workbook.code_block_count(),
@@ -2678,6 +2969,98 @@ fn write_pause_result(dir: &std::path::Path, signal: Option<&serde_json::Value>)
             e
         );
     }
+}
+
+fn prepare_browser_spec(
+    spec: &parser::BrowserSliceSpec,
+    artifacts_dir: &Path,
+) -> Result<parser::BrowserSliceSpec, String> {
+    let mut prepared = spec.clone();
+    let mut verbs = Vec::with_capacity(spec.verbs.len());
+    for verb in &spec.verbs {
+        if let Some(args) = announce_artifact_args(verb)? {
+            write_artifact_sidecar(artifacts_dir, &args)?;
+        } else {
+            verbs.push(verb.clone());
+        }
+    }
+    prepared.verbs = verbs;
+    Ok(prepared)
+}
+
+struct AnnounceArtifactArgs {
+    path: String,
+    label: String,
+    description: Option<String>,
+}
+
+fn announce_artifact_args(
+    verb: &serde_yaml::Value,
+) -> Result<Option<AnnounceArtifactArgs>, String> {
+    let Some(map) = verb.as_mapping() else {
+        return Ok(None);
+    };
+    let key = serde_yaml::Value::String("announce_artifact".to_string());
+    let Some(value) = map.get(&key) else {
+        return Ok(None);
+    };
+    let Some(args) = value.as_mapping() else {
+        return Err("announce_artifact: expected mapping".to_string());
+    };
+    let path = yaml_string(args, "path")
+        .ok_or_else(|| "announce_artifact: `path` is required".to_string())?;
+    let label = yaml_string(args, "label")
+        .ok_or_else(|| "announce_artifact: `label` is required".to_string())?;
+    let description = yaml_string(args, "description");
+    Ok(Some(AnnounceArtifactArgs {
+        path,
+        label,
+        description,
+    }))
+}
+
+fn yaml_string(map: &serde_yaml::Mapping, key: &str) -> Option<String> {
+    map.get(serde_yaml::Value::String(key.to_string()))
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+}
+
+fn write_artifact_sidecar(dir: &Path, args: &AnnounceArtifactArgs) -> Result<(), String> {
+    let rel = Path::new(&args.path);
+    if rel.is_absolute()
+        || rel
+            .components()
+            .any(|c| matches!(c, Component::ParentDir | Component::Prefix(_)))
+    {
+        return Err(format!(
+            "announce_artifact: path '{}' must stay inside WB_ARTIFACTS_DIR",
+            args.path
+        ));
+    }
+    let artifact_path = dir.join(rel);
+    let mut sidecar_os = artifact_path.as_os_str().to_os_string();
+    sidecar_os.push(".meta.json");
+    let sidecar = PathBuf::from(sidecar_os);
+    if let Some(parent) = sidecar.parent() {
+        std::fs::create_dir_all(parent)
+            .map_err(|e| format!("announce_artifact: create {}: {}", parent.display(), e))?;
+    }
+    let mut payload = serde_json::Map::new();
+    payload.insert(
+        "label".to_string(),
+        serde_json::Value::String(args.label.clone()),
+    );
+    if let Some(description) = args.description.as_ref() {
+        payload.insert(
+            "description".to_string(),
+            serde_json::Value::String(description.clone()),
+        );
+    }
+    let bytes = serde_json::to_vec_pretty(&serde_json::Value::Object(payload))
+        .map_err(|e| format!("announce_artifact: serialize sidecar: {}", e))?;
+    atomic_io::write_secret_file(&sidecar, &bytes)
+        .map_err(|e| format!("announce_artifact: write {}: {}", sidecar.display(), e))?;
+    Ok(())
 }
 
 /// Fire `step.finished` for every active include frame, deepest-first. Drains
@@ -2844,6 +3227,7 @@ fn pause_browser_slice(
     include_chain: &[parser::IncludeFrame],
     frame_starts: &[Instant],
     step_id: Option<&str>,
+    workflow: Option<&callback::WorkflowPayload>,
 ) -> ! {
     let id = match checkpoint_id.as_deref() {
         Some(id) => id,
@@ -2959,6 +3343,7 @@ fn pause_browser_slice(
             serde_json::Value::Object(extra),
             include_chain,
             step_id,
+            workflow,
         );
         // Same bubble-up as pause_for_signal: close active frames with
         // outcome=paused so the run-page timeline freezes.

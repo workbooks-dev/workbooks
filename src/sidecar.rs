@@ -24,6 +24,7 @@ use std::time::{Duration, Instant};
 use serde_json::{json, Value};
 
 use crate::callback::CallbackConfig;
+use crate::callback::WorkflowPayload;
 use crate::parser::BrowserSliceSpec;
 
 /// Binary name we look for on $PATH when WB_BROWSER_RUNTIME is unset.
@@ -102,6 +103,8 @@ pub struct SliceCallbackContext<'a> {
     /// events (paused/resumed/recovered) so consumers correlate with the
     /// step.complete fired by the run loop.
     pub step_id: Option<&'a str>,
+    /// Optional workflow metadata fragment for the executing slice.
+    pub workflow: Option<&'a WorkflowPayload>,
 }
 
 /// Extra payload sent to the sidecar to resume a previously-paused slice.
@@ -445,6 +448,14 @@ impl Sidecar {
                                 pause: None,
                             };
                         }
+                        "slice.artifact_saved" => {
+                            // Browser runtimes may stream their own
+                            // slice.artifact_saved event to a sidecar
+                            // ingester. wb emits the persistent
+                            // step.artifact_saved callback after
+                            // Artifacts::sync(), so do not republish the
+                            // slice event here with the lifecycle envelope.
+                        }
                         ty if ty.starts_with("slice.") => {
                             // Generic lifecycle passthrough — any non-terminal
                             // slice.* event flows as a callback so new event
@@ -518,6 +529,7 @@ fn fire_lifecycle(ctx: &SliceCallbackContext, event: &str, sidecar_msg: &Value) 
         extra,
         ctx.include_chain,
         ctx.step_id,
+        ctx.workflow,
     );
 }
 

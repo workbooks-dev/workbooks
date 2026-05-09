@@ -26,6 +26,10 @@ pub struct Frontmatter {
     /// honored; treat this like a flat "needs:" list, not transitive deps.
     /// Note: distinct from `requires` (Docker sandbox config).
     pub required: Option<Vec<String>>,
+    /// Optional compiled-workflow manifest. `wb` treats it as metadata: it
+    /// validates declared node ids and passes compact fragments through
+    /// callbacks/checkpoints, but does not interpret the workflow graph.
+    pub workflow: Option<serde_json::Value>,
     /// Per-block timeout map, keyed by 1-based block number. Values are
     /// duration strings ("30s", "5m", "2h") — bare integers are seconds.
     /// Missing keys fall back to the 300s default.
@@ -335,27 +339,24 @@ pub struct Workbook {
 }
 
 impl Workbook {
-    /// Count of executable units (code blocks + browser slices).
+    /// Count of executable step slots (code blocks + browser slices).
     /// Browser slices consume a block index and show up in progress/callbacks
-    /// exactly like code blocks do. Blocks flagged `{no-run}` are excluded —
-    /// they're parsed but never execute, so they don't count toward progress.
+    /// exactly like code blocks do. Blocks flagged `{no-run}` now count as
+    /// skipped step slots so callback progress can mark them terminal.
     pub fn code_block_count(&self) -> usize {
         self.sections
             .iter()
-            .filter(|s| match s {
-                Section::Code(b) => !b.skip_execution,
-                Section::Browser(b) => !b.skip_execution,
-                _ => false,
-            })
+            .filter(|s| matches!(s, Section::Code(_) | Section::Browser(_)))
             .count()
     }
 
     /// Materialize the executable section list as a `Vec<Step>` with stable
-    /// ids. `{no-run}` blocks are excluded — they're not executable, so they
-    /// don't get step ids. The resulting slice is index-aligned with the
+    /// ids. `{no-run}` blocks are included as skipped step slots so they can
+    /// emit `step.skipped`. The resulting slice is index-aligned with the
     /// run-loop's iteration over `Section::Code | Browser` (filtered on
-    /// `!skip_execution`), which means `steps[block_idx]` matches the legacy
-    /// `(block_idx + 1)` block number used by the frontmatter policy maps.
+    /// every code/browser section), which means `steps[block_idx]` matches
+    /// the legacy `(block_idx + 1)` block number used by the frontmatter
+    /// policy maps.
     ///
     /// Step ids are deterministic — the same workbook produces the same ids
     /// on every parse. See `crate::step_ir` for the hashing rules.
@@ -381,7 +382,7 @@ impl Workbook {
                     chain.pop();
                     scope_positions.pop();
                 }
-                Section::Code(b) if !b.skip_execution => {
+                Section::Code(b) => {
                     let position = *scope_positions.last().unwrap_or(&0);
                     let id = Step::compute_id(
                         &chain,
@@ -406,7 +407,7 @@ impl Workbook {
                         *p += 1;
                     }
                 }
-                Section::Browser(spec) if !spec.skip_execution => {
+                Section::Browser(spec) => {
                     let position = *scope_positions.last().unwrap_or(&0);
                     let id = Step::compute_id(
                         &chain,
@@ -1688,7 +1689,7 @@ echo second
     }
 
     #[test]
-    fn test_build_steps_skips_no_run_blocks() {
+    fn test_build_steps_includes_no_run_blocks_for_skip_events() {
         let input = r#"```bash {no-run}
 echo skipped
 ```
@@ -1699,8 +1700,9 @@ echo runs
 "#;
         let wb = parse(input);
         let steps = wb.build_steps();
-        assert_eq!(steps.len(), 1);
-        assert_eq!(steps[0].body, "echo runs");
+        assert_eq!(steps.len(), 2);
+        assert_eq!(steps[0].body, "echo skipped");
+        assert_eq!(steps[1].body, "echo runs");
     }
 
     #[test]
@@ -1733,7 +1735,7 @@ print("two")
     // --- {no-run} and {silent} fence flags (stable since v0.9.8) ---
 
     #[test]
-    fn test_no_run_excluded_from_count() {
+    fn test_no_run_counts_as_skipped_step_slot() {
         let input = r#"```bash {no-run}
 echo "illustrative"
 ```
@@ -1743,8 +1745,9 @@ echo "runs"
 ```
 "#;
         let wb = parse(input);
-        // Only the plain bash block counts — no-run is excluded from progress.
-        assert_eq!(wb.code_block_count(), 1);
+        // `{no-run}` now counts as a terminal skipped step for callback
+        // progress; it is parsed but not executed.
+        assert_eq!(wb.code_block_count(), 2);
         // But the no-run block is still parsed into the sections list so
         // tooling (docs renderers, wb inspect) can see it.
         let code_blocks: Vec<&CodeBlock> = wb
@@ -1813,7 +1816,7 @@ verbs:
             .collect();
         assert_eq!(browsers.len(), 1);
         assert!(browsers[0].skip_execution);
-        assert_eq!(wb.code_block_count(), 0);
+        assert_eq!(wb.code_block_count(), 1);
     }
 
     // --- {when=…} / {skip_if=…} runtime-conditional attrs ----------------

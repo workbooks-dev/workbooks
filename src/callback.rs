@@ -10,6 +10,20 @@ use sha2::{Digest, Sha256};
 use crate::executor::BlockResult;
 use crate::parser::IncludeFrame;
 
+#[derive(Debug, Clone)]
+pub struct WorkflowPayload {
+    pub workflow: serde_json::Value,
+    pub workflow_node: serde_json::Value,
+}
+
+fn attach_workflow(payload: &mut serde_json::Value, workflow: Option<&WorkflowPayload>) {
+    let Some(workflow) = workflow else { return };
+    if let Some(obj) = payload.as_object_mut() {
+        obj.insert("workflow".to_string(), workflow.workflow.clone());
+        obj.insert("workflow_node".to_string(), workflow.workflow_node.clone());
+    }
+}
+
 /// Serialize an include chain (stack of active IncludeFrames, outermost first)
 /// into the JSON array shape emitted in callback payloads. Empty chain becomes
 /// an empty array, not null — consumers can iterate without a null check.
@@ -84,8 +98,10 @@ fn build_step_complete_payload(
     run_id: &str,
     include_chain: &[IncludeFrame],
     step_id: Option<&str>,
+    outputs: Option<&serde_json::Value>,
+    workflow: Option<&WorkflowPayload>,
 ) -> serde_json::Value {
-    json!({
+    let mut payload = json!({
         "event": "step.complete",
             "event_version": EVENT_VERSION,
         "run_id": run_id,
@@ -111,7 +127,14 @@ fn build_step_complete_payload(
         },
         "include_chain": chain_to_json(include_chain),
         "timestamp": Utc::now().to_rfc3339(),
-    })
+    });
+    if let Some(outputs) = outputs {
+        if let Some(obj) = payload.as_object_mut() {
+            obj.insert("outputs".to_string(), outputs.clone());
+        }
+    }
+    attach_workflow(&mut payload, workflow);
+    payload
 }
 
 fn build_step_started_payload(
@@ -180,13 +203,26 @@ fn build_step_artifact_saved_payload(
     run_id: &str,
     include_chain: &[IncludeFrame],
     step_id: Option<&str>,
+    workflow: Option<&WorkflowPayload>,
 ) -> serde_json::Value {
-    json!({
+    let mut payload = json!({
         "event": "step.artifact_saved",
         "event_version": EVENT_VERSION,
         "run_id": run_id,
         "checkpoint_id": checkpoint_id,
         "workbook": workbook,
+        "filename": filename,
+        "path": path,
+        "bytes": bytes,
+        "content_type": content_type,
+        "step_index": completed,
+        "step_total": total,
+        "label": label,
+        "description": description,
+        "step_kind": "block",
+        "step_id": step_id,
+        "step_title": heading,
+        "parent_step_id": include_chain.last().map(|f| f.id.as_str()),
         "block": {
             "index": block_index,
             "step_id": step_id,
@@ -208,7 +244,56 @@ fn build_step_artifact_saved_payload(
         },
         "include_chain": chain_to_json(include_chain),
         "timestamp": Utc::now().to_rfc3339(),
-    })
+    });
+    attach_workflow(&mut payload, workflow);
+    payload
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_step_skipped_payload(
+    workbook: &str,
+    checkpoint_id: Option<&str>,
+    block_index: usize,
+    step_id: Option<&str>,
+    language: &str,
+    heading: Option<&str>,
+    line_number: usize,
+    completed: usize,
+    total: usize,
+    kind: &str,
+    expression: Option<&str>,
+    reason: &str,
+    run_id: &str,
+    include_chain: &[IncludeFrame],
+    workflow: Option<&WorkflowPayload>,
+) -> serde_json::Value {
+    let mut payload = json!({
+        "event": "step.skipped",
+        "event_version": EVENT_VERSION,
+        "run_id": run_id,
+        "checkpoint_id": checkpoint_id,
+        "workbook": workbook,
+        "block": {
+            "index": block_index,
+            "step_id": step_id,
+            "language": language,
+            "heading": heading,
+            "line_number": line_number,
+        },
+        "skip": {
+            "kind": kind,
+            "expression": expression,
+            "reason": reason,
+        },
+        "progress": {
+            "completed": completed,
+            "total": total,
+        },
+        "include_chain": chain_to_json(include_chain),
+        "timestamp": Utc::now().to_rfc3339(),
+    });
+    attach_workflow(&mut payload, workflow);
+    payload
 }
 
 pub struct CallbackConfig {
@@ -265,6 +350,8 @@ impl CallbackConfig {
         line_number: usize,
         include_chain: &[IncludeFrame],
         step_id: Option<&str>,
+        outputs: Option<&serde_json::Value>,
+        workflow: Option<&WorkflowPayload>,
     ) {
         let payload = build_step_complete_payload(
             result,
@@ -277,6 +364,8 @@ impl CallbackConfig {
             &self.run_id,
             include_chain,
             step_id,
+            outputs,
+            workflow,
         );
         self.send("step.complete", &payload.to_string());
     }
@@ -295,8 +384,9 @@ impl CallbackConfig {
         line_number: usize,
         include_chain: &[IncludeFrame],
         step_id: Option<&str>,
+        workflow: Option<&WorkflowPayload>,
     ) {
-        let payload = json!({
+        let mut payload = json!({
             "event": "checkpoint.failed",
             "event_version": EVENT_VERSION,
             "run_id": &self.run_id,
@@ -321,6 +411,7 @@ impl CallbackConfig {
             "include_chain": chain_to_json(include_chain),
             "timestamp": Utc::now().to_rfc3339(),
         });
+        attach_workflow(&mut payload, workflow);
         self.send("checkpoint.failed", &payload.to_string());
     }
 
@@ -420,6 +511,7 @@ impl CallbackConfig {
         extra: serde_json::Value,
         include_chain: &[IncludeFrame],
         step_id: Option<&str>,
+        workflow: Option<&WorkflowPayload>,
     ) {
         let mut payload = json!({
             "event": event,
@@ -447,6 +539,7 @@ impl CallbackConfig {
                 obj.insert(k.clone(), v.clone());
             }
         }
+        attach_workflow(&mut payload, workflow);
         self.send(event, &payload.to_string());
     }
 
@@ -476,6 +569,7 @@ impl CallbackConfig {
         description: Option<&str>,
         include_chain: &[IncludeFrame],
         step_id: Option<&str>,
+        workflow: Option<&WorkflowPayload>,
     ) {
         let payload = build_step_artifact_saved_payload(
             workbook,
@@ -495,8 +589,47 @@ impl CallbackConfig {
             &self.run_id,
             include_chain,
             step_id,
+            workflow,
         );
         self.send("step.artifact_saved", &payload.to_string());
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_skipped(
+        &self,
+        workbook: &str,
+        checkpoint_id: Option<&str>,
+        block_index: usize,
+        step_id: Option<&str>,
+        language: &str,
+        heading: Option<&str>,
+        line_number: usize,
+        completed: usize,
+        total: usize,
+        kind: &str,
+        expression: Option<&str>,
+        reason: &str,
+        include_chain: &[IncludeFrame],
+        workflow: Option<&WorkflowPayload>,
+    ) {
+        let payload = build_step_skipped_payload(
+            workbook,
+            checkpoint_id,
+            block_index,
+            step_id,
+            language,
+            heading,
+            line_number,
+            completed,
+            total,
+            kind,
+            expression,
+            reason,
+            &self.run_id,
+            include_chain,
+            workflow,
+        );
+        self.send("step.skipped", &payload.to_string());
     }
 
     /// Fired when the entire run finishes (all blocks executed)
@@ -864,6 +997,8 @@ mod tests {
             "run-abc",
             &[],
             Some("auto-deadbeef0001"),
+            None,
+            None,
         );
         assert_eq!(payload["event"], "step.complete");
         assert_eq!(payload["event_version"], "1");
@@ -883,6 +1018,57 @@ mod tests {
         assert_eq!(payload["progress"]["total"], 6);
         assert!(payload["include_chain"].is_array());
         assert_eq!(payload["include_chain"].as_array().unwrap().len(), 0);
+    }
+
+    #[test]
+    fn test_build_step_complete_payload_includes_outputs_and_workflow() {
+        let result = BlockResult {
+            block_index: 1,
+            language: "python".to_string(),
+            stdout: "output: snapshot_path=/tmp/snapshot.json\n".to_string(),
+            stderr: "".to_string(),
+            exit_code: 0,
+            duration: std::time::Duration::from_millis(3),
+            error_type: None,
+            stdout_partial: false,
+            stderr_partial: false,
+        };
+        let outputs = json!({
+            "snapshot_path": {
+                "type": "string",
+                "value": "/tmp/snapshot.json"
+            },
+            "currency_count": {
+                "type": "json",
+                "value": 2
+            }
+        });
+        let workflow = WorkflowPayload {
+            workflow: json!({"slug": "stripe/balance", "version": "v1"}),
+            workflow_node: json!({
+                "id": "balance",
+                "primitive": "stripe/balance-snapshot",
+                "title": "Stripe balance snapshot"
+            }),
+        };
+        let payload = build_step_complete_payload(
+            &result,
+            2,
+            3,
+            "compiled.md",
+            Some("ckpt"),
+            Some("Balance"),
+            12,
+            "run",
+            &[],
+            Some("balance"),
+            Some(&outputs),
+            Some(&workflow),
+        );
+        assert_eq!(payload["outputs"]["snapshot_path"]["type"], "string");
+        assert_eq!(payload["outputs"]["currency_count"]["value"], 2);
+        assert_eq!(payload["workflow"]["slug"], "stripe/balance");
+        assert_eq!(payload["workflow_node"]["id"], "balance");
     }
 
     #[test]
@@ -991,7 +1177,7 @@ mod tests {
             },
         ];
         let payload = build_step_complete_payload(
-            &result, 1, 1, "t.md", None, None, 0, "run-1", &chain, None,
+            &result, 1, 1, "t.md", None, None, 0, "run-1", &chain, None, None, None,
         );
         let arr = payload["include_chain"].as_array().unwrap();
         assert_eq!(arr.len(), 2);
@@ -1061,6 +1247,7 @@ mod tests {
             "run-abc",
             &chain,
             Some("export"),
+            None,
         );
         assert_eq!(payload["event"], "step.artifact_saved");
         assert_eq!(payload["event_version"], "1");
@@ -1109,10 +1296,41 @@ mod tests {
             "r",
             &[],
             None,
+            None,
         );
         assert!(payload["artifact"]["label"].is_null());
         assert!(payload["artifact"]["description"].is_null());
         assert!(payload["include_chain"].is_array());
+    }
+
+    #[test]
+    fn test_build_step_skipped_payload_shape() {
+        let workflow = WorkflowPayload {
+            workflow: json!({"slug": "wf"}),
+            workflow_node: json!({"id": "upload", "primitive": "drive/upload-file", "title": "Upload"}),
+        };
+        let payload = build_step_skipped_payload(
+            "compiled.md",
+            Some("ckpt"),
+            4,
+            Some("upload"),
+            "python",
+            Some("Upload latest copy"),
+            122,
+            5,
+            8,
+            "skip_if",
+            Some("$LATEST_ELIGIBLE=false"),
+            "skip_if=$LATEST_ELIGIBLE=false matched",
+            "run-abc",
+            &[],
+            Some(&workflow),
+        );
+        assert_eq!(payload["event"], "step.skipped");
+        assert_eq!(payload["block"]["step_id"], "upload");
+        assert_eq!(payload["skip"]["kind"], "skip_if");
+        assert_eq!(payload["progress"]["completed"], 5);
+        assert_eq!(payload["workflow_node"]["id"], "upload");
     }
 
     #[test]
@@ -1129,8 +1347,20 @@ mod tests {
             stdout_partial: false,
             stderr_partial: false,
         };
-        let payload =
-            build_step_complete_payload(&result, 4, 10, "wb", None, None, 0, "", &[], None);
+        let payload = build_step_complete_payload(
+            &result,
+            4,
+            10,
+            "wb",
+            None,
+            None,
+            0,
+            "",
+            &[],
+            None,
+            None,
+            None,
+        );
         let stdout = payload["block"]["stdout"].as_str().unwrap();
         assert!(stdout.contains("…[truncated 50 bytes]"));
         assert!(stdout.len() < huge.len());

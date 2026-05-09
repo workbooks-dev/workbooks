@@ -259,6 +259,18 @@ pub fn run_in_sandbox(
     // Mount checkpoints directory
     cmd.args(["-v", &format!("{}:/root/.wb/checkpoints", checkpoints_dir)]);
 
+    // Mount the host-visible artifact directory when the outer runner
+    // resolved one. The inner wb process receives the same env var, so paths
+    // reported in step.artifact_saved callbacks are readable by host-side
+    // orchestrators.
+    if let Some(artifacts_dir) = env
+        .get(crate::artifacts::ENV_DIR)
+        .filter(|s| !s.trim().is_empty())
+    {
+        let _ = std::fs::create_dir_all(artifacts_dir);
+        cmd.args(["-v", &format!("{}:{}", artifacts_dir, artifacts_dir)]);
+    }
+
     cmd.args(["-w", "/work"]);
 
     // Pass environment variables

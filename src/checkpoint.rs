@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::executor::BlockResult;
+use crate::step_outputs::RawOutputsByStep;
 
 #[derive(Serialize, Deserialize)]
 pub struct Checkpoint {
@@ -24,6 +25,17 @@ pub struct Checkpoint {
     /// Section indices of `wait` blocks that have already been satisfied.
     #[serde(default)]
     pub waits_completed: Vec<usize>,
+    /// Structured step outputs, keyed by stable step id (or 1-based block
+    /// index string when no step id exists).
+    #[serde(default)]
+    pub outputs: RawOutputsByStep,
+    /// Step slots that were terminally skipped. Used on resume so skips are
+    /// not re-emitted or re-evaluated.
+    #[serde(default)]
+    pub skipped: Vec<SavedSkip>,
+    /// Optional compiled workflow manifest from root frontmatter.
+    #[serde(default)]
+    pub workflow: Option<serde_json::Value>,
 }
 
 #[derive(Serialize, Deserialize, PartialEq, Clone, Copy, Debug)]
@@ -51,6 +63,20 @@ pub struct SavedResult {
     pub code_hash: Option<String>,
 }
 
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
+pub struct SavedSkip {
+    pub block_index: usize,
+    pub step_id: Option<String>,
+    pub language: String,
+    pub line_number: usize,
+    pub heading: Option<String>,
+    pub kind: String,
+    pub expression: Option<String>,
+    pub reason: String,
+    #[serde(default)]
+    pub code_hash: Option<String>,
+}
+
 impl Checkpoint {
     pub fn new(workbook: &str, total_blocks: usize) -> Self {
         let now = Utc::now().to_rfc3339();
@@ -65,6 +91,9 @@ impl Checkpoint {
             results: Vec::new(),
             bound_vars: HashMap::new(),
             waits_completed: Vec::new(),
+            outputs: BTreeMap::new(),
+            skipped: Vec::new(),
+            workflow: None,
         }
     }
 
@@ -105,6 +134,42 @@ impl Checkpoint {
         });
         self.next_block = result.block_index + 1;
         self.updated_at = Utc::now().to_rfc3339();
+    }
+
+    pub fn add_outputs(&mut self, step_key: &str, outputs: &BTreeMap<String, serde_json::Value>) {
+        if outputs.is_empty() {
+            return;
+        }
+        self.outputs
+            .entry(step_key.to_string())
+            .or_default()
+            .extend(outputs.clone());
+        self.updated_at = Utc::now().to_rfc3339();
+    }
+
+    pub fn add_skip(&mut self, skip: SavedSkip) {
+        if let Some(existing) = self
+            .skipped
+            .iter_mut()
+            .find(|s| s.block_index == skip.block_index)
+        {
+            *existing = skip;
+        } else {
+            self.skipped.push(skip);
+        }
+        self.skipped.sort_by_key(|s| s.block_index);
+        self.next_block = self.next_block.max(
+            self.skipped
+                .iter()
+                .map(|s| s.block_index + 1)
+                .max()
+                .unwrap_or(self.next_block),
+        );
+        self.updated_at = Utc::now().to_rfc3339();
+    }
+
+    pub fn skipped_step(&self, block_index: usize) -> Option<&SavedSkip> {
+        self.skipped.iter().find(|s| s.block_index == block_index)
     }
 
     pub fn mark_complete(&mut self) {

@@ -415,6 +415,7 @@ pub fn reap_expired() -> Vec<ReapedEntry> {
                         // persist the id on the descriptor or rebuild the
                         // step list from the workbook file at reap time.
                         None,
+                        None,
                     );
                 }
             }

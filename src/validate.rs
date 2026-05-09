@@ -86,6 +86,10 @@ pub fn validate_content(content: &str, path: &Path, opts: &ValidateOptions) -> V
     //    legacy-map shadowing (wb-step-002).
     check_step_ids(&wb, path, &mut diags);
 
+    // 8. Workflow metadata is opaque to the runner, but declared nodes should
+    //    line up with executable step ids so callbacks can be correlated.
+    check_workflow_nodes(&wb, path, &mut diags);
+
     // If --strict: promote warnings to errors.
     if opts.strict {
         for d in &mut diags {
@@ -191,6 +195,7 @@ fn check_frontmatter_yaml(
         working_dir: Option<serde_yaml::Value>,
         requires: Option<serde_yaml::Value>,
         required: Option<serde_yaml::Value>,
+        workflow: Option<serde_yaml::Value>,
         timeouts: Option<serde_yaml::Value>,
         retries: Option<serde_yaml::Value>,
         continue_on_error: Option<serde_yaml::Value>,
@@ -467,6 +472,29 @@ fn field_to_legacy_key(field: &str) -> &str {
     }
 }
 
+fn check_workflow_nodes(wb: &Workbook, path: &Path, out: &mut Vec<Diagnostic>) {
+    let declared = crate::workflow::declared_node_ids(&wb.frontmatter);
+    if declared.is_empty() {
+        return;
+    }
+    let step_ids: std::collections::BTreeSet<String> =
+        wb.build_steps().into_iter().map(|s| s.id.0).collect();
+    for id in declared {
+        if !step_ids.contains(&id) {
+            out.push(
+                Diagnostic::warning(
+                    "wb-workflow-001",
+                    path,
+                    format!("workflow.nodes.{id} has no matching executable step id"),
+                )
+                .with_help(format!(
+                    "add `{{#{id}}}` to the matching code/browser fence"
+                )),
+            );
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -593,6 +621,33 @@ mod tests {
             !diags.iter().any(|d| d.code == "wb-step-001"),
             "should not emit wb-step-001 for unique ids: {diags:?}"
         );
+    }
+
+    #[test]
+    fn workflow_nodes_without_matching_step_warn() {
+        let diags = validate_content(
+            r#"---
+workflow:
+  slug: demo
+  nodes:
+    balance:
+      primitive: stripe/balance
+    missing:
+      primitive: drive/upload
+---
+```bash {#balance}
+echo ok
+```
+"#,
+            Path::new("wf.md"),
+            &ValidateOptions { strict: false },
+        );
+        let workflow_warnings: Vec<_> = diags
+            .iter()
+            .filter(|d| d.code == "wb-workflow-001")
+            .collect();
+        assert_eq!(workflow_warnings.len(), 1, "got: {diags:?}");
+        assert!(workflow_warnings[0].message.contains("missing"));
     }
 
     #[test]

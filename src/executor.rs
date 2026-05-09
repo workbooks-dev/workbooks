@@ -861,7 +861,7 @@ fn collect_until_sentinel(
                     exit_code = Some(code);
                     break;
                 }
-                if !quiet {
+                if !quiet && !crate::step_outputs::is_output_capture_line(&line) {
                     if is_stderr {
                         crate::output::print_stderr_dim(&line);
                     } else {
@@ -971,7 +971,7 @@ pub fn execute_block_oneshot(
                     let reader = BufReader::new(out);
                     let mut buf = String::new();
                     for line in reader.lines().map_while(Result::ok) {
-                        if !quiet {
+                        if !quiet && !crate::step_outputs::is_output_capture_line(&line) {
                             println!("{}", line);
                         }
                         buf.push_str(&line);
@@ -985,7 +985,7 @@ pub fn execute_block_oneshot(
                     let reader = BufReader::new(err);
                     let mut buf = String::new();
                     for line in reader.lines().map_while(Result::ok) {
-                        if !quiet {
+                        if !quiet && !crate::step_outputs::is_output_capture_line(&line) {
                             crate::output::print_stderr_dim(&line);
                         }
                         buf.push_str(&line);
