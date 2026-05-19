@@ -1922,6 +1922,10 @@ fn run_single(cfg: RunConfig) {
             // explicitly so Sidecar::Drop fires (shutdown frame + recording
             // flush + browser.close() before exit).
             drop(session);
+            // At a Wait section, block_idx points at the next code/browser
+            // step (waits don't increment block_idx). That's the resume entry
+            // point — persist its stable id alongside the numeric block_idx.
+            let next_step_id = steps.get(block_idx).map(|s| s.id.0.clone());
             pause_for_signal(
                 spec,
                 section_idx,
@@ -1929,6 +1933,7 @@ fn run_single(cfg: RunConfig) {
                 ckpt.as_mut(),
                 file,
                 block_idx,
+                next_step_id.as_deref(),
                 block_count,
                 start.elapsed(),
                 &results,
@@ -2077,6 +2082,7 @@ fn run_single(cfg: RunConfig) {
                         reason: skip.reason,
                         code_hash: Some(checkpoint::hash_code(&block.code)),
                     });
+                    c.next_step_id = steps.get(c.next_block).map(|s| s.id.0.clone());
                     if let Err(e) = checkpoint::save(ckpt_id, c) {
                         eprintln!("warning: checkpoint: {}", e);
                     }
@@ -2243,7 +2249,9 @@ fn run_single(cfg: RunConfig) {
                     block.line_number,
                     block_heading.as_deref(),
                     &block.code,
+                    step_id,
                 );
+                c.next_step_id = steps.get(c.next_block).map(|s| s.id.0.clone());
                 if let Err(e) = checkpoint::save(ckpt_id, c) {
                     eprintln!("warning: checkpoint: {}", e);
                 }
@@ -2334,6 +2342,7 @@ fn run_single(cfg: RunConfig) {
                         reason: skip.reason,
                         code_hash: Some(checkpoint::hash_code(&spec.raw)),
                     });
+                    c.next_step_id = steps.get(c.next_block).map(|s| s.id.0.clone());
                     if let Err(e) = checkpoint::save(ckpt_id, c) {
                         eprintln!("warning: checkpoint: {}", e);
                     }
@@ -2536,7 +2545,9 @@ fn run_single(cfg: RunConfig) {
                     spec.line_number,
                     block_heading.as_deref(),
                     &spec.raw,
+                    step_id,
                 );
+                c.next_step_id = steps.get(c.next_block).map(|s| s.id.0.clone());
                 if let Err(e) = checkpoint::save(ckpt_id, c) {
                     eprintln!("warning: checkpoint: {}", e);
                 }
@@ -3135,6 +3146,7 @@ fn pause_for_signal(
     ckpt: Option<&mut checkpoint::Checkpoint>,
     file: &str,
     block_idx: usize,
+    next_step_id: Option<&str>,
     _block_count: usize,
     _elapsed: std::time::Duration,
     _results: &[executor::BlockResult],
@@ -3157,6 +3169,7 @@ fn pause_for_signal(
     // Save checkpoint in Paused state. bound_vars and waits_completed persist.
     if let Some(c) = ckpt {
         c.next_block = block_idx;
+        c.next_step_id = next_step_id.map(|s| s.to_string());
         c.mark_paused();
         if let Err(e) = checkpoint::save(id, c) {
             eprintln!("warning: checkpoint: {}", e);
@@ -3167,7 +3180,14 @@ fn pause_for_signal(
     let mut spec_with_idx = spec.clone();
     spec_with_idx.section_index = section_idx;
     let cb_for_desc = cb.map(|c| (c.url.as_str(), c.secret.as_deref()));
-    let desc = pending::build(id, file, block_idx, &spec_with_idx, cb_for_desc);
+    let desc = pending::build(
+        id,
+        file,
+        block_idx,
+        next_step_id,
+        &spec_with_idx,
+        cb_for_desc,
+    );
     if let Err(e) = pending::save(id, &desc) {
         eprintln!("warning: pending descriptor: {}", e);
     }
@@ -3254,6 +3274,7 @@ fn pause_browser_slice(
 
     if let Some(c) = ckpt {
         c.next_block = block_idx;
+        c.next_step_id = step_id.map(|s| s.to_string());
         c.mark_paused();
         if let Err(e) = checkpoint::save(id, c) {
             eprintln!("warning: checkpoint: {}", e);
@@ -3261,7 +3282,15 @@ fn pause_browser_slice(
     }
 
     let cb_for_desc = cb.map(|c| (c.url.as_str(), c.secret.as_deref()));
-    let desc = pending::build_for_browser_pause(id, file, block_idx, spec, &pause, cb_for_desc);
+    let desc = pending::build_for_browser_pause(
+        id,
+        file,
+        block_idx,
+        step_id,
+        spec,
+        &pause,
+        cb_for_desc,
+    );
     if let Err(e) = pending::save(id, &desc) {
         eprintln!("warning: pending descriptor: {}", e);
     }
@@ -4331,7 +4360,7 @@ mod tests {
             stdout_partial: false,
             stderr_partial: false,
         };
-        c.add_result(&result, 10, Some("Setup"), "echo ok");
+        c.add_result(&result, 10, Some("Setup"), "echo ok", None);
         assert_eq!(c.next_block, 1);
         assert_eq!(c.results.len(), 1);
 
@@ -4415,8 +4444,8 @@ mod tests {
             stdout_partial: false,
             stderr_partial: false,
         };
-        c.add_result(&r1, 5, None, "echo hello");
-        c.add_result(&r2, 15, Some("Compute"), "print(42)");
+        c.add_result(&r1, 5, None, "echo hello", None);
+        c.add_result(&r2, 15, Some("Compute"), "print(42)", None);
 
         let restored = c.block_results();
         assert_eq!(restored.len(), 2);
@@ -4442,7 +4471,7 @@ mod tests {
             stdout_partial: false,
             stderr_partial: false,
         };
-        c.add_result(&r, 5, None, "echo hello");
+        c.add_result(&r, 5, None, "echo hello", None);
         let hash = c.results[0].code_hash.as_ref().unwrap();
         assert_eq!(*hash, checkpoint::hash_code("echo hello"));
         assert_ne!(*hash, checkpoint::hash_code("echo goodbye"));
@@ -4494,7 +4523,7 @@ mod tests {
             attrs: Default::default(),
         };
 
-        let desc = pending::build(id, "test-workbook.md", 2, &spec, None);
+        let desc = pending::build(id, "test-workbook.md", 2, None, &spec, None);
         assert_eq!(desc.checkpoint_id, id);
         assert_eq!(desc.workbook, "test-workbook.md");
         assert_eq!(desc.next_block, 2);
@@ -4535,7 +4564,7 @@ mod tests {
             section_index: 1,
             attrs: Default::default(),
         };
-        let desc = pending::build("no-timeout", "test.md", 0, &spec, None);
+        let desc = pending::build("no-timeout", "test.md", 0, None, &spec, None);
         assert!(desc.timeout_at.is_none());
         assert!(!pending::is_expired(&desc));
     }
@@ -4552,7 +4581,7 @@ mod tests {
             section_index: 2,
             attrs: Default::default(),
         };
-        let mut desc = pending::build("expired-test", "test.md", 0, &spec, None);
+        let mut desc = pending::build("expired-test", "test.md", 0, None, &spec, None);
         desc.timeout_at = Some("2020-01-01T00:00:00+00:00".to_string());
         assert!(pending::is_expired(&desc));
     }

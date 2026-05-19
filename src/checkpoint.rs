@@ -15,6 +15,13 @@ pub struct Checkpoint {
     pub workbook: String,
     pub status: CheckpointStatus,
     pub next_block: usize,
+    /// Stable id of the step that `next_block` points at. Populated alongside
+    /// `next_block` on every save so resume can locate the right step even if
+    /// blocks have shifted (insertion above, include changes, etc.). `None`
+    /// for legacy checkpoints written before this field shipped, or when the
+    /// resume position is past the end of the workbook.
+    #[serde(default)]
+    pub next_step_id: Option<String>,
     pub total_blocks: usize,
     pub started_at: String,
     pub updated_at: String,
@@ -50,6 +57,11 @@ pub enum CheckpointStatus {
 #[derive(Serialize, Deserialize)]
 pub struct SavedResult {
     pub block_index: usize,
+    /// Stable step id for this result. Dual-written alongside `block_index`
+    /// while resume still keys off `block_index`; future phases will switch
+    /// resume identity to `step_id`. `None` for legacy entries.
+    #[serde(default)]
+    pub step_id: Option<String>,
     pub language: String,
     pub stdout: String,
     pub stderr: String,
@@ -85,6 +97,7 @@ impl Checkpoint {
             workbook: workbook.to_string(),
             status: CheckpointStatus::InProgress,
             next_block: 0,
+            next_step_id: None,
             total_blocks,
             started_at: now.clone(),
             updated_at: now,
@@ -120,9 +133,11 @@ impl Checkpoint {
         line_number: usize,
         heading: Option<&str>,
         code: &str,
+        step_id: Option<&str>,
     ) {
         self.results.push(SavedResult {
             block_index: result.block_index,
+            step_id: step_id.map(|s| s.to_string()),
             language: result.language.clone(),
             stdout: result.stdout.clone(),
             stderr: result.stderr.clone(),
@@ -412,6 +427,7 @@ mod tests {
         assert_eq!(ckpt.workbook, "my-workbook.md");
         assert_eq!(ckpt.status, CheckpointStatus::InProgress);
         assert_eq!(ckpt.next_block, 0);
+        assert!(ckpt.next_step_id.is_none());
         assert_eq!(ckpt.total_blocks, 10);
         assert!(ckpt.results.is_empty());
         assert!(ckpt.bound_vars.is_empty());
@@ -421,5 +437,69 @@ mod tests {
             .expect("started_at should be valid rfc3339");
         chrono::DateTime::parse_from_rfc3339(&ckpt.updated_at)
             .expect("updated_at should be valid rfc3339");
+    }
+
+    #[test]
+    fn test_add_result_persists_step_id_on_saved_result() {
+        let mut ckpt = Checkpoint::new("test.md", 2);
+        let r = BlockResult {
+            block_index: 0,
+            language: "bash".to_string(),
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: 0,
+            duration: Duration::from_millis(1),
+            error_type: None,
+            stdout_partial: false,
+            stderr_partial: false,
+        };
+        ckpt.add_result(&r, 5, None, "echo ok", Some("auto-abc123def456"));
+        assert_eq!(
+            ckpt.results[0].step_id.as_deref(),
+            Some("auto-abc123def456")
+        );
+    }
+
+    #[test]
+    fn test_checkpoint_next_step_id_round_trips_through_save_load() {
+        let id = unique_id("test_ckpt_next_step_id");
+        let mut ckpt = Checkpoint::new("test.md", 3);
+        ckpt.next_step_id = Some("login-block".to_string());
+        save(&id, &ckpt).expect("save");
+        let loaded = load(&id).expect("load").expect("present");
+        assert_eq!(loaded.next_step_id.as_deref(), Some("login-block"));
+        delete(&id).expect("cleanup");
+    }
+
+    #[test]
+    fn test_legacy_checkpoint_json_parses_without_step_id_fields() {
+        // Checkpoints written by older `wb` versions don't have the
+        // `next_step_id` field on Checkpoint nor `step_id` on SavedResult.
+        // `#[serde(default)]` on each must be wired so loading them doesn't
+        // error — otherwise an upgrade strands every in-flight checkpoint.
+        let legacy = r#"{
+            "version": 1,
+            "workbook": "deploy.md",
+            "status": "in_progress",
+            "next_block": 1,
+            "total_blocks": 3,
+            "started_at": "2026-01-01T00:00:00Z",
+            "updated_at": "2026-01-01T00:00:00Z",
+            "results": [
+                {
+                    "block_index": 0,
+                    "language": "bash",
+                    "stdout": "ok\n",
+                    "stderr": "",
+                    "exit_code": 0,
+                    "duration_ms": 12
+                }
+            ]
+        }"#;
+        let ckpt: Checkpoint = serde_json::from_str(legacy).expect("parse legacy");
+        assert_eq!(ckpt.next_block, 1);
+        assert!(ckpt.next_step_id.is_none());
+        assert_eq!(ckpt.results.len(), 1);
+        assert!(ckpt.results[0].step_id.is_none());
     }
 }

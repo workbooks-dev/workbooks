@@ -17,6 +17,12 @@ pub struct PendingDescriptor {
     pub workbook: String,
     /// 1-indexed code-block position this wait follows (for humans).
     pub next_block: usize,
+    /// Stable step id of the step that `next_block` points at (i.e. the step
+    /// that will run when this pending descriptor is resumed). Persisted so
+    /// resume can locate the right step even if blocks have shifted since the
+    /// pause. `None` for legacy descriptors written before this field shipped.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_step_id: Option<String>,
     /// Line number of the `wait` (or `browser`) fence in the source markdown.
     pub line_number: usize,
     pub section_index: usize,
@@ -169,6 +175,7 @@ pub fn build(
     checkpoint_id: &str,
     workbook: &str,
     next_block: usize,
+    next_step_id: Option<&str>,
     spec: &WaitSpec,
     callback: Option<(&str, Option<&str>)>,
 ) -> PendingDescriptor {
@@ -190,6 +197,7 @@ pub fn build(
         checkpoint_id: checkpoint_id.to_string(),
         workbook: workbook.to_string(),
         next_block,
+        next_step_id: next_step_id.map(|s| s.to_string()),
         line_number: spec.line_number,
         section_index: spec.section_index,
         kind: spec.kind.clone(),
@@ -221,6 +229,7 @@ pub fn build_for_browser_pause(
     checkpoint_id: &str,
     workbook: &str,
     next_block: usize,
+    next_step_id: Option<&str>,
     slice: &crate::parser::BrowserSliceSpec,
     pause: &crate::sidecar::PauseInfo,
     callback: Option<(&str, Option<&str>)>,
@@ -252,6 +261,7 @@ pub fn build_for_browser_pause(
         checkpoint_id: checkpoint_id.to_string(),
         workbook: workbook.to_string(),
         next_block,
+        next_step_id: next_step_id.map(|s| s.to_string()),
         line_number: slice.line_number,
         section_index: slice.section_index,
         kind: pause
@@ -409,12 +419,11 @@ pub fn reap_expired() -> Vec<ReapedEntry> {
                         None,
                         desc_now.line_number,
                         &[],
-                        // Reap path doesn't have access to the original
-                        // workbook's step list — descriptors don't persist
-                        // step ids today. Leaving None until we either
-                        // persist the id on the descriptor or rebuild the
-                        // step list from the workbook file at reap time.
-                        None,
+                        // Step id is now persisted on the descriptor (Phase 1
+                        // of #29), so reaper callbacks carry it through. The
+                        // workflow payload is still rebuilt from the workbook
+                        // file at run time, which the reap path doesn't do.
+                        desc_now.next_step_id.as_deref(),
                         None,
                     );
                 }
@@ -538,7 +547,7 @@ mod tests {
     #[test]
     fn test_build_creates_correct_descriptor() {
         let spec = make_wait_spec();
-        let desc = build("ckpt-1", "deploy.md", 2, &spec, None);
+        let desc = build("ckpt-1", "deploy.md", 2, None, &spec, None);
 
         assert_eq!(desc.checkpoint_id, "ckpt-1");
         assert_eq!(desc.workbook, "deploy.md");
@@ -586,7 +595,7 @@ mod tests {
             section_index: 1,
             attrs: Default::default(),
         };
-        let desc = build("ckpt-2", "manual.md", 1, &spec, None);
+        let desc = build("ckpt-2", "manual.md", 1, None, &spec, None);
         assert!(desc.timeout_at.is_none());
         assert!(desc.on_timeout.is_none());
         assert!(desc.bind.is_none());
@@ -596,7 +605,7 @@ mod tests {
     fn test_save_and_load_roundtrip() {
         let id = unique_id("test_pending_roundtrip");
         let spec = make_wait_spec();
-        let desc = build(&id, "deploy.md", 2, &spec, None);
+        let desc = build(&id, "deploy.md", 2, None, &spec, None);
 
         save(&id, &desc).expect("save should succeed");
         let loaded = load(&id)
@@ -627,7 +636,7 @@ mod tests {
     fn test_delete_removes_descriptor() {
         let id = unique_id("test_pending_delete");
         let spec = make_wait_spec();
-        let desc = build(&id, "deploy.md", 2, &spec, None);
+        let desc = build(&id, "deploy.md", 2, None, &spec, None);
 
         save(&id, &desc).expect("save should succeed");
         // Confirm it exists
@@ -650,6 +659,7 @@ mod tests {
             checkpoint_id: "test".to_string(),
             workbook: "test.md".to_string(),
             next_block: 1,
+            next_step_id: None,
             line_number: 1,
             section_index: 0,
             kind: None,
@@ -680,6 +690,7 @@ mod tests {
             checkpoint_id: "test".to_string(),
             workbook: "test.md".to_string(),
             next_block: 1,
+            next_step_id: None,
             line_number: 1,
             section_index: 0,
             kind: None,
@@ -710,6 +721,7 @@ mod tests {
             checkpoint_id: "test".to_string(),
             workbook: "test.md".to_string(),
             next_block: 1,
+            next_step_id: None,
             line_number: 1,
             section_index: 0,
             kind: None,
@@ -739,6 +751,7 @@ mod tests {
             checkpoint_id: "my-run".to_string(),
             workbook: "/path/to/deploy.md".to_string(),
             next_block: 2,
+            next_step_id: None,
             line_number: 42,
             section_index: 3,
             kind: Some("email".to_string()),
@@ -774,6 +787,7 @@ mod tests {
             checkpoint_id: "run-2".to_string(),
             workbook: "test.md".to_string(),
             next_block: 1,
+            next_step_id: None,
             line_number: 10,
             section_index: 1,
             kind: Some("manual".to_string()),
@@ -808,6 +822,7 @@ mod tests {
             checkpoint_id: "old-run".to_string(),
             workbook: "test.md".to_string(),
             next_block: 1,
+            next_step_id: None,
             line_number: 5,
             section_index: 0,
             kind: None,
@@ -838,6 +853,7 @@ mod tests {
             checkpoint_id: "bare".to_string(),
             workbook: "bare.md".to_string(),
             next_block: 0,
+            next_step_id: None,
             line_number: 1,
             section_index: 0,
             kind: None,
@@ -874,8 +890,8 @@ mod tests {
             attrs: Default::default(),
             ..WaitSpec::default()
         };
-        let desc_a = build(&id_a, "a.md", 1, &spec, None);
-        let desc_b = build(&id_b, "b.md", 2, &spec, None);
+        let desc_a = build(&id_a, "a.md", 1, None, &spec, None);
+        let desc_b = build(&id_b, "b.md", 2, None, &spec, None);
 
         save(&id_a, &desc_a).expect("save a");
         save(&id_b, &desc_b).expect("save b");
@@ -905,6 +921,7 @@ mod tests {
             checkpoint_id: id.to_string(),
             workbook: workbook.to_string(),
             next_block: 1,
+            next_step_id: None,
             line_number: 1,
             section_index: 0,
             kind: Some("email".to_string()),
@@ -1228,7 +1245,7 @@ mod tests {
             timeout: Some("1h".into()),
             actions: vec![serde_json::json!({"label": "OK", "value": "ok"})],
         };
-        let desc = build_for_browser_pause("ckpt-1", "t.md", 5, &slice, &pause, None);
+        let desc = build_for_browser_pause("ckpt-1", "t.md", 5, None, &slice, &pause, None);
         assert_eq!(desc.checkpoint_id, "ckpt-1");
         assert_eq!(desc.next_block, 5);
         assert_eq!(desc.line_number, 17);
@@ -1260,7 +1277,7 @@ mod tests {
             timeout: Some("30s".into()),
             ..Default::default()
         };
-        let desc = build_for_browser_pause("ckpt-1", "t.md", 0, &slice, &pause, None);
+        let desc = build_for_browser_pause("ckpt-1", "t.md", 0, None, &slice, &pause, None);
         assert_eq!(desc.on_timeout.as_deref(), Some("abort"));
         assert!(desc.timeout_at.is_some());
     }
@@ -1277,7 +1294,7 @@ mod tests {
             actions: vec![serde_json::json!({"label": "Go", "value": 1})],
             ..Default::default()
         };
-        let desc = build_for_browser_pause("ckpt-rt", "t.md", 0, &slice, &pause, None);
+        let desc = build_for_browser_pause("ckpt-rt", "t.md", 0, None, &slice, &pause, None);
         let serialized = serde_json::to_string(&desc).expect("serialize");
         let back: PendingDescriptor = serde_json::from_str(&serialized).expect("deserialize");
         assert_eq!(back.message.as_deref(), Some("m"));
@@ -1310,6 +1327,55 @@ mod tests {
         // descriptors written before this feature shipped.
         assert!(desc.callback_url.is_none());
         assert!(desc.callback_secret.is_none());
+        // Phase 1 dual-write fields default to None for pre-step-id descriptors.
+        assert!(desc.next_step_id.is_none());
+    }
+
+    #[test]
+    fn test_build_persists_next_step_id() {
+        let spec = make_wait_spec();
+        let desc = build("ckpt-sid", "deploy.md", 2, Some("login-block"), &spec, None);
+        assert_eq!(desc.next_step_id.as_deref(), Some("login-block"));
+    }
+
+    #[test]
+    fn test_build_for_browser_pause_persists_next_step_id() {
+        let slice = make_browser_slice_spec();
+        let pause = crate::sidecar::PauseInfo::default();
+        let desc = build_for_browser_pause(
+            "ckpt-bsid",
+            "t.md",
+            3,
+            Some("browser-step"),
+            &slice,
+            &pause,
+            None,
+        );
+        assert_eq!(desc.next_step_id.as_deref(), Some("browser-step"));
+    }
+
+    #[test]
+    fn test_next_step_id_round_trips_through_json() {
+        let spec = make_wait_spec();
+        let desc = build("ckpt-rt-sid", "w.md", 1, Some("step-xyz"), &spec, None);
+        let serialized = serde_json::to_string(&desc).expect("serialize");
+        let back: PendingDescriptor = serde_json::from_str(&serialized).expect("deserialize");
+        assert_eq!(back.next_step_id.as_deref(), Some("step-xyz"));
+    }
+
+    #[test]
+    fn test_next_step_id_none_skipped_in_serialized_form() {
+        // `skip_serializing_if = "Option::is_none"` keeps legacy JSON tight:
+        // a None field shouldn't appear at all, so older `wb` versions
+        // reading the descriptor see exactly the shape they did before.
+        let spec = make_wait_spec();
+        let desc = build("ckpt-skip", "w.md", 1, None, &spec, None);
+        let serialized = serde_json::to_string(&desc).expect("serialize");
+        assert!(
+            !serialized.contains("next_step_id"),
+            "None next_step_id should be omitted from JSON, got: {}",
+            serialized
+        );
     }
 
     #[test]
@@ -1319,6 +1385,7 @@ mod tests {
             "ckpt-cb",
             "deploy.md",
             2,
+            None,
             &spec,
             Some(("https://hooks.example.com/wb", Some("topsecret"))),
         );
@@ -1332,7 +1399,7 @@ mod tests {
     #[test]
     fn test_build_no_callback_leaves_fields_none() {
         let spec = make_wait_spec();
-        let desc = build("ckpt-nocb", "deploy.md", 2, &spec, None);
+        let desc = build("ckpt-nocb", "deploy.md", 2, None, &spec, None);
         assert!(desc.callback_url.is_none());
         assert!(desc.callback_secret.is_none());
     }
@@ -1344,6 +1411,7 @@ mod tests {
             "ckpt-rt-cb",
             "w.md",
             1,
+            None,
             &spec,
             Some(("https://hooks.example.com/wb", Some("s"))),
         );
