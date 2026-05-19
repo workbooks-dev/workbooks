@@ -353,32 +353,60 @@ pub fn reap_expired() -> Vec<ReapedEntry> {
             // to avoid duplicates. When there's no checkpoint at all, the
             // operator never got a callback for this run, so we DO emit.
             let mut we_transitioned = false;
-            match checkpoint::load(&id) {
-                Ok(Some(mut ckpt)) => {
-                    // If a concurrent reaper already marked it failed (or a
-                    // resume already ran it to completion), don't clobber the
-                    // terminal state.
-                    use checkpoint::CheckpointStatus;
-                    total_blocks = Some(ckpt.total_blocks);
-                    if matches!(
-                        ckpt.status,
-                        CheckpointStatus::Failed | CheckpointStatus::Complete
-                    ) {
-                        marked = ckpt.status == CheckpointStatus::Failed;
-                    } else {
-                        ckpt.mark_failed();
-                        if checkpoint::save(&id, &ckpt).is_ok() {
-                            marked = true;
-                            we_transitioned = true;
+
+            // Hold the per-checkpoint file lock for the duration of the
+            // load → mark_failed → save sequence. Without it, a live
+            // `wb run` (which holds this same lock for its whole session)
+            // and the reaper can interleave saves and one will clobber the
+            // other. The lock is released as soon as the save completes —
+            // the callback below is a network call and shouldn't hold disk
+            // locks across HTTP. (Phase 3 of #29.)
+            {
+                let ckpt_lock = match crate::atomic_io::try_lock_for(
+                    &checkpoint::checkpoint_path(&id),
+                ) {
+                    Ok(g) => g,
+                    Err(_) => {
+                        // A live `wb run --checkpoint <id>` is in progress.
+                        // Skip this descriptor for this sweep — the next
+                        // `wb pending` call after the run releases will pick
+                        // it up. We must NOT block: `wb pending` is meant to
+                        // be non-blocking enumeration.
+                        eprintln!(
+                            "wb pending: skipping reap of '{}' — checkpoint is locked by a live run",
+                            id
+                        );
+                        return None;
+                    }
+                };
+                match checkpoint::load(&id) {
+                    Ok(Some(mut ckpt)) => {
+                        // If a concurrent reaper already marked it failed
+                        // (or a resume already ran it to completion), don't
+                        // clobber the terminal state.
+                        use checkpoint::CheckpointStatus;
+                        total_blocks = Some(ckpt.total_blocks);
+                        if matches!(
+                            ckpt.status,
+                            CheckpointStatus::Failed | CheckpointStatus::Complete
+                        ) {
+                            marked = ckpt.status == CheckpointStatus::Failed;
+                        } else {
+                            ckpt.mark_failed();
+                            if checkpoint::save(&id, &ckpt).is_ok() {
+                                marked = true;
+                                we_transitioned = true;
+                            }
                         }
                     }
+                    _ => {
+                        // No paired checkpoint — fine, just delete the
+                        // descriptor. Still fire the callback below since
+                        // the original run never got a chance to.
+                        we_transitioned = true;
+                    }
                 }
-                _ => {
-                    // No paired checkpoint — fine, just delete the
-                    // descriptor. Still fire the callback below since the
-                    // original run never got a chance to.
-                    we_transitioned = true;
-                }
+                drop(ckpt_lock);
             }
 
             // Best-effort: if the original run was started with --callback,
@@ -1511,6 +1539,86 @@ mod tests {
         // Descriptor still gone after callback fired.
         assert!(load(&id).expect("load").is_none());
         let _ = checkpoint::delete(&id);
+    }
+
+    #[test]
+    fn test_reap_skips_descriptor_when_checkpoint_lock_unavailable() {
+        // Phase 3 of #29: the reaper must not mutate checkpoint state if it
+        // can't take the checkpoint file lock — otherwise it races a live
+        // `wb run` that holds the lock for its session.
+        //
+        // We force `try_lock_for` to return Err by making its target
+        // unopenable: the lock-file path is the sibling `.<filename>.lock`.
+        // Create a *directory* at that exact path so OpenOptions::open
+        // fails with EISDIR. The reaper sees Err, takes the skip branch,
+        // and leaves the checkpoint + descriptor untouched. (Cross-process
+        // flock contention is the real-world scenario; that primitive is
+        // covered by `atomic_io::tests::lock_blocks_subprocess`. This test
+        // exercises the reaper's response to *any* lock-acquisition failure
+        // — same code path, deterministic, no cross-platform fragility.)
+        use std::path::PathBuf;
+
+        let prefix = unique_id("test_reap_lock_unavail");
+        let checkpoint_dir: PathBuf =
+            std::env::temp_dir().join(format!("wb_reap_lock_unavail_{}", prefix));
+        std::fs::create_dir_all(&checkpoint_dir).expect("mkdir");
+        let _guard = set_thread_checkpoint_dir(checkpoint_dir.clone());
+
+        let id = format!("{}_run", prefix);
+        let ckpt = checkpoint::Checkpoint::new("locked.md", 2);
+        checkpoint::save(&id, &ckpt).expect("save ckpt");
+        let desc = expired_desc(&id, "locked.md", Some("abort"));
+        save(&id, &desc).expect("save pending");
+
+        // Construct the lock-file path the same way atomic_io::lock_sibling
+        // does, then make it a directory so `OpenOptions::open` fails.
+        let ckpt_path = checkpoint::checkpoint_path(&id);
+        let lock_path = ckpt_path.parent().unwrap().join(format!(
+            ".{}.lock",
+            ckpt_path.file_name().unwrap().to_string_lossy()
+        ));
+        // If a stale lock-file already exists from a prior partial run,
+        // remove it before we mkdir the same name.
+        let _ = std::fs::remove_file(&lock_path);
+        std::fs::create_dir(&lock_path).expect("place blocking directory at lock path");
+
+        // Sanity: Rust's try_lock_for must fail for this path.
+        assert!(
+            crate::atomic_io::try_lock_for(&ckpt_path).is_err(),
+            "test setup: lock path should be unopenable"
+        );
+
+        // Run the reaper. Lock acquisition fails → skip path.
+        let reaped = reap_expired();
+        assert!(
+            reaped.iter().all(|r| r.id != id),
+            "descriptor whose ckpt lock is unavailable must be skipped, got: {:?}",
+            reaped.iter().map(|r| &r.id).collect::<Vec<_>>()
+        );
+        let ckpt_after = checkpoint::load(&id)
+            .expect("load")
+            .expect("ckpt still present");
+        assert_eq!(
+            ckpt_after.status,
+            checkpoint::CheckpointStatus::InProgress,
+            "ckpt status must not change when the reaper skipped"
+        );
+        assert!(
+            load(&id).expect("load pending").is_some(),
+            "pending descriptor must survive the skipped sweep"
+        );
+
+        // Clean up: remove the blocking directory, then verify a normal
+        // sweep succeeds (reaper happy path still works).
+        std::fs::remove_dir(&lock_path).expect("rmdir blocker");
+        let _ = reap_expired();
+        assert!(
+            load(&id).expect("load").is_none(),
+            "descriptor should be cleaned up on the post-unblock sweep"
+        );
+
+        let _ = checkpoint::delete(&id);
+        let _ = std::fs::remove_dir_all(&checkpoint_dir);
     }
 
     #[test]

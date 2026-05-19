@@ -1498,15 +1498,94 @@ struct CheckpointPrep {
     lock_guard: Option<atomic_io::FileLock>,
 }
 
+/// Outcome of matching a loaded checkpoint against the current workbook.
+enum ResumeResolution {
+    /// Resume from `replay` (0-based block index). `notice` is an optional
+    /// user-facing line printed before the standard "resuming…" message —
+    /// used when the position changed (shifted block, fallback path).
+    Replay {
+        replay: usize,
+        notice: Option<String>,
+    },
+    /// Don't resume — start fresh. `reason` explains why (logged).
+    Fresh(String),
+}
+
+/// Decide where to resume from given a loaded checkpoint and the current
+/// workbook's step list. Pure function — no side effects, no eprintln —
+/// so the caller can log uniformly and tests can assert on the variant.
+fn resolve_resume_position(
+    c: &checkpoint::Checkpoint,
+    steps: &[step_ir::Step],
+    block_count: usize,
+) -> ResumeResolution {
+    if let Some(ref sid) = c.next_step_id {
+        // Step-id-first: find the same step in the current workbook by id.
+        if let Some(pos) = steps.iter().position(|s| s.id.as_str() == sid) {
+            let notice = if pos != c.next_block {
+                Some(format!(
+                    "wb: step '{}' shifted from block {} to block {} since checkpoint was saved",
+                    sid,
+                    c.next_block + 1,
+                    pos + 1
+                ))
+            } else {
+                None
+            };
+            return ResumeResolution::Replay { replay: pos, notice };
+        }
+        // Step id is gone (block deleted / id renamed). Fall back to the
+        // numeric block_idx if it's still in range, with a wb-resume-001
+        // warning so the operator knows the checkpoint may be stale.
+        if c.next_block <= block_count {
+            return ResumeResolution::Replay {
+                replay: c.next_block,
+                notice: Some(format!(
+                    "warning [wb-resume-001]: step '{}' not found in current workbook; \
+                     falling back to block {} (block may have been removed or id changed)",
+                    sid,
+                    c.next_block + 1
+                )),
+            };
+        }
+        return ResumeResolution::Fresh(format!(
+            "step '{}' missing and saved block index ({}) is out of range for current workbook (length {})",
+            sid,
+            c.next_block + 1,
+            block_count
+        ));
+    }
+    // Legacy (v1) checkpoint without a step id. Require the workbook's
+    // block count to match — otherwise the numeric block_idx is unsafe.
+    if c.total_blocks != block_count {
+        return ResumeResolution::Fresh(format!(
+            "workbook block count changed ({} → {}) and checkpoint has no step ids to recover from",
+            c.total_blocks, block_count
+        ));
+    }
+    ResumeResolution::Replay {
+        replay: c.next_block,
+        notice: None,
+    }
+}
+
 /// Resolve a default checkpoint id from the filename if none was supplied,
 /// acquire the session-long advisory file lock (exit `EXIT_CHECKPOINT_BUSY`
 /// on conflict), load any resumable checkpoint (or create a fresh one), and
 /// apply its signal-bound vars into `ctx`. Exits on lock conflict; all other
 /// failure modes fall through to a fresh run with a warning.
+///
+/// Resume strategy is step-id-first: if the loaded checkpoint carries a
+/// `next_step_id`, the current workbook is scanned for that id and resume
+/// continues from its current position (which may differ from the saved
+/// `next_block` if blocks have been inserted/removed above). If the id is
+/// absent, the legacy `block_idx` + `total_blocks` path is taken so v1
+/// checkpoints keep working.
 fn prepare_checkpoint(
     checkpoint_id: Option<String>,
     file: &str,
     block_count: usize,
+    steps: &[step_ir::Step],
     ctx: &mut executor::ExecutionContext,
 ) -> CheckpointPrep {
     let id = checkpoint_id.or_else(|| {
@@ -1534,17 +1613,38 @@ fn prepare_checkpoint(
         match checkpoint::load(id) {
             Ok(Some(mut c))
                 if c.status != checkpoint::CheckpointStatus::Complete
-                    && c.workbook == file
-                    && c.total_blocks == block_count =>
+                    && c.workbook == file =>
             {
-                let replay = c.next_block;
-                eprintln!(
-                    "wb: resuming '{}' — replaying {} completed blocks to rebuild state",
-                    id, replay
-                );
-                let prior = c.block_results();
-                c.status = checkpoint::CheckpointStatus::InProgress;
-                (replay, prior, Some(c))
+                // Step-id-first resume: if the checkpoint carries a step id,
+                // locate that step in the *current* workbook and resume from
+                // its position even if blocks shifted. Falls back to the
+                // saved block_idx (plus total_blocks gate) for legacy v1
+                // checkpoints without step ids.
+                let resolution = resolve_resume_position(&c, steps, block_count);
+                match resolution {
+                    ResumeResolution::Fresh(reason) => {
+                        eprintln!("wb: {}; starting fresh", reason);
+                        (
+                            0,
+                            Vec::new(),
+                            Some(checkpoint::Checkpoint::new(file, block_count)),
+                        )
+                    }
+                    ResumeResolution::Replay { replay, notice } => {
+                        if let Some(msg) = notice {
+                            eprintln!("{}", msg);
+                        }
+                        eprintln!(
+                            "wb: resuming '{}' — replaying {} completed blocks to rebuild state",
+                            id, replay
+                        );
+                        let prior = c.block_results();
+                        c.next_block = replay;
+                        c.next_step_id = steps.get(replay).map(|s| s.id.0.clone());
+                        c.status = checkpoint::CheckpointStatus::InProgress;
+                        (replay, prior, Some(c))
+                    }
+                }
             }
             Ok(_) => (
                 0,
@@ -1715,7 +1815,7 @@ fn run_single(cfg: RunConfig) {
         mut results,
         mut ckpt,
         lock_guard: _checkpoint_lock,
-    } = prepare_checkpoint(checkpoint_id, file, block_count, &mut ctx);
+    } = prepare_checkpoint(checkpoint_id, file, block_count, &steps, &mut ctx);
 
     if let Some(ref mut c) = ckpt {
         c.workflow = workbook.frontmatter.workflow.clone();
@@ -5209,5 +5309,162 @@ echo "pin=$pin"
         );
         assert_eq!(WbExit::Paused.code(), exit_codes::EXIT_PAUSED);
         assert_eq!(WbExit::Io("x".into()).code(), 1);
+    }
+
+    // ─── resume position resolution (Phase 2 of #29) ──────────────────
+
+    fn fake_step(id: &str, language: &str) -> step_ir::Step {
+        step_ir::Step {
+            id: step_ir::StepId(id.to_string()),
+            attrs: step_ir::FenceAttrs::default(),
+            span: step_ir::Span::point(1),
+            source: step_ir::Source {
+                file: std::path::PathBuf::from("t.md"),
+                position: 0,
+            },
+            language: language.to_string(),
+            body: String::new(),
+            include_chain: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn resume_v1_legacy_matching_block_count_replays_from_next_block() {
+        // No next_step_id (v1 checkpoint). total_blocks matches the current
+        // workbook, so the numeric block_idx is safe to use.
+        let mut c = checkpoint::Checkpoint::new("t.md", 3);
+        c.next_block = 2;
+        let steps = vec![
+            fake_step("a", "bash"),
+            fake_step("b", "bash"),
+            fake_step("c", "bash"),
+        ];
+        match resolve_resume_position(&c, &steps, 3) {
+            ResumeResolution::Replay { replay, notice } => {
+                assert_eq!(replay, 2);
+                assert!(notice.is_none(), "no notice for clean v1 resume");
+            }
+            ResumeResolution::Fresh(_) => panic!("expected Replay"),
+        }
+    }
+
+    #[test]
+    fn resume_v1_legacy_mismatched_block_count_starts_fresh() {
+        let mut c = checkpoint::Checkpoint::new("t.md", 5);
+        c.next_block = 2;
+        let steps = vec![fake_step("a", "bash"), fake_step("b", "bash")];
+        match resolve_resume_position(&c, &steps, 2) {
+            ResumeResolution::Fresh(reason) => {
+                assert!(reason.contains("5 → 2"), "reason: {}", reason);
+            }
+            ResumeResolution::Replay { .. } => panic!("expected Fresh"),
+        }
+    }
+
+    #[test]
+    fn resume_v2_step_id_at_same_position_no_notice() {
+        let mut c = checkpoint::Checkpoint::new("t.md", 3);
+        c.next_block = 1;
+        c.next_step_id = Some("b".to_string());
+        let steps = vec![
+            fake_step("a", "bash"),
+            fake_step("b", "bash"),
+            fake_step("c", "bash"),
+        ];
+        match resolve_resume_position(&c, &steps, 3) {
+            ResumeResolution::Replay { replay, notice } => {
+                assert_eq!(replay, 1);
+                assert!(notice.is_none(), "no notice when position is unchanged");
+            }
+            ResumeResolution::Fresh(_) => panic!("expected Replay"),
+        }
+    }
+
+    #[test]
+    fn resume_v2_step_id_shifted_picks_new_position() {
+        // Saved checkpoint was at block 1 (id=b). A new block was inserted
+        // above, shifting b to block 2 in the current workbook. Step-id-first
+        // resume locates b at its new position and resumes there.
+        let mut c = checkpoint::Checkpoint::new("t.md", 3);
+        c.next_block = 1;
+        c.next_step_id = Some("b".to_string());
+        let steps = vec![
+            fake_step("a", "bash"),
+            fake_step("new-block", "bash"),
+            fake_step("b", "bash"),
+            fake_step("c", "bash"),
+        ];
+        match resolve_resume_position(&c, &steps, 4) {
+            ResumeResolution::Replay { replay, notice } => {
+                assert_eq!(replay, 2);
+                let n = notice.expect("notice when block shifted");
+                assert!(n.contains("'b' shifted"), "notice: {}", n);
+                assert!(n.contains("block 2 to block 3"), "notice: {}", n);
+            }
+            ResumeResolution::Fresh(_) => panic!("expected Replay"),
+        }
+    }
+
+    #[test]
+    fn resume_v2_step_id_missing_falls_back_to_next_block_with_wb_resume_001() {
+        // Saved id 'gone' no longer exists in the workbook (block deleted).
+        // Fall back to the numeric next_block with a wb-resume-001 warning
+        // since we can't prove the position is still correct.
+        let mut c = checkpoint::Checkpoint::new("t.md", 3);
+        c.next_block = 1;
+        c.next_step_id = Some("gone".to_string());
+        let steps = vec![
+            fake_step("a", "bash"),
+            fake_step("b", "bash"),
+            fake_step("c", "bash"),
+        ];
+        match resolve_resume_position(&c, &steps, 3) {
+            ResumeResolution::Replay { replay, notice } => {
+                assert_eq!(replay, 1);
+                let n = notice.expect("wb-resume-001 warning");
+                assert!(n.contains("wb-resume-001"), "notice: {}", n);
+                assert!(n.contains("'gone'"), "notice: {}", n);
+            }
+            ResumeResolution::Fresh(_) => panic!("expected Replay with warning"),
+        }
+    }
+
+    #[test]
+    fn resume_v2_step_id_missing_and_next_block_out_of_range_starts_fresh() {
+        let mut c = checkpoint::Checkpoint::new("t.md", 5);
+        c.next_block = 4;
+        c.next_step_id = Some("gone".to_string());
+        // Current workbook shrank below the saved next_block.
+        let steps = vec![fake_step("a", "bash")];
+        match resolve_resume_position(&c, &steps, 1) {
+            ResumeResolution::Fresh(reason) => {
+                assert!(reason.contains("'gone'"), "reason: {}", reason);
+                assert!(reason.contains("out of range"), "reason: {}", reason);
+            }
+            ResumeResolution::Replay { .. } => panic!("expected Fresh"),
+        }
+    }
+
+    #[test]
+    fn resume_v2_step_id_match_overrides_legacy_block_count_check() {
+        // Critical Phase 2 behavior: when next_step_id is present, the
+        // total_blocks invariant is *dropped*. A workbook that gained or lost
+        // blocks (other than the resume target) can still be resumed.
+        let mut c = checkpoint::Checkpoint::new("t.md", 3);
+        c.next_block = 1;
+        c.next_step_id = Some("b".to_string());
+        // Current workbook has 5 blocks; saved had 3. Without step-id-first
+        // resume the legacy code would have started fresh on count mismatch.
+        let steps = vec![
+            fake_step("a", "bash"),
+            fake_step("inserted-1", "bash"),
+            fake_step("b", "bash"),
+            fake_step("inserted-2", "bash"),
+            fake_step("c", "bash"),
+        ];
+        match resolve_resume_position(&c, &steps, 5) {
+            ResumeResolution::Replay { replay, .. } => assert_eq!(replay, 2),
+            ResumeResolution::Fresh(r) => panic!("expected Replay across count change, got Fresh: {}", r),
+        }
     }
 }
