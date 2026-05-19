@@ -125,6 +125,32 @@ won't collide in practice since position is part of the hash.
 
 See `examples/step-ids-demo.md`.
 
+### Selective runs: `--only`, `--from`, `--until`
+
+Step ids are the substrate for picking a subset of a workbook to run:
+
+```bash
+wb run deploy.md --only login              # just run the login block
+wb run deploy.md --from migrate            # start at migrate, run to end
+wb run deploy.md --until smoke-test        # stop after smoke-test
+wb run deploy.md --from migrate --until smoke-test   # bounded range
+```
+
+Each flag takes a step id — either explicit (`{#login}`) or auto-derived
+(`auto-<hash>`). Unknown ids fail with a usage error before any block runs.
+Skipped blocks emit `step.skipped` callbacks with `kind: "selection"` so
+agents see the gap.
+
+Limits in this milestone:
+
+- `--only` conflicts with `--from`/`--until` (clap rejects at parse).
+- Selection cannot be combined with `--checkpoint` — partial-run state
+  semantics aren't defined yet (which "completed" do we track when most
+  blocks are intentionally skipped?). Run ephemerally instead.
+- A selective run is *ephemeral*: it doesn't read or write the default
+  checkpoint, so subsequent normal runs still see the previous state.
+- Tag-based selection (`--tag <class>`) and `--changed` are tracked in #33.
+
 ## Conditional cells: `{when=…}` and `{skip_if=…}`
 
 Runtime-conditional execution via info-string attributes — same attribute cluster
@@ -239,6 +265,9 @@ wb run file.md --secrets doppler      # Override secret provider
 wb run file.md -C /path/to/dir        # Set working directory
 wb run file.md --checkpoint my-run    # Save/resume execution state
 wb run file.md --callback <url>       # POST events to webhook
+wb run file.md --only <step-id>       # Run only this step; skip the rest
+wb run file.md --from <step-id>       # Start at this step (skip earlier)
+wb run file.md --until <step-id>      # Stop after this step (inclusive)
 wb inspect file.md                    # Show structure without running
 wb pending                            # List paused workbooks (auto-reaps expired abort-mode descriptors)
 wb pending --no-reap                  # List without reaping — safe for automation/inspection

@@ -179,6 +179,59 @@ fn no_run_skip_decision() -> SkipDecision {
     }
 }
 
+/// Skip decision produced when a step falls outside the user's selection
+/// range (`--only` / `--from` / `--until`). Emitted as `step.skipped` with
+/// the same shape as `no_run`/`when`/`skip_if` so consumers don't need a
+/// new event type.
+fn selection_skip_decision() -> SkipDecision {
+    SkipDecision {
+        kind: "selection".to_string(),
+        expression: None,
+        reason: "outside --only/--from/--until range".to_string(),
+    }
+}
+
+/// Resolve CLI selection flags against the workbook's step list. Empty
+/// selection (no flags) returns the full `0..block_count` range. An unknown
+/// step id is a usage error so the user finds out before the run starts.
+fn resolve_selection(
+    sel: &SelectionArgs,
+    steps: &[step_ir::Step],
+    block_count: usize,
+) -> Result<std::ops::Range<usize>, String> {
+    if sel.is_empty() {
+        return Ok(0..block_count);
+    }
+    let find = |id: &str| -> Result<usize, String> {
+        steps
+            .iter()
+            .position(|s| s.id.as_str() == id)
+            .ok_or_else(|| format!("step id '{}' not found in workbook", id))
+    };
+    if let Some(ref id) = sel.only {
+        let pos = find(id)?;
+        return Ok(pos..pos + 1);
+    }
+    let start = match sel.from {
+        Some(ref id) => find(id)?,
+        None => 0,
+    };
+    let end = match sel.until {
+        Some(ref id) => find(id)? + 1, // --until is inclusive in user terms
+        None => block_count,
+    };
+    if start >= end {
+        return Err(format!(
+            "selection range is empty: --from '{}' resolves to position {} but --until '{}' resolves to position {}",
+            sel.from.as_deref().unwrap_or(""),
+            start + 1,
+            sel.until.as_deref().unwrap_or(""),
+            if end > 0 { end } else { 1 },
+        ));
+    }
+    Ok(start..end)
+}
+
 fn should_emit_skip_callback(silent: bool, workflow: Option<&callback::WorkflowPayload>) -> bool {
     !silent || workflow.is_some()
 }
@@ -235,6 +288,19 @@ struct RunArgs {
     env_file_relative: bool,
     #[arg(long)]
     redact: Vec<String>,
+    /// Run only this step (by step id) and skip everything else.
+    /// Conflicts with --from/--until.
+    #[arg(long, value_name = "STEP_ID")]
+    only: Option<String>,
+    /// Start execution at this step (by step id). Earlier steps are
+    /// skipped — they don't run and don't checkpoint. Combines with
+    /// --until to bound the range.
+    #[arg(long, value_name = "STEP_ID", conflicts_with = "only")]
+    from: Option<String>,
+    /// Stop execution after this step (by step id), inclusive. Later
+    /// steps are skipped. Combines with --from for an explicit range.
+    #[arg(long, value_name = "STEP_ID", conflicts_with = "only")]
+    until: Option<String>,
 }
 
 #[derive(clap::Args)]
@@ -427,6 +493,12 @@ struct BareRunArgs {
     env_file_relative: bool,
     #[arg(long)]
     redact: Vec<String>,
+    #[arg(long, value_name = "STEP_ID")]
+    only: Option<String>,
+    #[arg(long, value_name = "STEP_ID", conflicts_with = "only")]
+    from: Option<String>,
+    #[arg(long, value_name = "STEP_ID", conflicts_with = "only")]
+    until: Option<String>,
 }
 
 #[derive(Parser)]
@@ -504,6 +576,9 @@ fn main() -> std::process::ExitCode {
                     env_files: bare.env_files,
                     env_file_relative: bare.env_file_relative,
                     redact: bare.redact,
+                    only: bare.only,
+                    from: bare.from,
+                    until: bare.until,
                 })
             }
         }
@@ -587,6 +662,11 @@ fn cmd_run(args: RunArgs) -> WbExit {
             cli_redact: args.redact,
             env_files: args.env_files,
             env_file_relative: args.env_file_relative,
+            selection: SelectionArgs {
+                only: args.only,
+                from: args.from,
+                until: args.until,
+            },
         });
     }
     WbExit::Success
@@ -1296,6 +1376,27 @@ struct RunConfig {
     cli_redact: Vec<String>,
     env_files: Vec<String>,
     env_file_relative: bool,
+    /// Subset selection by step id. `only` runs a single step; `from`/`until`
+    /// bound an inclusive range. clap rejects `only` combined with the others
+    /// at parse time. All step ids are resolved against the loaded workbook
+    /// in `run_single`; an unknown id is a usage error.
+    selection: SelectionArgs,
+}
+
+/// CLI-side selection inputs before resolution. Names mirror the flag
+/// vocabulary so `clap` field-mapping stays trivial; resolution into a
+/// concrete index range happens after the workbook's step list is built.
+#[derive(Debug, Default, Clone)]
+struct SelectionArgs {
+    only: Option<String>,
+    from: Option<String>,
+    until: Option<String>,
+}
+
+impl SelectionArgs {
+    fn is_empty(&self) -> bool {
+        self.only.is_none() && self.from.is_none() && self.until.is_none()
+    }
 }
 
 /// If the workbook declares `requires:` and we're not already running inside
@@ -1806,8 +1907,46 @@ fn run_single(cfg: RunConfig) {
         cli_redact: _,
         env_files: _,
         env_file_relative: _,
+        selection,
     } = cfg;
     let file = file.as_str();
+
+    // Resolve `--only` / `--from` / `--until` BEFORE prepare_checkpoint so a
+    // selective run can opt out of implicit checkpointing — partial-run state
+    // semantics under a checkpoint id aren't defined yet, and an inherited
+    // resume would silently skip the user's selection.
+    let selection_range = match resolve_selection(&selection, &steps, block_count) {
+        Ok(range) => range,
+        Err(e) => {
+            eprintln!("error: {}", e);
+            std::process::exit(exit_codes::EXIT_USAGE);
+        }
+    };
+    // "User opted into selection" — independent of whether the resolved
+    // range happens to equal 0..block_count (e.g. `--only` of a one-block
+    // workbook). That's what controls checkpoint conflict + suppression.
+    let selection_active = !selection.is_empty();
+    if selection_active && checkpoint_id.is_some() {
+        eprintln!(
+            "error: --only/--from/--until cannot be combined with --checkpoint yet. \
+             Selective-run checkpoint semantics aren't defined (which 'completed' do we \
+             track when most blocks are intentionally skipped?). Drop --checkpoint to run \
+             ephemerally, or remove the selection flags to resume normally."
+        );
+        std::process::exit(exit_codes::EXIT_USAGE);
+    }
+    let effective_checkpoint_id = if selection_active {
+        if !quiet {
+            eprintln!(
+                "wb: selective run — checkpointing disabled (steps {}..{})",
+                selection_range.start + 1,
+                selection_range.end
+            );
+        }
+        None
+    } else {
+        checkpoint_id
+    };
 
     let CheckpointPrep {
         id: checkpoint_id,
@@ -1815,7 +1954,7 @@ fn run_single(cfg: RunConfig) {
         mut results,
         mut ckpt,
         lock_guard: _checkpoint_lock,
-    } = prepare_checkpoint(checkpoint_id, file, block_count, &steps, &mut ctx);
+    } = prepare_checkpoint(effective_checkpoint_id, file, block_count, &steps, &mut ctx);
 
     if let Some(ref mut c) = ckpt {
         c.workflow = workbook.frontmatter.workflow.clone();
@@ -2126,7 +2265,9 @@ fn run_single(cfg: RunConfig) {
             }
 
             let block_heading = last_heading.take();
-            let live_skip = if block.skip_execution {
+            let live_skip = if !selection_range.contains(&block_idx) {
+                Some(selection_skip_decision())
+            } else if block.skip_execution {
                 Some(no_run_skip_decision())
             } else {
                 conditional_skip_decision(
@@ -2389,7 +2530,9 @@ fn run_single(cfg: RunConfig) {
             }
 
             let block_heading = last_heading.take();
-            let live_skip = if spec.skip_execution {
+            let live_skip = if !selection_range.contains(&block_idx) {
+                Some(selection_skip_decision())
+            } else if spec.skip_execution {
                 Some(no_run_skip_decision())
             } else {
                 conditional_skip_decision(
@@ -3992,6 +4135,9 @@ fn cmd_resume_cmd(cli: ResumeArgs) -> WbExit {
             cli_redact: cli.redact,
             env_files: cli.env_files,
             env_file_relative: cli.env_file_relative,
+            // Resume re-enters the original run's range; CLI selection
+            // flags on the resume command would change semantics mid-run.
+            selection: SelectionArgs::default(),
         });
         return WbExit::Success;
     }
@@ -4231,6 +4377,7 @@ fn cmd_resume_cmd(cli: ResumeArgs) -> WbExit {
         cli_redact: cli.redact,
         env_files: cli.env_files,
         env_file_relative: cli.env_file_relative,
+        selection: SelectionArgs::default(),
     });
     WbExit::Success
 }
@@ -5442,6 +5589,154 @@ echo "pin=$pin"
                 assert!(reason.contains("out of range"), "reason: {}", reason);
             }
             ResumeResolution::Replay { .. } => panic!("expected Fresh"),
+        }
+    }
+
+    // ─── selection flag resolution (Phase 4 of #29) ───────────────────
+
+    #[test]
+    fn selection_empty_returns_full_range() {
+        let steps = vec![fake_step("a", "bash"), fake_step("b", "bash")];
+        let sel = SelectionArgs::default();
+        let r = resolve_selection(&sel, &steps, 2).expect("ok");
+        assert_eq!(r, 0..2);
+    }
+
+    #[test]
+    fn selection_only_returns_single_step_range() {
+        let steps = vec![
+            fake_step("a", "bash"),
+            fake_step("b", "bash"),
+            fake_step("c", "bash"),
+        ];
+        let sel = SelectionArgs {
+            only: Some("b".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(resolve_selection(&sel, &steps, 3).expect("ok"), 1..2);
+    }
+
+    #[test]
+    fn selection_from_skips_earlier_steps() {
+        let steps = vec![
+            fake_step("a", "bash"),
+            fake_step("b", "bash"),
+            fake_step("c", "bash"),
+        ];
+        let sel = SelectionArgs {
+            from: Some("b".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(resolve_selection(&sel, &steps, 3).expect("ok"), 1..3);
+    }
+
+    #[test]
+    fn selection_until_caps_later_steps() {
+        let steps = vec![
+            fake_step("a", "bash"),
+            fake_step("b", "bash"),
+            fake_step("c", "bash"),
+        ];
+        let sel = SelectionArgs {
+            until: Some("b".to_string()),
+            ..Default::default()
+        };
+        // --until is inclusive → range is exclusive-end after target.
+        assert_eq!(resolve_selection(&sel, &steps, 3).expect("ok"), 0..2);
+    }
+
+    #[test]
+    fn selection_from_and_until_form_an_explicit_range() {
+        let steps = vec![
+            fake_step("a", "bash"),
+            fake_step("b", "bash"),
+            fake_step("c", "bash"),
+            fake_step("d", "bash"),
+        ];
+        let sel = SelectionArgs {
+            from: Some("b".to_string()),
+            until: Some("c".to_string()),
+            ..Default::default()
+        };
+        assert_eq!(resolve_selection(&sel, &steps, 4).expect("ok"), 1..3);
+    }
+
+    #[test]
+    fn selection_unknown_step_id_is_usage_error() {
+        let steps = vec![fake_step("a", "bash")];
+        let sel = SelectionArgs {
+            only: Some("nope".to_string()),
+            ..Default::default()
+        };
+        let err = resolve_selection(&sel, &steps, 1).expect_err("should reject unknown id");
+        assert!(err.contains("'nope'"), "error: {}", err);
+        assert!(err.contains("not found"), "error: {}", err);
+    }
+
+    #[test]
+    fn selection_inverted_range_is_usage_error() {
+        // --from c --until a: empty range. Reject so the user doesn't
+        // silently run zero blocks.
+        let steps = vec![
+            fake_step("a", "bash"),
+            fake_step("b", "bash"),
+            fake_step("c", "bash"),
+        ];
+        let sel = SelectionArgs {
+            from: Some("c".to_string()),
+            until: Some("a".to_string()),
+            ..Default::default()
+        };
+        let err = resolve_selection(&sel, &steps, 3).expect_err("empty range");
+        assert!(err.contains("empty"), "error: {}", err);
+    }
+
+    #[test]
+    fn selection_args_is_empty_only_true_when_all_none() {
+        assert!(SelectionArgs::default().is_empty());
+        assert!(!SelectionArgs {
+            only: Some("x".into()),
+            ..Default::default()
+        }
+        .is_empty());
+        assert!(!SelectionArgs {
+            from: Some("x".into()),
+            ..Default::default()
+        }
+        .is_empty());
+        assert!(!SelectionArgs {
+            until: Some("x".into()),
+            ..Default::default()
+        }
+        .is_empty());
+    }
+
+    #[test]
+    fn clap_rejects_only_combined_with_from() {
+        // Build a Cli that asks for both --only and --from. clap's
+        // conflicts_with should reject it at parse time. (Cli doesn't
+        // implement Debug, so we can't use expect_err — match on the Result.)
+        use clap::Parser;
+        match Cli::try_parse_from(["wb", "run", "f.md", "--only", "x", "--from", "y"]) {
+            Ok(_) => panic!("--only + --from should conflict at parse time"),
+            Err(e) => assert!(
+                matches!(e.kind(), clap::error::ErrorKind::ArgumentConflict),
+                "expected ArgumentConflict, got: {:?}",
+                e.kind()
+            ),
+        }
+    }
+
+    #[test]
+    fn clap_rejects_only_combined_with_until() {
+        use clap::Parser;
+        match Cli::try_parse_from(["wb", "run", "f.md", "--only", "x", "--until", "y"]) {
+            Ok(_) => panic!("--only + --until should conflict at parse time"),
+            Err(e) => assert!(
+                matches!(e.kind(), clap::error::ErrorKind::ArgumentConflict),
+                "expected ArgumentConflict, got: {:?}",
+                e.kind()
+            ),
         }
     }
 

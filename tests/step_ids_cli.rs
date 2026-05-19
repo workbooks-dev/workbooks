@@ -43,6 +43,82 @@ fn inspect_json_surfaces_step_ids() {
 }
 
 #[test]
+fn run_only_executes_just_the_selected_step() {
+    // Three blocks; --only middle should run only the middle echo.
+    let wb = write_workbook(
+        "```bash\necho first\n```\n\n```bash {#middle}\necho second\n```\n\n```bash\necho third\n```\n",
+    );
+    let out = Command::new(wb_binary())
+        .args(["run", wb.path().to_str().unwrap(), "--only", "middle"])
+        .output()
+        .expect("failed to spawn wb");
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "stderr:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        combined.contains("second"),
+        "selected step output missing:\n{combined}"
+    );
+    assert!(
+        !combined.contains("first") || combined.contains("skipped"),
+        "first block should be skipped, not executed:\n{combined}"
+    );
+    assert!(
+        !combined.contains("third") || combined.contains("skipped"),
+        "third block should be skipped, not executed:\n{combined}"
+    );
+}
+
+#[test]
+fn run_only_unknown_step_id_is_usage_error() {
+    let wb = write_workbook("```bash {#a}\necho hi\n```\n");
+    let out = Command::new(wb_binary())
+        .args(["run", wb.path().to_str().unwrap(), "--only", "ghost"])
+        .output()
+        .expect("failed to spawn wb");
+    // EXIT_USAGE = 2
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "unknown step id should be a usage error"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("'ghost'") && stderr.contains("not found"),
+        "stderr should name the missing id:\n{stderr}"
+    );
+}
+
+#[test]
+fn run_selection_with_checkpoint_is_refused() {
+    let wb = write_workbook("```bash {#a}\necho hi\n```\n");
+    let out = Command::new(wb_binary())
+        .args([
+            "run",
+            wb.path().to_str().unwrap(),
+            "--only",
+            "a",
+            "--checkpoint",
+            "selection-conflict-test",
+        ])
+        .output()
+        .expect("failed to spawn wb");
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "selection + --checkpoint should be a usage error"
+    );
+}
+
+#[test]
 fn validate_flags_duplicate_explicit_step_ids() {
     let wb =
         write_workbook("```bash {#login}\necho first\n```\n\n```bash {#login}\necho second\n```\n");
