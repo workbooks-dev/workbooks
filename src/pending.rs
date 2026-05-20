@@ -362,9 +362,9 @@ pub fn reap_expired() -> Vec<ReapedEntry> {
             // the callback below is a network call and shouldn't hold disk
             // locks across HTTP. (Phase 3 of #29.)
             {
-                let ckpt_lock = match crate::atomic_io::try_lock_for(
-                    &checkpoint::checkpoint_path(&id),
-                ) {
+                let ckpt_lock = match crate::atomic_io::try_lock_for(&checkpoint::checkpoint_path(
+                    &id,
+                )) {
                     Ok(g) => g,
                     Err(_) => {
                         // A live `wb run --checkpoint <id>` is in progress.

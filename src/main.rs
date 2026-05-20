@@ -1763,7 +1763,10 @@ fn resolve_resume_position(
             } else {
                 None
             };
-            return ResumeResolution::Replay { replay: pos, notice };
+            return ResumeResolution::Replay {
+                replay: pos,
+                notice,
+            };
         }
         // Step id is gone (block deleted / id renamed). Fall back to the
         // numeric block_idx if it's still in range, with a wb-resume-001
@@ -1843,8 +1846,7 @@ fn prepare_checkpoint(
     let (replay_until, results, ckpt) = if let Some(ref id) = id {
         match checkpoint::load(id) {
             Ok(Some(mut c))
-                if c.status != checkpoint::CheckpointStatus::Complete
-                    && c.workbook == file =>
+                if c.status != checkpoint::CheckpointStatus::Complete && c.workbook == file =>
             {
                 // Step-id-first resume: if the checkpoint carries a step id,
                 // locate that step in the *current* workbook and resume from
@@ -3674,15 +3676,8 @@ fn pause_browser_slice(
     }
 
     let cb_for_desc = cb.map(|c| (c.url.as_str(), c.secret.as_deref()));
-    let desc = pending::build_for_browser_pause(
-        id,
-        file,
-        block_idx,
-        step_id,
-        spec,
-        &pause,
-        cb_for_desc,
-    );
+    let desc =
+        pending::build_for_browser_pause(id, file, block_idx, step_id, spec, &pause, cb_for_desc);
     if let Err(e) = pending::save(id, &desc) {
         eprintln!("warning: pending descriptor: {}", e);
     }
@@ -5296,15 +5291,7 @@ echo "pin=$pin"
             retries: 2,
             continue_on_error: false,
         };
-        let result = execute_block_with_policy(
-            &mut session,
-            &block,
-            0,
-            policy,
-            None,
-            None,
-            true,
-        );
+        let result = execute_block_with_policy(&mut session, &block, 0, policy, None, None, true);
         assert_eq!(result.exit_code, 1);
         let content = std::fs::read_to_string(&marker).expect("marker file should exist");
         assert_eq!(
@@ -5343,15 +5330,7 @@ echo "pin=$pin"
             retries: 5,
             continue_on_error: false,
         };
-        let result = execute_block_with_policy(
-            &mut session,
-            &block,
-            0,
-            policy,
-            None,
-            None,
-            true,
-        );
+        let result = execute_block_with_policy(&mut session, &block, 0, policy, None, None, true);
         assert_eq!(result.exit_code, 0, "should succeed on 2nd attempt");
         let content = std::fs::read_to_string(&marker).expect("marker file should exist");
         assert_eq!(
@@ -5375,15 +5354,7 @@ echo "pin=$pin"
             retries: 0,
             continue_on_error: false,
         };
-        let result = execute_block_with_policy(
-            &mut session,
-            &block,
-            0,
-            policy,
-            None,
-            None,
-            true,
-        );
+        let result = execute_block_with_policy(&mut session, &block, 0, policy, None, None, true);
         assert!(
             result.stdout_partial,
             "timeout_secs=1 should trigger partial"
@@ -5994,7 +5965,9 @@ echo "pin=$pin"
         ];
         match resolve_resume_position(&c, &steps, 5) {
             ResumeResolution::Replay { replay, .. } => assert_eq!(replay, 2),
-            ResumeResolution::Fresh(r) => panic!("expected Replay across count change, got Fresh: {}", r),
+            ResumeResolution::Fresh(r) => {
+                panic!("expected Replay across count change, got Fresh: {}", r)
+            }
         }
     }
 }
