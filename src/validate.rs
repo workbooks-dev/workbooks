@@ -236,7 +236,16 @@ fn check_block_policy_indices(wb: &Workbook, path: &Path, out: &mut Vec<Diagnost
     // wb-fm-003: malformed duration strings in timeouts:
     // wb-fm-006: block number out of range
     if let Some(ref timeouts) = fm.timeouts {
-        for (block_num, dur_str) in timeouts {
+        if let Some(dur_str) = timeouts.default.as_deref() {
+            if parser::parse_duration_secs(dur_str).is_err() {
+                out.push(Diagnostic::error(
+                    "wb-fm-003",
+                    path,
+                    format!("timeouts: _default: invalid duration '{dur_str}'"),
+                ));
+            }
+        }
+        for (block_num, dur_str) in &timeouts.blocks {
             if parser::parse_duration_secs(dur_str).is_err() {
                 out.push(Diagnostic::error(
                     "wb-fm-003",

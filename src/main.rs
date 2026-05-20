@@ -71,25 +71,112 @@ fn step_policy_for(
     }
 }
 
+/// Why this run picked the default block timeout it did. Threaded through
+/// to `execute_block_with_policy` so the timeout error message can point
+/// the user at the right knob to tune.
+#[derive(Debug, Clone, Copy)]
+enum DefaultTimeoutSource {
+    /// `timeouts._default` in the workbook frontmatter.
+    FrontmatterDefault,
+    /// `--default-block-timeout` on the CLI.
+    Cli,
+}
+
+impl DefaultTimeoutSource {
+    fn describe(self) -> &'static str {
+        match self {
+            DefaultTimeoutSource::FrontmatterDefault => "frontmatter `timeouts._default`",
+            DefaultTimeoutSource::Cli => "--default-block-timeout",
+        }
+    }
+}
+
+fn print_timeout_diagnostic(
+    block: &parser::CodeBlock,
+    block_idx: usize,
+    used_timeout: Duration,
+    per_block_source: Option<&'static str>,
+    default_source: Option<DefaultTimeoutSource>,
+) {
+    let dur_str = format_duration(used_timeout);
+    let one_based = block_idx + 1;
+    let source_str = match per_block_source {
+        Some(src) => src.to_string(),
+        None => default_source
+            .map(|s| s.describe().to_string())
+            .unwrap_or_else(|| "(unknown)".to_string()),
+    };
+    eprintln!(
+        "wb: block {} ({}) at line {} timed out after {} — limit set by {}",
+        one_based, block.language, block.line_number, dur_str, source_str
+    );
+    eprintln!(
+        "    to extend this block specifically, add to frontmatter:\n      timeouts:\n        {}: {}",
+        one_based,
+        format_suggested_extension(used_timeout)
+    );
+}
+
+fn format_duration(d: Duration) -> String {
+    let secs = d.as_secs();
+    if secs % 3600 == 0 && secs >= 3600 {
+        format!("{}h", secs / 3600)
+    } else if secs % 60 == 0 && secs >= 60 {
+        format!("{}m", secs / 60)
+    } else {
+        format!("{}s", secs)
+    }
+}
+
+fn format_suggested_extension(d: Duration) -> String {
+    // Suggest something noticeably longer than the cap that fired, so a
+    // copy-pasted entry has a chance of clearing the block in a re-run.
+    let secs = d.as_secs().max(1);
+    let suggested = secs.saturating_mul(3);
+    format_duration(Duration::from_secs(suggested))
+}
+
+#[allow(clippy::too_many_arguments)]
 fn execute_block_with_policy(
     session: &mut executor::Session,
     block: &parser::CodeBlock,
     block_idx: usize,
     policy: parser::BlockPolicy,
-    default_timeout: Duration,
+    default_timeout: Option<Duration>,
+    default_source: Option<DefaultTimeoutSource>,
     quiet: bool,
 ) -> executor::BlockResult {
+    // Precedence: per-block (fence-attr or frontmatter[N]) > resolved
+    // run-wide default (frontmatter._default or --default-block-timeout) >
+    // None (unbounded).
     let timeout = policy
         .timeout_secs
         .map(Duration::from_secs)
-        .unwrap_or(default_timeout);
+        .or(default_timeout);
     session.set_block_timeout(timeout);
+    // For the diagnostic: if the fence attr carried `{timeout=...}` we
+    // know the per-block source; otherwise the frontmatter map set it.
+    // The `_default` and CLI cases are captured by `default_source`.
+    let per_block_source: Option<&'static str> = if policy.timeout_secs.is_some() {
+        if block.attrs.kv.contains_key("timeout") {
+            Some("fence attr `{timeout=…}`")
+        } else {
+            Some("frontmatter `timeouts.<N>`")
+        }
+    } else {
+        None
+    };
 
     let mut attempt: u32 = 0;
     let total_attempts = 1 + policy.retries;
     loop {
         let result = session.execute_block(block, block_idx);
         attempt += 1;
+        if result.error_type.as_deref() == Some("timeout") {
+            if let Some(t) = timeout {
+                print_timeout_diagnostic(block, block_idx, t, per_block_source, default_source);
+            }
+        }
         if result.success() || attempt >= total_attempts {
             return result;
         }
@@ -301,6 +388,12 @@ struct RunArgs {
     /// steps are skipped. Combines with --from for an explicit range.
     #[arg(long, value_name = "STEP_ID", conflicts_with = "only")]
     until: Option<String>,
+    /// Cap how long a block may run before wb kills it. Accepts duration
+    /// strings ("30s", "5m", "2h") or bare seconds. Without this flag and
+    /// without a `timeouts._default` frontmatter entry, blocks run unbounded.
+    /// Per-block `timeouts: {N: ...}` entries still win over this default.
+    #[arg(long = "default-block-timeout", value_name = "DURATION")]
+    default_block_timeout: Option<String>,
 }
 
 #[derive(clap::Args)]
@@ -499,6 +592,8 @@ struct BareRunArgs {
     from: Option<String>,
     #[arg(long, value_name = "STEP_ID", conflicts_with = "only")]
     until: Option<String>,
+    #[arg(long = "default-block-timeout", value_name = "DURATION")]
+    default_block_timeout: Option<String>,
 }
 
 #[derive(Parser)]
@@ -579,6 +674,7 @@ fn main() -> std::process::ExitCode {
                     only: bare.only,
                     from: bare.from,
                     until: bare.until,
+                    default_block_timeout: bare.default_block_timeout,
                 })
             }
         }
@@ -620,6 +716,17 @@ fn cmd_run(args: RunArgs) -> WbExit {
         })
         .collect();
 
+    let cli_default_timeout = match args.default_block_timeout.as_deref() {
+        Some(s) => match parser::parse_duration_secs(s) {
+            Ok(n) => Some(Duration::from_secs(n)),
+            Err(e) => {
+                eprintln!("error: --default-block-timeout: {}", e);
+                return WbExit::Usage("invalid --default-block-timeout".to_string());
+            }
+        },
+        None => None,
+    };
+
     let p = Path::new(&args.file);
 
     if p.is_dir() {
@@ -640,6 +747,7 @@ fn cmd_run(args: RunArgs) -> WbExit {
             args.redact,
             args.env_files,
             args.env_file_relative,
+            cli_default_timeout,
         );
     } else {
         run_single(RunConfig {
@@ -667,6 +775,7 @@ fn cmd_run(args: RunArgs) -> WbExit {
                 from: args.from,
                 until: args.until,
             },
+            default_block_timeout: cli_default_timeout,
         });
     }
     WbExit::Success
@@ -784,6 +893,7 @@ fn collect_workbooks(dir: &str, order: &str) -> Vec<String> {
 }
 
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 fn run_folder(
     dir: &str,
     output_path: Option<String>,
@@ -801,6 +911,7 @@ fn run_folder(
     cli_redact: Vec<String>,
     env_files: Vec<String>,
     env_file_relative: bool,
+    cli_default_block_timeout: Option<Duration>,
 ) {
     let files = collect_workbooks(dir, order);
 
@@ -833,6 +944,7 @@ fn run_folder(
             cli_redact.clone(),
             env_files.clone(),
             env_file_relative,
+            cli_default_block_timeout,
         );
 
         let line = format!(
@@ -922,6 +1034,7 @@ fn run_single_collect(
     cli_redact: Vec<String>,
     env_files: Vec<String>,
     env_file_relative: bool,
+    cli_default_block_timeout: Option<Duration>,
 ) -> output::RunSummary {
     // Resolve the trace-correlation id once so every subsequent artifact,
     // callback, and early-return RunSummary carries the same value.
@@ -1188,6 +1301,18 @@ fn run_single_collect(
     let mut block_idx = 0;
     let steps = workbook.build_steps();
     let resolved_step_policies = step_ir::resolve_step_policies(&steps, &workbook.frontmatter);
+    let fm_default_timeout = workbook
+        .frontmatter
+        .default_block_timeout_secs()
+        .map(Duration::from_secs);
+    let effective_default_timeout = fm_default_timeout.or(cli_default_block_timeout);
+    let effective_default_source = if fm_default_timeout.is_some() {
+        Some(DefaultTimeoutSource::FrontmatterDefault)
+    } else if cli_default_block_timeout.is_some() {
+        Some(DefaultTimeoutSource::Cli)
+    } else {
+        None
+    };
     let mut session = executor::Session::new(ctx);
 
     for section in &workbook.sections {
@@ -1211,7 +1336,8 @@ fn run_single_collect(
                     block,
                     block_idx,
                     policy,
-                    executor::DEFAULT_BLOCK_TIMEOUT,
+                    effective_default_timeout,
+                    effective_default_source,
                     quiet,
                 );
                 let current_outputs =
@@ -1381,6 +1507,10 @@ struct RunConfig {
     /// at parse time. All step ids are resolved against the loaded workbook
     /// in `run_single`; an unknown id is a usage error.
     selection: SelectionArgs,
+    /// CLI-supplied default block timeout. Sits below frontmatter
+    /// `timeouts._default` in precedence. `None` = no CLI default (and, if
+    /// frontmatter doesn't set one either, blocks run unbounded).
+    default_block_timeout: Option<Duration>,
 }
 
 /// CLI-side selection inputs before resolution. Names mirror the flag
@@ -1908,8 +2038,26 @@ fn run_single(cfg: RunConfig) {
         env_files: _,
         env_file_relative: _,
         selection,
+        default_block_timeout: cli_default_block_timeout,
     } = cfg;
     let file = file.as_str();
+    // Resolve the run-wide default block timeout once. Precedence:
+    // frontmatter `timeouts._default` > CLI `--default-block-timeout` > None.
+    // The per-block override (fence attr or frontmatter[N]) is applied later
+    // inside `execute_block_with_policy` and beats both. `effective_default_source`
+    // tracks which knob set the default so the timeout error message can name it.
+    let fm_default_timeout = workbook
+        .frontmatter
+        .default_block_timeout_secs()
+        .map(Duration::from_secs);
+    let effective_default_timeout = fm_default_timeout.or(cli_default_block_timeout);
+    let effective_default_source = if fm_default_timeout.is_some() {
+        Some(DefaultTimeoutSource::FrontmatterDefault)
+    } else if cli_default_block_timeout.is_some() {
+        Some(DefaultTimeoutSource::Cli)
+    } else {
+        None
+    };
 
     // Resolve `--only` / `--from` / `--until` BEFORE prepare_checkpoint so a
     // selective run can opt out of implicit checkpointing — partial-run state
@@ -2348,7 +2496,8 @@ fn run_single(cfg: RunConfig) {
                 block,
                 block_idx,
                 policy,
-                executor::DEFAULT_BLOCK_TIMEOUT,
+                effective_default_timeout,
+                effective_default_source,
                 quiet,
             );
             let current_outputs = capture_outputs_for_result(&mut result, policy.continue_on_error);
@@ -4138,6 +4287,7 @@ fn cmd_resume_cmd(cli: ResumeArgs) -> WbExit {
             // Resume re-enters the original run's range; CLI selection
             // flags on the resume command would change semantics mid-run.
             selection: SelectionArgs::default(),
+            default_block_timeout: None,
         });
         return WbExit::Success;
     }
@@ -4378,6 +4528,7 @@ fn cmd_resume_cmd(cli: ResumeArgs) -> WbExit {
         env_files: cli.env_files,
         env_file_relative: cli.env_file_relative,
         selection: SelectionArgs::default(),
+        default_block_timeout: None,
     });
     WbExit::Success
 }
@@ -5104,7 +5255,7 @@ echo "pin=$pin"
             quiet: true,
             vars: HashMap::new(),
             redact_values: Vec::new(),
-            block_timeout: executor::DEFAULT_BLOCK_TIMEOUT,
+            block_timeout: None,
         };
         executor::Session::new(ctx)
     }
@@ -5150,7 +5301,8 @@ echo "pin=$pin"
             &block,
             0,
             policy,
-            executor::DEFAULT_BLOCK_TIMEOUT,
+            None,
+            None,
             true,
         );
         assert_eq!(result.exit_code, 1);
@@ -5196,7 +5348,8 @@ echo "pin=$pin"
             &block,
             0,
             policy,
-            executor::DEFAULT_BLOCK_TIMEOUT,
+            None,
+            None,
             true,
         );
         assert_eq!(result.exit_code, 0, "should succeed on 2nd attempt");
@@ -5227,7 +5380,8 @@ echo "pin=$pin"
             &block,
             0,
             policy,
-            executor::DEFAULT_BLOCK_TIMEOUT,
+            None,
+            None,
             true,
         );
         assert!(
@@ -5240,6 +5394,87 @@ echo "pin=$pin"
             "pre-timeout stdout should be preserved, got: {:?}",
             result.stdout
         );
+    }
+
+    #[test]
+    fn test_default_timeout_caps_a_block_when_no_per_block_override() {
+        // Pass a 1s default_timeout with no per-block override — the block
+        // should be capped by the default and produce a timeout result.
+        let mut session = quiet_bash_session();
+        let block = bash_block("echo started; sleep 5; echo finished");
+        let policy = parser::BlockPolicy {
+            timeout_secs: None,
+            retries: 0,
+            continue_on_error: false,
+        };
+        let result = execute_block_with_policy(
+            &mut session,
+            &block,
+            0,
+            policy,
+            Some(Duration::from_secs(1)),
+            Some(DefaultTimeoutSource::FrontmatterDefault),
+            true,
+        );
+        assert_eq!(result.error_type.as_deref(), Some("timeout"));
+        assert!(result.stdout.contains("started"));
+        assert!(!result.stdout.contains("finished"));
+    }
+
+    #[test]
+    fn test_per_block_timeout_beats_default_timeout() {
+        // Per-block override of 1s should win over a default of 30s. The
+        // proof is that the block times out — if the default were applied,
+        // the block (sleeping 5s) would still be running when the test
+        // would expect a completed run, but the assertion that matters is
+        // `error_type == timeout`.
+        let mut session = quiet_bash_session();
+        let block = bash_block("sleep 5");
+        let policy = parser::BlockPolicy {
+            timeout_secs: Some(1),
+            retries: 0,
+            continue_on_error: false,
+        };
+        let result = execute_block_with_policy(
+            &mut session,
+            &block,
+            0,
+            policy,
+            Some(Duration::from_secs(30)),
+            Some(DefaultTimeoutSource::FrontmatterDefault),
+            true,
+        );
+        assert_eq!(result.error_type.as_deref(), Some("timeout"));
+        // ~1s, not ~30s. Generous bound for slow CI.
+        assert!(
+            result.duration < Duration::from_secs(10),
+            "should have timed out near 1s, not waited for the 30s default; got {:?}",
+            result.duration
+        );
+    }
+
+    #[test]
+    fn test_unbounded_default_lets_block_run_past_short_window() {
+        // No per-block override, no default — block must run to completion.
+        let mut session = quiet_bash_session();
+        let block = bash_block("sleep 1.5; echo done");
+        let policy = parser::BlockPolicy {
+            timeout_secs: None,
+            retries: 0,
+            continue_on_error: false,
+        };
+        let result = execute_block_with_policy(
+            &mut session,
+            &block,
+            0,
+            policy,
+            None, // unbounded
+            None,
+            true,
+        );
+        assert_eq!(result.exit_code, 0, "should complete without a cap");
+        assert!(result.error_type.is_none());
+        assert!(result.stdout.contains("done"));
     }
 
     // --- write_pause_result (F1) ----------------------------------------------

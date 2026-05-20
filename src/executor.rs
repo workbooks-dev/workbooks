@@ -85,10 +85,12 @@ pub struct ExecutionContext {
     pub quiet: bool,
     pub vars: HashMap<String, String>,
     pub redact_values: Vec<String>,
-    /// Default timeout for one execution of a block. Per-block overrides live
-    /// in `Session::block_timeouts` (keyed by block index) and the session
+    /// Timeout to arm for the *next* `execute_block` call. `None` means
+    /// unbounded — the kill timer is not armed and the block runs until the
+    /// child process exits on its own. Per-block overrides live in
+    /// `Session::block_timeouts` (keyed by block index) and the session
     /// applies them before calling `execute_block` by mutating this field.
-    pub block_timeout: Duration,
+    pub block_timeout: Option<Duration>,
 }
 
 impl ExecutionContext {
@@ -114,7 +116,7 @@ impl ExecutionContext {
             quiet: false,
             vars: frontmatter.vars.clone().unwrap_or_default(),
             redact_values: Vec::new(),
-            block_timeout: DEFAULT_BLOCK_TIMEOUT,
+            block_timeout: None,
         }
     }
 }
@@ -211,7 +213,6 @@ fn build_command(exec: Option<&ExecMode>, program: &str) -> Command {
 const SENTINEL_PREFIX: &str = "__WB_DONE_";
 const SENTINEL_SUFFIX: &str = "__";
 const CODE_END_MARKER: &str = "__WB_CODE_END__";
-pub const DEFAULT_BLOCK_TIMEOUT: Duration = Duration::from_secs(300);
 
 const PYTHON_HARNESS: &str = r#"import sys, traceback
 _wb_g = {'__builtins__': __builtins__, '__name__': '__main__'}
@@ -334,9 +335,9 @@ impl Session {
     }
 
     /// Override the per-block timeout for the *next* `execute_block` call.
-    /// The caller is expected to reset it back to the default after the
-    /// block finishes, since the session object is long-lived.
-    pub fn set_block_timeout(&mut self, timeout: Duration) {
+    /// `None` means unbounded (no kill timer). The caller is expected to
+    /// reset this between blocks since the session object is long-lived.
+    pub fn set_block_timeout(&mut self, timeout: Option<Duration>) {
         self.ctx.block_timeout = timeout;
     }
 
@@ -812,7 +813,11 @@ struct CollectedOutput {
     stderr_partial: bool,
 }
 
-fn collect_output(process: &PersistentProcess, quiet: bool, timeout: Duration) -> CollectedOutput {
+fn collect_output(
+    process: &PersistentProcess,
+    quiet: bool,
+    timeout: Option<Duration>,
+) -> CollectedOutput {
     // Read stdout first, then stderr. Safe because the child writes
     // stdout sentinel before stderr sentinel. If stderr fills during
     // stdout reading, the child blocks AFTER writing stdout sentinel.
@@ -822,8 +827,10 @@ fn collect_output(process: &PersistentProcess, quiet: bool, timeout: Duration) -
     // If stdout timed out, there's no point waiting the full timeout again
     // for the stderr sentinel — the child is already considered dead. Fall
     // through with a near-zero window so we drain anything already buffered.
+    // If stdout did NOT time out (sentinel seen, or no timeout configured),
+    // mirror the caller's `timeout` setting for stderr.
     let stderr_timeout = if stdout_timed_out {
-        Duration::from_millis(100)
+        Some(Duration::from_millis(100))
     } else {
         timeout
     };
@@ -843,19 +850,27 @@ fn collect_output(process: &PersistentProcess, quiet: bool, timeout: Duration) -
 /// Returns (buffered_lines, exit_code_if_sentinel_seen, timed_out).
 /// `timed_out` is true iff we gave up waiting for a line without ever seeing
 /// the sentinel — i.e. the buffer is partial, not the terminal state of the
-/// block.
+/// block. `timeout = None` means wait forever (blocking recv); the only way
+/// to break out is the sentinel or a disconnected channel.
 fn collect_until_sentinel(
     rx: &Receiver<String>,
     quiet: bool,
     is_stderr: bool,
-    timeout: Duration,
+    timeout: Option<Duration>,
 ) -> (String, Option<i32>, bool) {
     let mut lines = Vec::new();
     let exit_code;
     let mut timed_out = false;
 
     loop {
-        match rx.recv_timeout(timeout) {
+        let recv_result = match timeout {
+            Some(d) => rx.recv_timeout(d),
+            None => match rx.recv() {
+                Ok(v) => Ok(v),
+                Err(_) => Err(mpsc::RecvTimeoutError::Disconnected),
+            },
+        };
+        match recv_result {
             Ok(line) => {
                 if let Some(code) = parse_sentinel(&line) {
                     exit_code = Some(code);
@@ -1222,7 +1237,7 @@ mod tests {
             quiet: true,
             vars: HashMap::new(),
             redact_values: Vec::new(),
-            block_timeout: DEFAULT_BLOCK_TIMEOUT,
+            block_timeout: None,
         }
     }
 
@@ -1281,7 +1296,7 @@ mod tests {
         // should see "before-sleep" preserved in stdout, both partial flags
         // set (timeout aborts both streams), and error_type=timeout.
         let mut ctx = bash_ctx();
-        ctx.block_timeout = Duration::from_millis(500);
+        ctx.block_timeout = Some(Duration::from_millis(500));
         let mut session = Session::new(ctx);
         let code = "echo before-sleep; sleep 5; echo after-sleep";
         let r = session.execute_block(&code_block(code), 0);
@@ -1298,6 +1313,37 @@ mod tests {
         assert!(r.stdout_partial, "stdout_partial should be true on timeout");
         assert!(r.stderr_partial, "stderr_partial should be true on timeout");
         assert_eq!(r.error_type.as_deref(), Some("timeout"));
+    }
+
+    #[test]
+    fn test_unbounded_default_runs_past_old_300s_cap_signal() {
+        // Regression for the v0.14.0 default-cap removal: with no timeout
+        // set anywhere, a block that takes longer than what the old hardcoded
+        // cap *would have* allowed must complete. 1.5s sleep is well past
+        // what mpsc::recv_timeout's "no progress" debounce would worry about
+        // on slow CI; the real proof is that it returns exit_code 0 with no
+        // partial flags rather than dying with `[wb: block timed out]`.
+        let mut ctx = bash_ctx();
+        assert!(
+            ctx.block_timeout.is_none(),
+            "bash_ctx default must be unbounded; got {:?}",
+            ctx.block_timeout
+        );
+        ctx.block_timeout = None;
+        let mut session = Session::new(ctx);
+        let r = session.execute_block(&code_block("sleep 1.5; echo done"), 0);
+        assert_eq!(
+            r.exit_code, 0,
+            "unbounded block should run to completion, got: {:?}",
+            r
+        );
+        assert!(!r.stdout_partial, "stdout_partial must be false: {:?}", r);
+        assert!(!r.stderr_partial, "stderr_partial must be false: {:?}", r);
+        assert!(
+            r.stdout.contains("done"),
+            "expected 'done' in stdout, got: {:?}",
+            r.stdout
+        );
     }
 
     #[test]

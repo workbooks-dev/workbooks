@@ -72,9 +72,23 @@ print("runs in python")
 
 ## Per-block timeouts, retries, and continue-on-error
 
-Two equivalent ways to set per-block policy. The fence-attr form is preferred —
-the policy stays attached to the block across edits, so inserting a block
-above doesn't shift every downstream entry.
+**wb does not impose a default block timeout.** A block runs until it exits,
+the parent process dies, or the user signals. Wall-clock caps are opt-in —
+authorial intent wins, since the author of a long DDL or batch step knows
+it's long-running. Three places to set one (highest precedence first):
+
+1. **Per-block (fence attr or frontmatter map)** — the cap stays attached to
+   the block.
+2. **`timeouts._default` in frontmatter** — runbook-wide safety net applied to
+   every block that doesn't have its own override.
+3. **`--default-block-timeout <dur>` CLI flag** — convenient for CI hosts or
+   scheduled agents that want to enforce a cap without editing the runbook.
+
+If none of these are set, blocks run unbounded.
+
+Two equivalent ways to set the per-block policy. The fence-attr form is
+preferred — the policy stays attached to the block across edits, so inserting
+a block above doesn't shift every downstream entry.
 
 **Fence attrs** (Pandoc-style `{key=value}` cluster):
 
@@ -88,12 +102,14 @@ rm -rf $TMPDIR
 ```
 ```
 
-**Frontmatter maps** (legacy, keyed by 1-based block number):
+**Frontmatter maps** (legacy, keyed by 1-based block number — plus the special
+`_default` key for a runbook-wide cap):
 
 ```yaml
 ---
 timeouts:
-  1: 30s              # override block 1's timeout (default 300s)
+  _default: 30m       # runbook-wide safety net (optional)
+  1: 30s              # tighter cap on block 1
   3: 2m
 retries:
   3: 2                # retry block 3 up to 2 more times on failure
@@ -101,11 +117,15 @@ continue_on_error: [4] # block 4 failure doesn't trigger --bail
 ---
 ```
 
-- **`timeouts`** — values are duration strings (`30s`, `5m`, `2h`, bare int = seconds). A timed-out block gets `error_type: "timeout"` and `stdout_partial: true` / `stderr_partial: true` in JSON output and callback payloads — partial output is preserved so agents can diagnose hung blocks. A timeout kills the language session child; a later retry or block will spawn a fresh session (state reset).
+- **`timeouts`** — values are duration strings (`30s`, `5m`, `2h`, bare int = seconds). A timed-out block gets `error_type: "timeout"` and `stdout_partial: true` / `stderr_partial: true` in JSON output and callback payloads — partial output is preserved so agents can diagnose hung blocks. A timeout kills the language session child; a later retry or block will spawn a fresh session (state reset). When a timeout fires, wb prints which knob set the cap (`fence attr`, `frontmatter timeouts.<N>`, `frontmatter _default`, or `--default-block-timeout`) so the operator knows where to extend it.
 - **`retries`** — number of *additional* attempts after the first failure (`0`/missing = no retry). Retries run with a 500ms delay between attempts. Useful for flaky HTTP calls; combine with `timeouts:` to cap individual attempts.
 - **`continue_on_error`** — block numbers whose failure should not halt a `--bail` run. The block's failure is still recorded and emitted via callbacks; execution just continues to the next block.
 
 When a block has both a fence attr and a legacy frontmatter entry for the same field, **the fence attr wins** and `wb validate` emits a `wb-step-002` warning so you know to drop the legacy entry.
+
+The "no default cap" rule applies to process-runtime blocks (bash, python,
+node, ruby, sandbox). Browser slices, `wait` blocks, and other sidecar verbs
+already have their own protocol-specific timeouts and are unaffected.
 
 Callback payloads (`step.complete`, `checkpoint.failed`) include `stdout_partial` / `stderr_partial` fields so downstream agents can distinguish "block failed" from "block was cut off mid-run".
 
@@ -268,6 +288,7 @@ wb run file.md --callback <url>       # POST events to webhook
 wb run file.md --only <step-id>       # Run only this step; skip the rest
 wb run file.md --from <step-id>       # Start at this step (skip earlier)
 wb run file.md --until <step-id>      # Stop after this step (inclusive)
+wb run file.md --default-block-timeout 30m  # Opt-in default cap for every block
 wb inspect file.md                    # Show structure without running
 wb pending                            # List paused workbooks (auto-reaps expired abort-mode descriptors)
 wb pending --no-reap                  # List without reaping — safe for automation/inspection

@@ -205,7 +205,7 @@ pub fn resolve_step_policies(
         let legacy_timeout = fm
             .timeouts
             .as_ref()
-            .and_then(|m| m.get(&block_number))
+            .and_then(|m| m.blocks.get(&block_number))
             .cloned();
         let legacy_retries = fm
             .retries

@@ -30,10 +30,12 @@ pub struct Frontmatter {
     /// validates declared node ids and passes compact fragments through
     /// callbacks/checkpoints, but does not interpret the workflow graph.
     pub workflow: Option<serde_json::Value>,
-    /// Per-block timeout map, keyed by 1-based block number. Values are
+    /// Per-block timeout map. Numeric keys (1-based block numbers) set a
+    /// per-block cap; the special `_default` key sets a runbook-wide default
+    /// applied to every block that doesn't have its own override. Values are
     /// duration strings ("30s", "5m", "2h") — bare integers are seconds.
-    /// Missing keys fall back to the 300s default.
-    pub timeouts: Option<HashMap<u32, String>>,
+    /// When neither is set, blocks run unbounded.
+    pub timeouts: Option<TimeoutsConfig>,
     /// Per-block retry count, keyed by 1-based block number. Value is the
     /// number of extra attempts after the first failure; `0`/missing = no
     /// retry. Retries run with a 500ms delay between attempts. If a retry
@@ -44,6 +46,85 @@ pub struct Frontmatter {
     /// run. The block's failure is still recorded and emitted via
     /// callbacks; execution just continues to the next block.
     pub continue_on_error: Option<Vec<u32>>,
+}
+
+/// `timeouts:` frontmatter map. Mixes a runbook-wide `_default` cap with
+/// per-block (1-based) overrides:
+///
+/// ```yaml
+/// timeouts:
+///   _default: 30m     # safety net for the whole workbook
+///   3: 2m             # tighter cap on block 3
+/// ```
+///
+/// Custom Deserialize because YAML maps mix integer scalar keys (block
+/// numbers) with string scalar keys (`_default`), and `#[serde(flatten)]`
+/// over `HashMap<u32, _>` flattens through the string-keyed `Content`
+/// deserializer — which would reject `3` as a key.
+#[derive(Debug, Default, Clone)]
+pub struct TimeoutsConfig {
+    /// Raw duration string for `_default` (e.g. "30m"). Parsed at lookup.
+    pub default: Option<String>,
+    /// Raw per-block duration strings, keyed by 1-based block number.
+    pub blocks: HashMap<u32, String>,
+}
+
+impl<'de> Deserialize<'de> for TimeoutsConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde::de::{MapAccess, Visitor};
+        use std::fmt;
+
+        struct V;
+        impl<'de> Visitor<'de> for V {
+            type Value = TimeoutsConfig;
+
+            fn expecting(&self, f: &mut fmt::Formatter) -> fmt::Result {
+                write!(
+                    f,
+                    "a map of block id (positive int) or `_default` to duration string"
+                )
+            }
+
+            fn visit_map<M>(self, mut access: M) -> Result<Self::Value, M::Error>
+            where
+                M: MapAccess<'de>,
+            {
+                let mut out = TimeoutsConfig::default();
+                while let Some(key) = access.next_key::<serde_yaml::Value>()? {
+                    let val: String = access.next_value()?;
+                    match key {
+                        serde_yaml::Value::String(s) if s == "_default" => {
+                            out.default = Some(val);
+                        }
+                        serde_yaml::Value::String(s) => {
+                            if let Ok(n) = s.parse::<u32>() {
+                                out.blocks.insert(n, val);
+                            } else {
+                                eprintln!("wb: ignoring unknown timeouts key '{}'", s);
+                            }
+                        }
+                        serde_yaml::Value::Number(n) => match n.as_u64() {
+                            Some(u) if u <= u32::MAX as u64 => {
+                                out.blocks.insert(u as u32, val);
+                            }
+                            _ => {
+                                eprintln!("wb: ignoring out-of-range timeouts key {:?}", n);
+                            }
+                        },
+                        other => {
+                            eprintln!("wb: ignoring unsupported timeouts key {:?}", other);
+                        }
+                    }
+                }
+                Ok(out)
+            }
+        }
+
+        deserializer.deserialize_map(V)
+    }
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -976,6 +1057,22 @@ pub struct BlockPolicy {
 }
 
 impl Frontmatter {
+    /// Resolve the runbook-wide default timeout from `timeouts._default`.
+    /// Returns `None` if unset or the value fails to parse (parse failures
+    /// log a warning and fall through to "no default").
+    pub fn default_block_timeout_secs(&self) -> Option<u64> {
+        self.timeouts
+            .as_ref()
+            .and_then(|t| t.default.as_deref())
+            .and_then(|s| match parse_duration_secs(s) {
+                Ok(n) => Some(n),
+                Err(e) => {
+                    eprintln!("wb: ignoring invalid timeouts._default='{}': {}", s, e);
+                    None
+                }
+            })
+    }
+
     /// Resolve the per-block policy for a given 1-based block number.
     /// Unknown numbers return the all-default policy.
     ///
@@ -988,7 +1085,7 @@ impl Frontmatter {
         let timeout_secs = self
             .timeouts
             .as_ref()
-            .and_then(|m| m.get(&block_number))
+            .and_then(|m| m.blocks.get(&block_number))
             .and_then(|s| match parse_duration_secs(s) {
                 Ok(n) => Some(n),
                 Err(e) => {
@@ -1465,6 +1562,70 @@ echo four
         assert_eq!(p4.timeout_secs, None);
         assert_eq!(p4.retries, 0);
         assert!(p4.continue_on_error);
+    }
+
+    #[test]
+    fn test_timeouts_default_key_parses_alongside_block_keys() {
+        // The `_default` key sets a runbook-wide cap; numeric keys still
+        // attach to specific blocks. Verify both land in the right slots.
+        let input = r#"---
+timeouts:
+  _default: 10m
+  3: 2m
+---
+
+```bash
+echo one
+```
+
+```bash
+echo two
+```
+
+```bash
+echo three
+```
+"#;
+        let wb = parse(input);
+        assert_eq!(wb.frontmatter.default_block_timeout_secs(), Some(600));
+        // Block 1, 2: no per-block override.
+        assert_eq!(wb.frontmatter.block_policy(1).timeout_secs, None);
+        assert_eq!(wb.frontmatter.block_policy(2).timeout_secs, None);
+        // Block 3: per-block override beats `_default`.
+        assert_eq!(wb.frontmatter.block_policy(3).timeout_secs, Some(120));
+    }
+
+    #[test]
+    fn test_timeouts_default_only() {
+        // No per-block entries — just a runbook-wide cap.
+        let input = r#"---
+timeouts:
+  _default: 45s
+---
+
+```bash
+echo hi
+```
+"#;
+        let wb = parse(input);
+        assert_eq!(wb.frontmatter.default_block_timeout_secs(), Some(45));
+        assert_eq!(wb.frontmatter.block_policy(1).timeout_secs, None);
+    }
+
+    #[test]
+    fn test_timeouts_default_bad_duration_falls_through() {
+        let input = r#"---
+timeouts:
+  _default: "not-a-duration"
+---
+
+```bash
+echo hi
+```
+"#;
+        let wb = parse(input);
+        // Bad duration is dropped with a warning; falls through to None.
+        assert_eq!(wb.frontmatter.default_block_timeout_secs(), None);
     }
 
     #[test]
