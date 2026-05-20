@@ -119,9 +119,9 @@ fn print_timeout_diagnostic(
 
 fn format_duration(d: Duration) -> String {
     let secs = d.as_secs();
-    if secs % 3600 == 0 && secs >= 3600 {
+    if secs >= 3600 && secs.is_multiple_of(3600) {
         format!("{}h", secs / 3600)
-    } else if secs % 60 == 0 && secs >= 60 {
+    } else if secs >= 60 && secs.is_multiple_of(60) {
         format!("{}m", secs / 60)
     } else {
         format!("{}s", secs)
@@ -892,7 +892,6 @@ fn collect_workbooks(dir: &str, order: &str) -> Vec<String> {
     files
 }
 
-#[allow(clippy::too_many_arguments)]
 #[allow(clippy::too_many_arguments)]
 fn run_folder(
     dir: &str,
