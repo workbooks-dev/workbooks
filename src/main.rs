@@ -278,6 +278,84 @@ fn selection_skip_decision() -> SkipDecision {
     }
 }
 
+/// Skip decision produced when an operator `goto_step` jumps the cursor past
+/// an executable step. Same `step.skipped` shape as the other skip kinds.
+fn goto_skip_decision() -> SkipDecision {
+    SkipDecision {
+        kind: "goto".to_string(),
+        expression: None,
+        reason: "skipped by operator goto_step".to_string(),
+    }
+}
+
+/// Validate that every navigation action declared on a `pause_for_human`
+/// resolves to a real step id (F7b), so the run page never offers a button that
+/// resolves to nothing. `rerun_step` with no target means "the current step"
+/// and is always valid. Returns the first offending target id.
+fn validate_pause_action_targets(
+    actions: &[serde_json::Value],
+    steps: &[step_ir::Step],
+) -> Result<(), String> {
+    for action in actions {
+        let kind = action.get("kind").and_then(|k| k.as_str()).unwrap_or("");
+        if kind != "rerun_step" && kind != "goto_step" {
+            continue;
+        }
+        if let Some(target) = action.get("target").and_then(|t| t.as_str()) {
+            if !steps.iter().any(|s| s.id.as_str() == target) {
+                return Err(target.to_string());
+            }
+        }
+    }
+    Ok(())
+}
+
+/// In-flight navigation the operator chose at a `pause_for_human` (F7b).
+/// `RerunStep(None)` re-runs the currently paused step; `RerunStep(Some(id))`
+/// and `GotoStep(id)` move the cursor to `id` (earlier = re-run intervening,
+/// later = skip intervening).
+#[derive(Debug, Clone, PartialEq)]
+enum ResumeAction {
+    Resume,
+    RerunStep(Option<String>),
+    GotoStep(String),
+}
+
+/// Decide the resume navigation from CLI flags and the resume signal payload.
+/// Precedence: CLI flag > signal `action` object > plain forward `Resume`.
+fn resolve_resume_action(
+    cli_rerun: &Option<Option<String>>,
+    cli_goto: &Option<String>,
+    signal: Option<&serde_json::Value>,
+) -> ResumeAction {
+    if let Some(target) = cli_goto {
+        return ResumeAction::GotoStep(target.clone());
+    }
+    if let Some(opt) = cli_rerun {
+        return ResumeAction::RerunStep(opt.clone());
+    }
+    if let Some(action) = signal.and_then(|v| v.get("action")) {
+        let kind = action
+            .get("kind")
+            .and_then(|k| k.as_str())
+            .unwrap_or("resume");
+        let target = action
+            .get("target")
+            .and_then(|t| t.as_str())
+            .map(|s| s.to_string());
+        match kind {
+            "rerun_step" => return ResumeAction::RerunStep(target),
+            "goto_step" => {
+                if let Some(t) = target {
+                    return ResumeAction::GotoStep(t);
+                }
+            }
+            _ => {}
+        }
+    }
+    ResumeAction::Resume
+}
+
 /// Resolve CLI selection flags against the workbook's step list. Empty
 /// selection (no flags) returns the full `0..block_count` range. An unknown
 /// step id is a usage error so the user finds out before the run starts.
@@ -477,6 +555,17 @@ struct ResumeArgs {
     yaml: bool,
     #[arg(long, group = "format")]
     md: bool,
+    /// Re-run a step from its first verb instead of resuming forward. With no
+    /// value, re-runs the currently paused step (the "run now" button). Takes a
+    /// step id to re-run from an earlier step. Mutually exclusive with
+    /// --goto-step.
+    #[arg(long = "rerun-step", value_name = "STEP_ID", num_args = 0..=1, group = "nav")]
+    rerun_step: Option<Option<String>>,
+    /// Jump the execution cursor to STEP_ID before resuming: an earlier id
+    /// re-runs the intervening steps, a later id skips them (emitting
+    /// step.skipped). Mutually exclusive with --rerun-step.
+    #[arg(long = "goto-step", value_name = "STEP_ID", group = "nav")]
+    goto_step: Option<String>,
 }
 
 #[derive(clap::Args)]
@@ -776,6 +865,8 @@ fn cmd_run(args: RunArgs) -> WbExit {
                 until: args.until,
             },
             default_block_timeout: cli_default_timeout,
+            browser_restart: false,
+            skipped_by_goto: std::collections::HashSet::new(),
         });
     }
     WbExit::Success
@@ -1510,6 +1601,14 @@ struct RunConfig {
     /// `timeouts._default` in precedence. `None` = no CLI default (and, if
     /// frontmatter doesn't set one either, blocks run unbounded).
     default_block_timeout: Option<Duration>,
+    /// F7b: set by `wb resume --rerun-step/--goto-step`. Suppresses browser
+    /// slice restore so the target slice runs fresh from its first verb
+    /// instead of resuming the paused slice at `verb_index + 1`.
+    browser_restart: bool,
+    /// F7b: executable block indices an operator `goto_step` jumped over. Each
+    /// emits `step.skipped` (kind "goto") during the replay prefix instead of
+    /// being replayed/executed. Empty for normal runs and resumes.
+    skipped_by_goto: std::collections::HashSet<usize>,
 }
 
 /// CLI-side selection inputs before resolution. Names mirror the flag
@@ -2040,6 +2139,8 @@ fn run_single(cfg: RunConfig) {
         env_file_relative: _,
         selection,
         default_block_timeout: cli_default_block_timeout,
+        browser_restart,
+        skipped_by_goto,
     } = cfg;
     let file = file.as_str();
     // Resolve the run-wide default block timeout once. Precedence:
@@ -2202,7 +2303,9 @@ fn run_single(cfg: RunConfig) {
             if !desc.actions.is_empty() {
                 write_pause_result(artifacts.dir(), resume_signal.as_ref());
             }
-            if desc.sidecar_state.is_some() {
+            // F7b: a rerun/goto resume runs the target slice fresh from verb 0,
+            // so skip restoring the paused slice's sidecar state.
+            if desc.sidecar_state.is_some() && !browser_restart {
                 browser_restore = Some(sidecar::RestoreArgs {
                     state: desc.sidecar_state.clone(),
                     signal: resume_signal.clone(),
@@ -2341,6 +2444,61 @@ fn run_single(cfg: RunConfig) {
 
             // Replay completed blocks to rebuild session state
             if block_idx < replay_until {
+                // F7b: an operator goto_step jumped past this step — emit
+                // step.skipped (kind "goto") instead of replaying/executing it.
+                if skipped_by_goto.contains(&block_idx) {
+                    let block_heading = last_heading.take();
+                    if !quiet {
+                        eprintln!(
+                            "{}",
+                            output::style_dim(&format!(
+                                "  ⊘ skipped [{}] (L{}) — goto_step",
+                                block.language, block.line_number
+                            ))
+                        );
+                    }
+                    let skip = goto_skip_decision();
+                    if let Some(ref cb) = cb {
+                        if should_emit_skip_callback(block.silent, workflow_payload.as_ref()) {
+                            cb.step_skipped(
+                                file,
+                                checkpoint_id.as_deref(),
+                                block_idx,
+                                step_id,
+                                &block.language,
+                                block_heading.as_deref(),
+                                block.line_number,
+                                block_idx + 1,
+                                block_count,
+                                &skip.kind,
+                                skip.expression.as_deref(),
+                                &skip.reason,
+                                &include_stack,
+                                workflow_payload.as_ref(),
+                            );
+                        }
+                    }
+                    if let (Some(ref mut c), Some(ref ckpt_id)) = (&mut ckpt, &checkpoint_id) {
+                        c.add_skip(checkpoint::SavedSkip {
+                            block_index: block_idx,
+                            step_id: step_id.map(|s| s.to_string()),
+                            language: block.language.clone(),
+                            line_number: block.line_number,
+                            heading: block_heading.clone(),
+                            kind: skip.kind,
+                            expression: skip.expression,
+                            reason: skip.reason,
+                            code_hash: Some(checkpoint::hash_code(&block.code)),
+                        });
+                        c.next_step_id = steps.get(c.next_block).map(|s| s.id.0.clone());
+                        if let Err(e) = checkpoint::save(ckpt_id, c) {
+                            eprintln!("warning: checkpoint: {}", e);
+                        }
+                    }
+                    block_idx += 1;
+                    continue;
+                }
+
                 let replayed_skip = ckpt
                     .as_ref()
                     .and_then(|c| c.skipped_step(block_idx))
@@ -2505,6 +2663,10 @@ fn run_single(cfg: RunConfig) {
             if !current_outputs.is_empty() {
                 let key = step_key(step_id, block_idx);
                 step_outputs::merge_step_outputs(&mut run_outputs, &key, &current_outputs);
+                // Export outputs into the session env (WB_OUT_<name>) so later
+                // cells' `{when=...}` / `{skip_if=...}` can branch on a value
+                // this step produced.
+                step_outputs::export_to_session(&mut session, &current_outputs);
                 if let Err(e) = step_outputs::write_outputs_file(&outputs_path, &run_outputs) {
                     eprintln!("warning: outputs file: {}", e);
                 }
@@ -2661,6 +2823,62 @@ fn run_single(cfg: RunConfig) {
             // Replay path: browser sidecars rehydrate via persistent Browserbase
             // contexts, so a completed slice doesn't need to re-execute.
             if block_idx < replay_until {
+                // F7b: an operator goto_step jumped past this slice — emit
+                // step.skipped (kind "goto") rather than treating it as a
+                // silently-replayed completed slice.
+                if skipped_by_goto.contains(&block_idx) {
+                    let block_heading = last_heading.take();
+                    if !quiet {
+                        eprintln!(
+                            "{}",
+                            output::style_dim(&format!(
+                                "  ⊘ skipped [browser] (L{}) — goto_step",
+                                spec.line_number
+                            ))
+                        );
+                    }
+                    let skip = goto_skip_decision();
+                    if let Some(ref cb) = cb {
+                        if should_emit_skip_callback(spec.silent, workflow_payload.as_ref()) {
+                            cb.step_skipped(
+                                file,
+                                checkpoint_id.as_deref(),
+                                block_idx,
+                                step_id,
+                                "browser",
+                                block_heading.as_deref(),
+                                spec.line_number,
+                                block_idx + 1,
+                                block_count,
+                                &skip.kind,
+                                skip.expression.as_deref(),
+                                &skip.reason,
+                                &include_stack,
+                                workflow_payload.as_ref(),
+                            );
+                        }
+                    }
+                    if let (Some(ref mut c), Some(ref ckpt_id)) = (&mut ckpt, &checkpoint_id) {
+                        c.add_skip(checkpoint::SavedSkip {
+                            block_index: block_idx,
+                            step_id: step_id.map(|s| s.to_string()),
+                            language: "browser".to_string(),
+                            line_number: spec.line_number,
+                            heading: block_heading.clone(),
+                            kind: skip.kind,
+                            expression: skip.expression,
+                            reason: skip.reason,
+                            code_hash: None,
+                        });
+                        c.next_step_id = steps.get(c.next_block).map(|s| s.id.0.clone());
+                        if let Err(e) = checkpoint::save(ckpt_id, c) {
+                            eprintln!("warning: checkpoint: {}", e);
+                        }
+                    }
+                    block_idx += 1;
+                    continue;
+                }
+
                 let replay_line = format!(
                     "  ↻ replaying [{}/{}] browser (L{}) — skipped",
                     block_idx + 1,
@@ -2796,6 +3014,10 @@ fn run_single(cfg: RunConfig) {
             if !current_outputs.is_empty() {
                 let key = step_key(step_id, block_idx);
                 step_outputs::merge_step_outputs(&mut run_outputs, &key, &current_outputs);
+                // Export outputs into the session env (WB_OUT_<name>) so later
+                // cells' `{when=...}` / `{skip_if=...}` can branch on a value
+                // this slice produced (e.g. an `eval` of login state).
+                step_outputs::export_to_session(&mut session, &current_outputs);
                 if let Err(e) = step_outputs::write_outputs_file(&outputs_path, &run_outputs) {
                     eprintln!("warning: outputs file: {}", e);
                 }
@@ -2862,6 +3084,7 @@ fn run_single(cfg: RunConfig) {
                     &frame_starts,
                     step_id,
                     workflow_payload.as_ref(),
+                    &steps,
                 );
                 // Unreachable — pause_browser_slice exits.
             }
@@ -3653,6 +3876,7 @@ fn pause_browser_slice(
     frame_starts: &[Instant],
     step_id: Option<&str>,
     workflow: Option<&callback::WorkflowPayload>,
+    steps: &[step_ir::Step],
 ) -> ! {
     let id = match checkpoint_id.as_deref() {
         Some(id) => id,
@@ -3664,6 +3888,16 @@ fn pause_browser_slice(
             std::process::exit(1);
         }
     };
+
+    // F7b: reject navigation actions that point at a non-existent step before
+    // we persist the paused state, so the operator never sees a dead button.
+    if let Err(bad) = validate_pause_action_targets(&pause.actions, steps) {
+        eprintln!(
+            "error: pause_for_human action target '{}' (L{}) does not match any step id in this workbook",
+            bad, spec.line_number
+        );
+        std::process::exit(exit_codes::EXIT_WORKBOOK_INVALID);
+    }
 
     if let Some(c) = ckpt {
         c.next_block = block_idx;
@@ -4222,9 +4456,78 @@ fn cmd_resume_cmd(cli: ResumeArgs) -> WbExit {
             None
         };
 
-        if let Some(ref sig) = signal_payload {
-            if let Ok(serialized) = serde_json::to_string(sig) {
-                std::env::set_var("WB_BROWSER_RESUME_SIGNAL", serialized);
+        // F7b: resolve the operator's navigation choice (CLI flag > signal
+        // `action` object > plain forward resume).
+        let action =
+            resolve_resume_action(&cli.rerun_step, &cli.goto_step, signal_payload.as_ref());
+
+        // For a rerun/goto we override the resume cursor and run the target
+        // slice fresh from verb 0 (suppressing sidecar restore). A plain resume
+        // keeps today's behavior.
+        let mut browser_restart = false;
+        let mut skipped_by_goto: std::collections::HashSet<usize> =
+            std::collections::HashSet::new();
+        if !matches!(action, ResumeAction::Resume) {
+            let content = match std::fs::read_to_string(&ckpt.workbook) {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("error: {}: {}", ckpt.workbook, e);
+                    std::process::exit(1);
+                }
+            };
+            let workbook = parse_and_resolve(&content, &ckpt.workbook);
+            let steps = workbook.build_steps();
+            let orig_paused = ckpt.next_block;
+            let target_id = match &action {
+                ResumeAction::RerunStep(None) => match steps.get(orig_paused) {
+                    Some(s) => s.id.0.clone(),
+                    None => {
+                        eprintln!("error: cannot determine the paused step to re-run");
+                        std::process::exit(exit_codes::EXIT_USAGE);
+                    }
+                },
+                ResumeAction::RerunStep(Some(id)) | ResumeAction::GotoStep(id) => id.clone(),
+                ResumeAction::Resume => unreachable!(),
+            };
+            let target_idx = match steps.iter().position(|s| s.id.as_str() == target_id) {
+                Some(i) => i,
+                None => {
+                    eprintln!("error: step id '{}' not found in workbook", target_id);
+                    std::process::exit(exit_codes::EXIT_USAGE);
+                }
+            };
+            // Point the resume cursor at the target step.
+            ckpt.next_block = target_idx;
+            ckpt.next_step_id = steps.get(target_idx).map(|s| s.id.0.clone());
+            if target_idx <= orig_paused {
+                // Backward jump / rerun: drop stale results at or after the
+                // target so the re-run doesn't double-count them.
+                ckpt.results.retain(|r| r.block_index < target_idx);
+            } else {
+                // Forward jump: mark the stepped-over executable blocks so the
+                // replay prefix emits step.skipped for them.
+                skipped_by_goto = (orig_paused..target_idx).collect();
+            }
+            browser_restart = true;
+            let verb = match &action {
+                ResumeAction::GotoStep(_) => "goto_step",
+                _ => "rerun_step",
+            };
+            eprintln!(
+                "wb: {} → step '{}' (block {})",
+                verb,
+                target_id,
+                target_idx + 1
+            );
+        }
+
+        // Only a plain forward resume re-enters the paused slice via the
+        // restore signal; a rerun/goto runs the target slice fresh.
+        if !browser_restart {
+            if let Some(ref sig) = signal_payload {
+                if let Ok(serialized) = serde_json::to_string(sig) {
+                    std::env::set_var("WB_BROWSER_RESUME_SIGNAL", serialized);
+                }
             }
         }
 
@@ -4282,6 +4585,8 @@ fn cmd_resume_cmd(cli: ResumeArgs) -> WbExit {
             // flags on the resume command would change semantics mid-run.
             selection: SelectionArgs::default(),
             default_block_timeout: None,
+            browser_restart,
+            skipped_by_goto,
         });
         return WbExit::Success;
     }
@@ -4523,6 +4828,8 @@ fn cmd_resume_cmd(cli: ResumeArgs) -> WbExit {
         env_file_relative: cli.env_file_relative,
         selection: SelectionArgs::default(),
         default_block_timeout: None,
+        browser_restart: false,
+        skipped_by_goto: std::collections::HashSet::new(),
     });
     WbExit::Success
 }
@@ -4571,6 +4878,84 @@ fn json_scalar_to_string(v: &serde_json::Value) -> Option<String> {
 mod tests {
     use super::*;
     use std::collections::HashMap;
+
+    // ─── F7b: resume navigation actions ──────────────────────────────
+
+    #[test]
+    fn resume_action_defaults_to_resume() {
+        assert_eq!(
+            resolve_resume_action(&None, &None, None),
+            ResumeAction::Resume
+        );
+    }
+
+    #[test]
+    fn resume_action_cli_flags_win() {
+        // --goto-step beats everything.
+        assert_eq!(
+            resolve_resume_action(&None, &Some("verify".into()), None),
+            ResumeAction::GotoStep("verify".into())
+        );
+        // --rerun-step with no value = current step.
+        assert_eq!(
+            resolve_resume_action(&Some(None), &None, None),
+            ResumeAction::RerunStep(None)
+        );
+        // --rerun-step <id>.
+        assert_eq!(
+            resolve_resume_action(&Some(Some("login".into())), &None, None),
+            ResumeAction::RerunStep(Some("login".into()))
+        );
+    }
+
+    #[test]
+    fn resume_action_from_signal_object() {
+        let sig = serde_json::json!({"action": {"kind": "goto_step", "target": "open-inbox"}});
+        assert_eq!(
+            resolve_resume_action(&None, &None, Some(&sig)),
+            ResumeAction::GotoStep("open-inbox".into())
+        );
+        let rerun = serde_json::json!({"action": {"kind": "rerun_step"}});
+        assert_eq!(
+            resolve_resume_action(&None, &None, Some(&rerun)),
+            ResumeAction::RerunStep(None)
+        );
+        // goto_step with no target is ignored (falls through to Resume).
+        let bad = serde_json::json!({"action": {"kind": "goto_step"}});
+        assert_eq!(
+            resolve_resume_action(&None, &None, Some(&bad)),
+            ResumeAction::Resume
+        );
+    }
+
+    #[test]
+    fn resume_action_cli_beats_signal() {
+        let sig = serde_json::json!({"action": {"kind": "goto_step", "target": "from-signal"}});
+        assert_eq!(
+            resolve_resume_action(&Some(None), &None, Some(&sig)),
+            ResumeAction::RerunStep(None)
+        );
+    }
+
+    #[test]
+    fn pause_action_targets_validated_against_steps() {
+        let wb =
+            parser::parse("```bash {#login}\necho hi\n```\n\n```bash {#verify}\necho ok\n```\n");
+        let steps = wb.build_steps();
+        let ok = vec![
+            serde_json::json!({"kind": "rerun_step", "target": "verify"}),
+            serde_json::json!({"kind": "goto_step", "target": "login"}),
+            serde_json::json!({"kind": "rerun_step"}), // no target = current, valid
+            serde_json::json!({"kind": "resume"}),     // non-nav, ignored
+        ];
+        assert!(validate_pause_action_targets(&ok, &steps).is_ok());
+
+        let bad = vec![serde_json::json!({"kind": "goto_step", "target": "nope"})];
+        assert_eq!(
+            validate_pause_action_targets(&bad, &steps),
+            Err("nope".to_string())
+        );
+    }
 
     // ─── merge_signal_into_vars ──────────────────────────────────────
 

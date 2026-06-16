@@ -7,6 +7,13 @@ use serde_json::{json, Value};
 
 pub const ENV_OUTPUTS_PATH: &str = "WB_OUTPUTS_PATH";
 
+/// Prefix under which captured step outputs are exported into the session env
+/// so downstream `{when=...}` / `{skip_if=...}` (and child processes) can read a
+/// value a prior step produced. Namespaced to avoid clobbering inherited
+/// child-process env like `PATH` / `HOME`, since the session env is injected
+/// into every bash/python/etc. block.
+pub const OUTPUT_ENV_PREFIX: &str = "WB_OUT_";
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OutputKind {
@@ -111,6 +118,31 @@ pub fn callback_outputs(outputs: &StepOutputMap) -> Value {
     Value::Object(obj)
 }
 
+/// Compute the `(env_key, env_value)` pair a captured output maps to when
+/// exported into the session env. String outputs use their raw string; JSON
+/// outputs are stringified compactly so `{when=$WB_OUT_x}` can branch on them.
+pub fn output_env_pair(name: &str, output: &CapturedOutput) -> (String, String) {
+    let key = format!("{}{}", OUTPUT_ENV_PREFIX, name);
+    let value = match (&output.kind, &output.value) {
+        (OutputKind::String, Value::String(s)) => s.clone(),
+        // Defensive: a String-kind output should always carry a JSON string,
+        // but fall back to the compact rendering if it ever doesn't.
+        (_, v) => v.to_string(),
+    };
+    (key, value)
+}
+
+/// Export captured outputs into the session env under [`OUTPUT_ENV_PREFIX`] so
+/// later cells' `{when=...}` / `{skip_if=...}` and subsequent blocks can read
+/// values a prior step produced. `{silent}` steps still export — env is
+/// dataflow, not part of the notify stream.
+pub fn export_to_session(session: &mut crate::executor::Session, captured: &StepOutputMap) {
+    for (name, output) in captured {
+        let (key, value) = output_env_pair(name, output);
+        session.set_env(key, value);
+    }
+}
+
 pub fn write_outputs_file(path: &Path, outputs: &RawOutputsByStep) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|e| format!("create {}: {}", parent.display(), e))?;
@@ -191,6 +223,25 @@ output-json: nested={"ok":true}
         assert!(is_output_capture_line("output: x=y"));
         assert!(is_output_capture_line("  output-json: x=1"));
         assert!(!is_output_capture_line("not output: x=y"));
+    }
+
+    #[test]
+    fn output_env_pair_maps_string_and_json() {
+        let parsed =
+            parse_outputs("output: needs_login=1\noutput-json: count=3\noutput-json: flag=true\n")
+                .unwrap();
+        assert_eq!(
+            output_env_pair("needs_login", &parsed["needs_login"]),
+            ("WB_OUT_needs_login".to_string(), "1".to_string())
+        );
+        assert_eq!(
+            output_env_pair("count", &parsed["count"]),
+            ("WB_OUT_count".to_string(), "3".to_string())
+        );
+        assert_eq!(
+            output_env_pair("flag", &parsed["flag"]),
+            ("WB_OUT_flag".to_string(), "true".to_string())
+        );
     }
 
     #[test]

@@ -205,13 +205,31 @@ resolved secrets + `--env` CLI + `WB_*` internals), session values win on confli
 This matches what a bash block actually sees at runtime, so `skip_if=$CI` behaves
 as expected when `CI=1` is set in the parent shell.
 
+**Gating on a prior step's output** — a captured output (see "Structured step
+outputs" below) is exported into the eval env under a `WB_OUT_` prefix, so a
+later cell can branch on a value an earlier step computed. A step that prints
+`output: needs_login=1` makes `$WB_OUT_needs_login` available to every
+subsequent block's `{when=...}` / `{skip_if=...}` evaluation. This is how you
+make a pause conditional: an earlier slice evals login state and emits
+`output: needs_login=...`, then a later `browser {when=$WB_OUT_needs_login}`
+holds the `pause_for_human` — a warm/already-authenticated run skips the pause
+and runs straight through; a cold run stops. (Per-*verb* conditionals inside a
+single slice are not supported — gate at the fence level on a separate slice.)
+
+Scope note: the export feeds the `{when=}` / `{skip_if=}` evaluator (which reads
+the session env directly). It is not re-injected into already-running persistent
+shell sessions, so a bash block that ran before the output was produced won't see
+`$WB_OUT_*` in its own process env — read the value back from `$WB_OUTPUTS_PATH`
+if a cell needs it at runtime.
+
 **Skip semantics** — same as `{no-run}`: no execution, no callback, no checkpoint,
 `block_idx` does not advance. Unlike `{no-run}`, a conditionally-skipped block
 still counts toward `blocks.total` (can't be filtered at parse time), so callback
 streams show a gap (e.g. events for 1, 2, 4, 5 out of 5 blocks). Malformed
 expressions log a warning and skip the block fail-safe.
 
-See `examples/conditional-demo.md` for a runnable example.
+See `examples/conditional-demo.md` for a runnable example, and
+`examples/conditional-pause-demo.md` for gating a step on a prior step's output.
 
 ## Composing workbooks with `include:`
 
@@ -293,6 +311,8 @@ wb inspect file.md                    # Show structure without running
 wb pending                            # List paused workbooks (auto-reaps expired abort-mode descriptors)
 wb pending --no-reap                  # List without reaping — safe for automation/inspection
 wb resume <id> --signal <file>        # Resume a paused workbook with a signal payload
+wb resume <id> --rerun-step [step]    # Re-run the current (or named) step instead of resuming forward
+wb resume <id> --goto-step <step>     # Jump the cursor to a step (re-runs earlier / skips later)
 wb cancel <id>                        # Drop a paused workbook without resuming
 ```
 
@@ -326,6 +346,34 @@ echo '{"otp_code": "..."}' | wb resume my-run --signal -   # stdin (agent-style)
 ```
 
 See `examples/wait-demo.md` for an end-to-end example.
+
+### Operator navigation at a browser pause
+
+By default `wb resume` continues the paused browser slice forward (at
+`verb_index + 1`). At a `pause_for_human`, an operator can instead pick a
+different cell to run next — without restarting and losing the (expensive)
+browser session:
+
+```bash
+wb resume <id> --rerun-step            # re-run the currently paused step from verb 0
+wb resume <id> --rerun-step <step-id>  # re-run starting at an earlier step
+wb resume <id> --goto-step <step-id>   # jump the cursor to step-id
+```
+
+- `--rerun-step` (no value) is the "run now" button: log in manually in the
+  live browser, then re-run the verify step instead of bailing.
+- `--goto-step <earlier-id>` re-runs the intervening steps; `--goto-step
+  <later-id>` skips them, emitting `step.skipped` (kind `goto`) for each so the
+  run-page timeline stays honest.
+- A rerun/goto runs the target slice **fresh from its first verb** (the paused
+  slice's sidecar state is not restored). Re-running a side-effecting cell
+  re-applies its side effects — same as `wb run --from`.
+- `--rerun-step` and `--goto-step` are mutually exclusive. Targets are stable
+  `step_id`s; an unknown id is a usage error before anything runs.
+- Run pages deliver the same choice through the resume signal payload:
+  `{"action": {"kind": "goto_step", "target": "open-inbox"}}` (CLI flags win
+  over the signal). Action targets declared on a `pause_for_human`'s `actions:`
+  are validated at pause time, so the page never shows a dead button.
 
 ### Timeout reaping
 

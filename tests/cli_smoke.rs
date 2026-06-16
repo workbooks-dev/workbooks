@@ -21,6 +21,21 @@ fn unknown_flag_exits_2() {
 }
 
 #[test]
+fn resume_rerun_and_goto_are_mutually_exclusive() {
+    // F7b: --rerun-step and --goto-step are in the same clap group, so passing
+    // both is a usage error (exit 2) before any checkpoint work.
+    let output = Command::new(wb_binary())
+        .args(["resume", "some-id", "--rerun-step", "a", "--goto-step", "b"])
+        .output()
+        .expect("failed to spawn wb");
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "rerun-step + goto-step together should be a clap usage error"
+    );
+}
+
+#[test]
 fn version_subcommand_prints_version() {
     let output = Command::new(wb_binary())
         .arg("version")
