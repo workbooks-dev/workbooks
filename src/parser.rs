@@ -540,13 +540,13 @@ pub fn parse(input: &str) -> Workbook {
 /// Cycle detection tracks canonical paths of ancestors currently being
 /// resolved, so `A → B → A` is caught but `A → B, A → B` (same target included
 /// twice at different positions) is allowed.
-pub fn resolve_includes(wb: Workbook, parent_path: &Path) -> Result<Workbook, String> {
+pub fn resolve_includes(wb: Workbook, parent_path: &Path) -> crate::error::WbResult<Workbook> {
     let parent_canonical = parent_path.canonicalize().map_err(|e| {
-        format!(
+        crate::error::WbError::Workbook(format!(
             "cannot resolve workbook path {}: {}",
             parent_path.display(),
             e
-        )
+        ))
     })?;
     let mut visiting = HashSet::new();
     visiting.insert(parent_canonical.clone());
@@ -618,7 +618,8 @@ fn resolve_sections(
     base_dir: &Path,
     id_root: &Path,
     visiting: &mut HashSet<PathBuf>,
-) -> Result<Vec<Section>, String> {
+) -> crate::error::WbResult<Vec<Section>> {
+    use crate::error::WbError;
     let mut out = Vec::new();
     for section in sections {
         match section {
@@ -626,28 +627,28 @@ fn resolve_sections(
                 let where_ = include_origin_label(&spec);
                 let target = base_dir.join(&spec.path);
                 let target_canonical = target.canonicalize().map_err(|e| {
-                    format!(
+                    WbError::Workbook(format!(
                         "{}: cannot resolve path '{}' (relative to {}): {}",
                         where_,
                         spec.path,
                         base_dir.display(),
                         e
-                    )
+                    ))
                 })?;
                 if visiting.contains(&target_canonical) {
-                    return Err(format!(
+                    return Err(WbError::Workbook(format!(
                         "{}: circular include of '{}' (already being resolved)",
                         where_,
                         target_canonical.display()
-                    ));
+                    )));
                 }
                 let content = fs::read_to_string(&target_canonical).map_err(|e| {
-                    format!(
+                    WbError::Workbook(format!(
                         "{}: cannot read '{}': {}",
                         where_,
                         target_canonical.display(),
                         e
-                    )
+                    ))
                 })?;
                 let inner = parse(&content);
                 let inner_base = target_canonical
@@ -1117,10 +1118,11 @@ impl Frontmatter {
 
 /// Parse durations like "30s", "5m", "2h", "1d" into seconds.
 /// Bare integers are treated as seconds.
-pub fn parse_duration_secs(s: &str) -> Result<u64, String> {
+pub fn parse_duration_secs(s: &str) -> crate::error::WbResult<u64> {
+    use crate::error::WbError;
     let trimmed = s.trim();
     if trimmed.is_empty() {
-        return Err("empty duration".to_string());
+        return Err(WbError::Parse("empty duration".to_string()));
     }
     let (num_part, unit) = match trimmed.chars().last() {
         Some(c) if c.is_ascii_alphabetic() => (&trimmed[..trimmed.len() - 1], c),
@@ -1129,13 +1131,13 @@ pub fn parse_duration_secs(s: &str) -> Result<u64, String> {
     let n: u64 = num_part
         .trim()
         .parse()
-        .map_err(|_| format!("invalid duration '{}'", s))?;
+        .map_err(|_| WbError::Parse(format!("invalid duration '{}'", s)))?;
     let mult = match unit.to_ascii_lowercase() {
         's' => 1,
         'm' => 60,
         'h' => 60 * 60,
         'd' => 60 * 60 * 24,
-        _ => return Err(format!("unknown duration unit '{}'", unit)),
+        _ => return Err(WbError::Parse(format!("unknown duration unit '{}'", unit))),
     };
     Ok(n * mult)
 }
@@ -2331,7 +2333,9 @@ echo "after login"
         let a = write_temp(&dir, "a.md", "```include\npath: ./b.md\n```\n");
         write_temp(&dir, "b.md", "```include\npath: ./a.md\n```\n");
         let wb = parse(&std::fs::read_to_string(&a).unwrap());
-        let err = resolve_includes(wb, &a).expect_err("should detect cycle");
+        let err = resolve_includes(wb, &a)
+            .expect_err("should detect cycle")
+            .to_string();
         assert!(
             err.contains("circular include"),
             "expected cycle error, got: {}",
@@ -2345,7 +2349,9 @@ echo "after login"
         let dir = fresh_tempdir("missing");
         let parent = write_temp(&dir, "a.md", "```include\npath: ./does-not-exist.md\n```\n");
         let wb = parse(&std::fs::read_to_string(&parent).unwrap());
-        let err = resolve_includes(wb, &parent).expect_err("should fail on missing file");
+        let err = resolve_includes(wb, &parent)
+            .expect_err("should fail on missing file")
+            .to_string();
         assert!(
             err.contains("cannot resolve path"),
             "expected resolution error, got: {}",
@@ -2640,7 +2646,9 @@ echo after-include
             "---\nrequired: [./nope.md]\n---\n\n```bash\necho hi\n```\n",
         );
         let wb = parse(&std::fs::read_to_string(&parent).unwrap());
-        let err = resolve_includes(wb, &parent).expect_err("missing required");
+        let err = resolve_includes(wb, &parent)
+            .expect_err("missing required")
+            .to_string();
         // Error mentions "required" not "include at L0".
         assert!(err.contains("required"), "error: {err}");
         assert!(err.contains("nope.md"), "error: {err}");
@@ -2661,7 +2669,9 @@ echo after-include
             "---\nrequired: [./a.md]\n---\n\n```bash\necho hi\n```\n",
         );
         let wb = parse(&std::fs::read_to_string(&parent).unwrap());
-        let err = resolve_includes(wb, &parent).expect_err("should detect cycle");
+        let err = resolve_includes(wb, &parent)
+            .expect_err("should detect cycle")
+            .to_string();
         assert!(err.contains("circular"), "error: {err}");
         let _ = std::fs::remove_dir_all(&dir);
     }

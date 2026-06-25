@@ -5,6 +5,7 @@ use fs4::fs_std::FileExt;
 use serde::{Deserialize, Serialize};
 
 use crate::checkpoint;
+use crate::error::{WbError, WbResult};
 use crate::parser::{self, BindSpec, WaitSpec};
 
 /// Pending-signal descriptor written next to a paused checkpoint.
@@ -117,32 +118,35 @@ where
     Ok(result)
 }
 
-pub fn save(id: &str, desc: &PendingDescriptor) -> Result<(), String> {
+pub fn save(id: &str, desc: &PendingDescriptor) -> WbResult<()> {
     let dir = checkpoint::checkpoint_dir();
-    std::fs::create_dir_all(&dir).map_err(|e| format!("create checkpoint dir: {}", e))?;
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| WbError::Io(format!("create checkpoint dir: {}", e)))?;
     let path = descriptor_path(id);
-    let json =
-        serde_json::to_string_pretty(desc).map_err(|e| format!("serialize descriptor: {}", e))?;
+    let json = serde_json::to_string_pretty(desc)
+        .map_err(|e| WbError::Io(format!("serialize descriptor: {}", e)))?;
     crate::atomic_io::write_secret_file(&path, json.as_bytes())
-        .map_err(|e| format!("write descriptor: {}", e))?;
+        .map_err(|e| WbError::Io(format!("write descriptor: {}", e)))?;
     Ok(())
 }
 
-pub fn load(id: &str) -> Result<Option<PendingDescriptor>, String> {
+pub fn load(id: &str) -> WbResult<Option<PendingDescriptor>> {
     let path = descriptor_path(id);
     if !path.exists() {
         return Ok(None);
     }
-    let content = std::fs::read_to_string(&path).map_err(|e| format!("read descriptor: {}", e))?;
-    let desc: PendingDescriptor =
-        serde_json::from_str(&content).map_err(|e| format!("parse descriptor: {}", e))?;
+    let content = std::fs::read_to_string(&path)
+        .map_err(|e| WbError::Io(format!("read descriptor: {}", e)))?;
+    let desc: PendingDescriptor = serde_json::from_str(&content)
+        .map_err(|e| WbError::Io(format!("parse descriptor: {}", e)))?;
     Ok(Some(desc))
 }
 
-pub fn delete(id: &str) -> Result<(), String> {
+pub fn delete(id: &str) -> WbResult<()> {
     let path = descriptor_path(id);
     if path.exists() {
-        std::fs::remove_file(&path).map_err(|e| format!("remove descriptor: {}", e))?;
+        std::fs::remove_file(&path)
+            .map_err(|e| WbError::Io(format!("remove descriptor: {}", e)))?;
     }
     Ok(())
 }

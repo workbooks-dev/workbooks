@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use crate::error::{WbError, WbResult};
 use crate::parser;
 
 /// Signal configuration from env vars / CLI flags.
@@ -37,22 +38,22 @@ impl SignalConfig {
 pub fn read_signal(
     config: &SignalConfig,
     checkpoint_id: &str,
-) -> Result<Option<HashMap<String, String>>, String> {
+) -> WbResult<Option<HashMap<String, String>>> {
     let _ = rustls::crypto::ring::default_provider().install_default();
 
     let client = redis::Client::open(config.url.as_str())
-        .map_err(|e| format!("signal: redis client: {}", e))?;
+        .map_err(|e| WbError::Io(format!("signal: redis client: {}", e)))?;
 
     let mut conn = client
         .get_connection_with_timeout(std::time::Duration::from_secs(5))
-        .map_err(|e| format!("signal: redis connect: {}", e))?;
+        .map_err(|e| WbError::Io(format!("signal: redis connect: {}", e)))?;
 
     let key = config.signal_redis_key(checkpoint_id);
 
     let value: Option<String> = redis::cmd("GET")
         .arg(&key)
         .query(&mut conn)
-        .map_err(|e| format!("signal: GET {}: {}", key, e))?;
+        .map_err(|e| WbError::Io(format!("signal: GET {}: {}", key, e)))?;
 
     let value = match value {
         Some(v) => v,
@@ -63,11 +64,11 @@ pub fn read_signal(
     let _: () = redis::cmd("DEL")
         .arg(&key)
         .query(&mut conn)
-        .map_err(|e| format!("signal: DEL {}: {}", key, e))?;
+        .map_err(|e| WbError::Io(format!("signal: DEL {}: {}", key, e)))?;
 
     // Parse as JSON object → HashMap
     let parsed: serde_json::Value = serde_json::from_str(&value)
-        .map_err(|e| format!("signal: parse JSON from {}: {}", key, e))?;
+        .map_err(|e| WbError::Parse(format!("signal: parse JSON from {}: {}", key, e)))?;
 
     let mut vars = HashMap::new();
     match parsed {
@@ -91,11 +92,7 @@ pub fn read_signal(
 
 /// Archive a signal payload to the complete key with TTL.
 #[allow(dead_code)]
-pub fn archive_signal(
-    config: &SignalConfig,
-    checkpoint_id: &str,
-    payload: &str,
-) -> Result<(), String> {
+pub fn archive_signal(config: &SignalConfig, checkpoint_id: &str, payload: &str) -> WbResult<()> {
     let complete_key = match config.complete_redis_key(checkpoint_id) {
         Some(k) => k,
         None => return Ok(()), // no complete key configured, skip
@@ -104,11 +101,11 @@ pub fn archive_signal(
     let _ = rustls::crypto::ring::default_provider().install_default();
 
     let client = redis::Client::open(config.url.as_str())
-        .map_err(|e| format!("signal: redis client: {}", e))?;
+        .map_err(|e| WbError::Io(format!("signal: redis client: {}", e)))?;
 
     let mut conn = client
         .get_connection_with_timeout(std::time::Duration::from_secs(5))
-        .map_err(|e| format!("signal: redis connect: {}", e))?;
+        .map_err(|e| WbError::Io(format!("signal: redis connect: {}", e)))?;
 
     let _: () = redis::cmd("SET")
         .arg(&complete_key)
@@ -116,7 +113,7 @@ pub fn archive_signal(
         .arg("EX")
         .arg(config.ttl_secs)
         .query(&mut conn)
-        .map_err(|e| format!("signal: SET {}: {}", complete_key, e))?;
+        .map_err(|e| WbError::Io(format!("signal: SET {}: {}", complete_key, e)))?;
 
     Ok(())
 }
@@ -126,7 +123,7 @@ pub fn archive_signal(
 #[allow(clippy::type_complexity)]
 pub fn find_ready_signal(
     config: &SignalConfig,
-) -> Result<Option<(String, HashMap<String, String>)>, String> {
+) -> WbResult<Option<(String, HashMap<String, String>)>> {
     let descriptors = crate::pending::list_all();
 
     for (id, _desc) in &descriptors {
@@ -173,7 +170,7 @@ pub fn bind_signal_vars(
 }
 
 /// Parse duration strings like "7d", "24h", "3600" into seconds.
-pub fn parse_ttl(s: &str) -> Result<u64, String> {
+pub fn parse_ttl(s: &str) -> WbResult<u64> {
     crate::parser::parse_duration_secs(s)
 }
 

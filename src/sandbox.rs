@@ -4,18 +4,21 @@ use std::process::Command;
 
 use sha2::{Digest, Sha256};
 
+use crate::error::{WbError, WbResult};
 use crate::parser::RequiresConfig;
 
 const IMAGE_PREFIX: &str = "wb-sandbox";
 const LABEL_KEY: &str = "dev.workbooks.sandbox";
 
 /// Generate a Dockerfile from a RequiresConfig.
-pub fn generate_dockerfile(config: &RequiresConfig) -> Result<String, String> {
+pub fn generate_dockerfile(config: &RequiresConfig) -> WbResult<String> {
     match config.sandbox.as_str() {
         "python" => Ok(generate_python_dockerfile(config)),
         "node" => Ok(generate_node_dockerfile(config)),
-        "custom" => Err("custom sandbox uses a user-provided Dockerfile".to_string()),
-        other => Err(format!("unknown sandbox type: {}", other)),
+        "custom" => Err(WbError::Sandbox(
+            "custom sandbox uses a user-provided Dockerfile".to_string(),
+        )),
+        other => Err(WbError::Sandbox(format!("unknown sandbox type: {}", other))),
     }
 }
 
@@ -141,7 +144,7 @@ pub fn image_exists(tag: &str) -> bool {
 }
 
 /// Build a sandbox image. Returns the image tag on success.
-pub fn build_image(config: &RequiresConfig, workbook_dir: &str) -> Result<String, String> {
+pub fn build_image(config: &RequiresConfig, workbook_dir: &str) -> WbResult<String> {
     let tag = image_tag(config);
 
     if image_exists(&tag) {
@@ -151,10 +154,9 @@ pub fn build_image(config: &RequiresConfig, workbook_dir: &str) -> Result<String
     eprintln!("wb: building sandbox image {}...", tag);
 
     if config.sandbox == "custom" {
-        let dockerfile = config
-            .dockerfile
-            .as_deref()
-            .ok_or("sandbox: custom requires a dockerfile field")?;
+        let dockerfile = config.dockerfile.as_deref().ok_or_else(|| {
+            WbError::Sandbox("sandbox: custom requires a dockerfile field".to_string())
+        })?;
 
         let dockerfile_path = if Path::new(dockerfile).is_absolute() {
             dockerfile.to_string()
@@ -166,7 +168,10 @@ pub fn build_image(config: &RequiresConfig, workbook_dir: &str) -> Result<String
         };
 
         if !Path::new(&dockerfile_path).exists() {
-            return Err(format!("dockerfile not found: {}", dockerfile_path));
+            return Err(WbError::Sandbox(format!(
+                "dockerfile not found: {}",
+                dockerfile_path
+            )));
         }
 
         let output = Command::new("docker")
@@ -181,17 +186,17 @@ pub fn build_image(config: &RequiresConfig, workbook_dir: &str) -> Result<String
                 workbook_dir,
             ])
             .output()
-            .map_err(|e| format!("docker build: {}", e))?;
+            .map_err(|e| WbError::Sandbox(format!("docker build: {}", e)))?;
 
         if !output.status.success() {
-            return Err(format!(
+            return Err(WbError::Sandbox(format!(
                 "docker build failed:\n{}",
                 String::from_utf8_lossy(&output.stderr)
-            ));
+            )));
         }
     } else {
-        let dockerfile_content =
-            generate_dockerfile(config).map_err(|e| format!("generate dockerfile: {}", e))?;
+        let dockerfile_content = generate_dockerfile(config)
+            .map_err(|e| WbError::Sandbox(format!("generate dockerfile: {}", e)))?;
 
         let output = Command::new("docker")
             .args(["build", "-t", &tag, "-f", "-", "."])
@@ -200,25 +205,25 @@ pub fn build_image(config: &RequiresConfig, workbook_dir: &str) -> Result<String
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .spawn()
-            .map_err(|e| format!("docker build: {}", e))
+            .map_err(|e| WbError::Sandbox(format!("docker build: {}", e)))
             .and_then(|mut child| {
                 use std::io::Write;
                 if let Some(ref mut stdin) = child.stdin {
                     stdin
                         .write_all(dockerfile_content.as_bytes())
-                        .map_err(|e| format!("write dockerfile: {}", e))?;
+                        .map_err(|e| WbError::Sandbox(format!("write dockerfile: {}", e)))?;
                 }
                 drop(child.stdin.take());
                 child
                     .wait_with_output()
-                    .map_err(|e| format!("docker: {}", e))
+                    .map_err(|e| WbError::Sandbox(format!("docker: {}", e)))
             })?;
 
         if !output.status.success() {
-            return Err(format!(
+            return Err(WbError::Sandbox(format!(
                 "docker build failed:\n{}",
                 String::from_utf8_lossy(&output.stderr)
-            ));
+            )));
         }
     }
 
@@ -233,15 +238,15 @@ pub fn run_in_sandbox(
     workbook_path: &str,
     env: &HashMap<String, String>,
     extra_args: &[String],
-) -> Result<i32, String> {
+) -> WbResult<i32> {
     let workbook_abs = std::fs::canonicalize(workbook_path)
-        .map_err(|e| format!("canonicalize {}: {}", workbook_path, e))?;
+        .map_err(|e| WbError::Sandbox(format!("canonicalize {}: {}", workbook_path, e)))?;
     let workbook_dir = workbook_abs
         .parent()
-        .ok_or("workbook has no parent directory")?;
+        .ok_or_else(|| WbError::Sandbox("workbook has no parent directory".to_string()))?;
     let workbook_filename = workbook_abs
         .file_name()
-        .ok_or("workbook has no filename")?
+        .ok_or_else(|| WbError::Sandbox("workbook has no filename".to_string()))?
         .to_string_lossy();
 
     let home = std::env::var("HOME").unwrap_or_else(|_| "/root".to_string());
@@ -292,7 +297,9 @@ pub fn run_in_sandbox(
     cmd.stdout(std::process::Stdio::inherit());
     cmd.stderr(std::process::Stdio::inherit());
 
-    let status = cmd.status().map_err(|e| format!("docker run: {}", e))?;
+    let status = cmd
+        .status()
+        .map_err(|e| WbError::Sandbox(format!("docker run: {}", e)))?;
 
     Ok(status.code().unwrap_or(-1))
 }

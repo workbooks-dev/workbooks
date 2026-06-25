@@ -4,6 +4,7 @@ mod callback;
 mod checkpoint;
 mod diagnostic;
 mod doctor;
+mod error;
 mod executor;
 mod exit;
 mod exit_codes;
@@ -38,8 +39,13 @@ fn parse_and_resolve(content: &str, file: &str) -> parser::Workbook {
     match parser::resolve_includes(wb, Path::new(file)) {
         Ok(resolved) => resolved,
         Err(e) => {
-            eprintln!("wb: {}", e);
-            std::process::exit(exit_codes::EXIT_WORKBOOK_INVALID);
+            // The exit code rides on the error category (`WbError::Workbook`
+            // → `EXIT_WORKBOOK_INVALID`) rather than being hardcoded here.
+            let exit = WbExit::from(e);
+            if let Some(msg) = exit.message() {
+                eprintln!("wb: {}", msg);
+            }
+            std::process::exit(exit.code());
         }
     }
 }
@@ -1323,7 +1329,7 @@ fn run_single_collect(
                         block_index: 0,
                         language: "env-file".to_string(),
                         stdout: String::new(),
-                        stderr: e,
+                        stderr: e.to_string(),
                         exit_code: 1,
                         duration: std::time::Duration::ZERO,
                         error_type: Some("env_file_failed".to_string()),
@@ -3870,7 +3876,7 @@ fn pause_browser_slice(
     file: &str,
     block_idx: usize,
     cb: Option<&callback::CallbackConfig>,
-    heading: Option<&str>,
+    _heading: Option<&str>,
     pause: sidecar::PauseInfo,
     include_chain: &[parser::IncludeFrame],
     frame_starts: &[Instant],
@@ -3939,74 +3945,12 @@ fn pause_browser_slice(
             id,
             pause.reason.as_deref().or(Some("browser.slice_paused")),
             None,
-            None,
+            desc.timeout_at.as_deref(),
             include_chain,
             workflow,
         );
-        // Also fire step.paused with slice context for consumers that want
-        // granular detail (verb index, live-view URL, heading, etc.).
-        // The pause_for_human payload (message, context_url, resume_on,
-        // timeout, actions) is merged in here too so the run page can
-        // render the operator-facing prompt from a single event instead
-        // of joining across step.paused + the pending descriptor.
-        let mut extra = serde_json::Map::new();
-        if let Some(reason) = pause.reason.as_ref() {
-            extra.insert(
-                "reason".to_string(),
-                serde_json::Value::String(reason.clone()),
-            );
-        }
-        if let Some(url) = pause.resume_url.as_ref() {
-            extra.insert(
-                "resume_url".to_string(),
-                serde_json::Value::String(url.clone()),
-            );
-        }
-        if let Some(vi) = pause.verb_index {
-            extra.insert(
-                "verb_index".to_string(),
-                serde_json::Value::Number(vi.into()),
-            );
-        }
-        if let Some(m) = pause.message.as_ref() {
-            extra.insert("message".to_string(), serde_json::Value::String(m.clone()));
-        }
-        if let Some(u) = pause.context_url.as_ref() {
-            extra.insert(
-                "context_url".to_string(),
-                serde_json::Value::String(u.clone()),
-            );
-        }
-        if let Some(r) = pause.resume_on.as_ref() {
-            extra.insert(
-                "resume_on".to_string(),
-                serde_json::Value::String(r.clone()),
-            );
-        }
-        if let Some(t) = pause.timeout.as_ref() {
-            extra.insert("timeout".to_string(), serde_json::Value::String(t.clone()));
-        }
-        if !pause.actions.is_empty() {
-            extra.insert(
-                "actions".to_string(),
-                serde_json::Value::Array(pause.actions.clone()),
-            );
-        }
-        cb.step_lifecycle(
-            "step.paused",
-            file,
-            Some(id),
-            block_idx,
-            "browser",
-            heading,
-            spec.line_number,
-            block_idx,
-            0,
-            serde_json::Value::Object(extra),
-            include_chain,
-            step_id,
-            workflow,
-        );
+        // The sidecar already emitted the granular `step.paused` lifecycle
+        // event before returning `PauseInfo`; do not duplicate it here.
         // Same bubble-up as pause_for_signal: close active frames with
         // outcome=paused so the run-page timeline freezes.
         emit_paused_finish_snapshot(Some(cb), file, Some(id), include_chain, frame_starts);

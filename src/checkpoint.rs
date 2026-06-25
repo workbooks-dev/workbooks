@@ -6,6 +6,7 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use crate::error::{WbError, WbResult};
 use crate::executor::BlockResult;
 use crate::step_outputs::RawOutputsByStep;
 
@@ -282,33 +283,36 @@ pub fn checkpoint_path(id: &str) -> PathBuf {
     checkpoint_dir().join(format!("{}.json", id))
 }
 
-pub fn delete(id: &str) -> Result<(), String> {
+pub fn delete(id: &str) -> WbResult<()> {
     let path = checkpoint_path(id);
     if path.exists() {
-        std::fs::remove_file(&path).map_err(|e| format!("remove checkpoint: {}", e))?;
+        std::fs::remove_file(&path)
+            .map_err(|e| WbError::Io(format!("remove checkpoint: {}", e)))?;
     }
     Ok(())
 }
 
-pub fn save(id: &str, checkpoint: &Checkpoint) -> Result<(), String> {
+pub fn save(id: &str, checkpoint: &Checkpoint) -> WbResult<()> {
     let dir = checkpoint_dir();
-    std::fs::create_dir_all(&dir).map_err(|e| format!("create checkpoint dir: {}", e))?;
+    std::fs::create_dir_all(&dir)
+        .map_err(|e| WbError::Io(format!("create checkpoint dir: {}", e)))?;
     let path = checkpoint_path(id);
     let json = serde_json::to_string_pretty(checkpoint)
-        .map_err(|e| format!("serialize checkpoint: {}", e))?;
+        .map_err(|e| WbError::Io(format!("serialize checkpoint: {}", e)))?;
     crate::atomic_io::write_secret_file(&path, json.as_bytes())
-        .map_err(|e| format!("write checkpoint: {}", e))?;
+        .map_err(|e| WbError::Io(format!("write checkpoint: {}", e)))?;
     Ok(())
 }
 
-pub fn load(id: &str) -> Result<Option<Checkpoint>, String> {
+pub fn load(id: &str) -> WbResult<Option<Checkpoint>> {
     let path = checkpoint_path(id);
     if !path.exists() {
         return Ok(None);
     }
-    let content = std::fs::read_to_string(&path).map_err(|e| format!("read checkpoint: {}", e))?;
-    let checkpoint: Checkpoint =
-        serde_json::from_str(&content).map_err(|e| format!("parse checkpoint: {}", e))?;
+    let content = std::fs::read_to_string(&path)
+        .map_err(|e| WbError::Io(format!("read checkpoint: {}", e)))?;
+    let checkpoint: Checkpoint = serde_json::from_str(&content)
+        .map_err(|e| WbError::Io(format!("parse checkpoint: {}", e)))?;
     Ok(Some(checkpoint))
 }
 

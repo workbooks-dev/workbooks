@@ -2,10 +2,11 @@ use std::collections::HashMap;
 use std::io::{self, BufRead, Write};
 use std::process::Command;
 
+use crate::error::{WbError, WbResult};
 use crate::parser::{SecretProvider, SecretsConfig};
 
 /// Resolve all secrets from configured providers into env vars
-pub fn resolve_secrets(config: &SecretsConfig) -> Result<HashMap<String, String>, String> {
+pub fn resolve_secrets(config: &SecretsConfig) -> WbResult<HashMap<String, String>> {
     let providers = match config {
         SecretsConfig::Single(p) => vec![p],
         SecretsConfig::Multiple(ps) => ps.iter().collect(),
@@ -19,7 +20,7 @@ pub fn resolve_secrets(config: &SecretsConfig) -> Result<HashMap<String, String>
     Ok(env)
 }
 
-fn resolve_provider(provider: &SecretProvider) -> Result<HashMap<String, String>, String> {
+fn resolve_provider(provider: &SecretProvider) -> WbResult<HashMap<String, String>> {
     match provider.provider.as_str() {
         "env" => resolve_env(provider),
         "doppler" => resolve_doppler(provider),
@@ -27,12 +28,15 @@ fn resolve_provider(provider: &SecretProvider) -> Result<HashMap<String, String>
         "command" | "cmd" => resolve_command(provider),
         "prompt" => resolve_prompt(provider),
         "file" | "dotenv" => resolve_dotenv(provider),
-        other => Err(format!("Unknown secret provider: {}", other)),
+        other => Err(WbError::Secret(format!(
+            "Unknown secret provider: {}",
+            other
+        ))),
     }
 }
 
 /// Pull specific keys from the current environment
-fn resolve_env(provider: &SecretProvider) -> Result<HashMap<String, String>, String> {
+fn resolve_env(provider: &SecretProvider) -> WbResult<HashMap<String, String>> {
     let mut env = HashMap::new();
     if let Some(ref keys) = provider.keys {
         for key in keys {
@@ -45,25 +49,28 @@ fn resolve_env(provider: &SecretProvider) -> Result<HashMap<String, String>, Str
 }
 
 /// Fetch secrets from Doppler CLI
-fn resolve_doppler(provider: &SecretProvider) -> Result<HashMap<String, String>, String> {
+fn resolve_doppler(provider: &SecretProvider) -> WbResult<HashMap<String, String>> {
     let mut cmd = Command::new("doppler");
     cmd.args(["secrets", "download", "--no-file", "--format", "json"]);
     if let Some(ref project) = provider.project {
         cmd.args(["--project", project]);
     }
 
-    let output = cmd
-        .output()
-        .map_err(|e| format!("Failed to run doppler: {}. Is doppler CLI installed?", e))?;
+    let output = cmd.output().map_err(|e| {
+        WbError::Secret(format!(
+            "Failed to run doppler: {}. Is doppler CLI installed?",
+            e
+        ))
+    })?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("doppler failed: {}", stderr));
+        return Err(WbError::Secret(format!("doppler failed: {}", stderr)));
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let map: HashMap<String, serde_json::Value> = serde_json::from_str(&stdout)
-        .map_err(|e| format!("Failed to parse doppler output: {}", e))?;
+        .map_err(|e| WbError::Secret(format!("Failed to parse doppler output: {}", e)))?;
 
     Ok(map
         .into_iter()
@@ -72,7 +79,7 @@ fn resolve_doppler(provider: &SecretProvider) -> Result<HashMap<String, String>,
 }
 
 /// Fetch secrets from Yard CLI (yard env get)
-fn resolve_yard(provider: &SecretProvider) -> Result<HashMap<String, String>, String> {
+fn resolve_yard(provider: &SecretProvider) -> WbResult<HashMap<String, String>> {
     let command = provider
         .command
         .as_deref()
@@ -82,21 +89,22 @@ fn resolve_yard(provider: &SecretProvider) -> Result<HashMap<String, String>, St
 }
 
 /// Run an arbitrary command that outputs KEY=VALUE lines or JSON
-fn resolve_command(provider: &SecretProvider) -> Result<HashMap<String, String>, String> {
+fn resolve_command(provider: &SecretProvider) -> WbResult<HashMap<String, String>> {
     let command = provider
         .command
         .as_deref()
-        .ok_or("command provider requires a 'command' field")?;
+        .ok_or_else(|| WbError::Secret("command provider requires a 'command' field".into()))?;
 
     resolve_shell_command(command)
 }
 
 /// Interactively prompt for secret values
-fn resolve_prompt(provider: &SecretProvider) -> Result<HashMap<String, String>, String> {
-    let keys = provider
-        .keys
-        .as_ref()
-        .ok_or("prompt provider requires 'keys' field listing which secrets to ask for")?;
+fn resolve_prompt(provider: &SecretProvider) -> WbResult<HashMap<String, String>> {
+    let keys = provider.keys.as_ref().ok_or_else(|| {
+        WbError::Secret(
+            "prompt provider requires 'keys' field listing which secrets to ask for".into(),
+        )
+    })?;
 
     let mut env = HashMap::new();
     let stdin = io::stdin();
@@ -108,7 +116,7 @@ fn resolve_prompt(provider: &SecretProvider) -> Result<HashMap<String, String>, 
         let mut value = String::new();
         reader
             .read_line(&mut value)
-            .map_err(|e| format!("Failed to read input: {}", e))?;
+            .map_err(|e| WbError::Secret(format!("Failed to read input: {}", e)))?;
         env.insert(key.clone(), value.trim().to_string());
     }
 
@@ -116,29 +124,32 @@ fn resolve_prompt(provider: &SecretProvider) -> Result<HashMap<String, String>, 
 }
 
 /// Load secrets from a .env / dotenv file
-fn resolve_dotenv(provider: &SecretProvider) -> Result<HashMap<String, String>, String> {
+fn resolve_dotenv(provider: &SecretProvider) -> WbResult<HashMap<String, String>> {
     let path = provider.command.as_deref().unwrap_or(".env");
 
     load_env_file(path)
 }
 
 /// Read a .env-style file from disk and parse it into a map of env vars.
-pub fn load_env_file(path: &str) -> Result<HashMap<String, String>, String> {
-    let contents =
-        std::fs::read_to_string(path).map_err(|e| format!("Failed to read {}: {}", path, e))?;
+pub fn load_env_file(path: &str) -> WbResult<HashMap<String, String>> {
+    let contents = std::fs::read_to_string(path)
+        .map_err(|e| WbError::Secret(format!("Failed to read {}: {}", path, e)))?;
     Ok(parse_env_lines(&contents))
 }
 
 /// Run a shell command and parse its output as env vars
-fn resolve_shell_command(command: &str) -> Result<HashMap<String, String>, String> {
+fn resolve_shell_command(command: &str) -> WbResult<HashMap<String, String>> {
     let output = Command::new("sh")
         .args(["-c", command])
         .output()
-        .map_err(|e| format!("Failed to run '{}': {}", command, e))?;
+        .map_err(|e| WbError::Secret(format!("Failed to run '{}': {}", command, e)))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("Command '{}' failed: {}", command, stderr));
+        return Err(WbError::Secret(format!(
+            "Command '{}' failed: {}",
+            command, stderr
+        )));
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);

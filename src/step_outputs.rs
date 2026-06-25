@@ -5,6 +5,8 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
+use crate::error::{WbError, WbResult};
+
 pub const ENV_OUTPUTS_PATH: &str = "WB_OUTPUTS_PATH";
 
 /// Prefix under which captured step outputs are exported into the session env
@@ -60,14 +62,15 @@ pub fn init_outputs_path(
     path
 }
 
-pub fn parse_outputs(stdout: &str) -> Result<StepOutputMap, String> {
+pub fn parse_outputs(stdout: &str) -> WbResult<StepOutputMap> {
     let mut outputs = StepOutputMap::new();
     for line in stdout.lines() {
         let trimmed = line.trim_start();
         if let Some(rest) = trimmed.strip_prefix("output-json:") {
             let (name, raw) = parse_assignment(rest, "output-json")?;
-            let value: Value = serde_json::from_str(raw.trim())
-                .map_err(|e| format!("output-json: {} has invalid JSON: {}", name, e))?;
+            let value: Value = serde_json::from_str(raw.trim()).map_err(|e| {
+                WbError::Parse(format!("output-json: {} has invalid JSON: {}", name, e))
+            })?;
             outputs.insert(
                 name.to_string(),
                 CapturedOutput {
@@ -143,9 +146,10 @@ pub fn export_to_session(session: &mut crate::executor::Session, captured: &Step
     }
 }
 
-pub fn write_outputs_file(path: &Path, outputs: &RawOutputsByStep) -> Result<(), String> {
+pub fn write_outputs_file(path: &Path, outputs: &RawOutputsByStep) -> WbResult<()> {
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|e| format!("create {}: {}", parent.display(), e))?;
+        fs::create_dir_all(parent)
+            .map_err(|e| WbError::Io(format!("create {}: {}", parent.display(), e)))?;
     }
     let payload = json!({
         "steps": outputs.iter().map(|(step, values)| {
@@ -153,23 +157,26 @@ pub fn write_outputs_file(path: &Path, outputs: &RawOutputsByStep) -> Result<(),
         }).collect::<serde_json::Map<String, Value>>()
     });
     let bytes = serde_json::to_vec_pretty(&payload)
-        .map_err(|e| format!("serialize {}: {}", path.display(), e))?;
+        .map_err(|e| WbError::Io(format!("serialize {}: {}", path.display(), e)))?;
     crate::atomic_io::write_secret_file(path, &bytes)
-        .map_err(|e| format!("write {}: {}", path.display(), e))?;
+        .map_err(|e| WbError::Io(format!("write {}: {}", path.display(), e)))?;
     Ok(())
 }
 
-fn parse_assignment<'a>(rest: &'a str, prefix: &str) -> Result<(&'a str, &'a str), String> {
+fn parse_assignment<'a>(rest: &'a str, prefix: &str) -> WbResult<(&'a str, &'a str)> {
     let rest = rest.trim_start();
     let Some((name, value)) = rest.split_once('=') else {
-        return Err(format!("{} line must be `{} name=value`", prefix, prefix));
+        return Err(WbError::Parse(format!(
+            "{} line must be `{} name=value`",
+            prefix, prefix
+        )));
     };
     let name = name.trim();
     if !valid_output_name(name) {
-        return Err(format!(
+        return Err(WbError::Parse(format!(
             "{} name '{}' is invalid; expected [A-Za-z_][A-Za-z0-9_]*",
             prefix, name
-        ));
+        )));
     }
     Ok((name, value))
 }

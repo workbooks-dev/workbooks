@@ -2,6 +2,8 @@ use std::env;
 use std::fs;
 use std::process::Command;
 
+use crate::error::{WbError, WbResult};
+
 const REPO: &str = "workbooks-dev/workbooks";
 const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -107,7 +109,7 @@ pub fn cmd_version() {
     println!("wb v{}", CURRENT_VERSION);
 }
 
-fn fetch_latest_version() -> Result<String, String> {
+fn fetch_latest_version() -> WbResult<String> {
     // Hit /releases (not /releases/latest) and pick the newest tag that
     // matches the wb-CLI naming convention (`v<semver>`). The multi-product
     // repo also ships `browser-runtime-v*` tags; those must be ignored or
@@ -122,10 +124,10 @@ fn fetch_latest_version() -> Result<String, String> {
             &format!("https://api.github.com/repos/{}/releases?per_page=30", REPO),
         ])
         .output()
-        .map_err(|e| format!("curl failed: {}", e))?;
+        .map_err(|e| WbError::Io(format!("curl failed: {}", e)))?;
 
     if !output.status.success() {
-        return Err("GitHub API request failed".to_string());
+        return Err(WbError::Io("GitHub API request failed".to_string()));
     }
 
     let body = String::from_utf8_lossy(&output.stdout);
@@ -145,7 +147,9 @@ fn fetch_latest_version() -> Result<String, String> {
         }
     }
 
-    Err("could not parse version from GitHub response".to_string())
+    Err(WbError::Io(
+        "could not parse version from GitHub response".to_string(),
+    ))
 }
 
 /// The wb-CLI release tag shape: `v<digit>...`. Anything else (e.g.
@@ -176,11 +180,11 @@ fn download(url: &str, dest: &std::path::Path) -> bool {
     matches!(status, Ok(s) if s.success())
 }
 
-fn replace_binary(src: &std::path::Path, dest: &std::path::Path) -> Result<(), String> {
+fn replace_binary(src: &std::path::Path, dest: &std::path::Path) -> WbResult<()> {
     // Rename old binary first (atomic on same filesystem)
     let backup = dest.with_extension("old");
     let _ = fs::remove_file(&backup); // ignore if doesn't exist
-    fs::rename(dest, &backup).map_err(|e| format!("rename current: {}", e))?;
+    fs::rename(dest, &backup).map_err(|e| WbError::Io(format!("rename current: {}", e)))?;
     match fs::rename(src, dest) {
         Ok(_) => {
             let _ = fs::remove_file(&backup);
@@ -189,7 +193,7 @@ fn replace_binary(src: &std::path::Path, dest: &std::path::Path) -> Result<(), S
         Err(e) => {
             // Restore backup
             let _ = fs::rename(&backup, dest);
-            Err(format!("replace: {}", e))
+            Err(WbError::Io(format!("replace: {}", e)))
         }
     }
 }

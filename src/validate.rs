@@ -372,7 +372,8 @@ fn check_includes(wb: &Workbook, path: &Path, out: &mut Vec<Diagnostic>) {
         path,
     ) {
         Ok(_) => {}
-        Err(msg) => {
+        Err(err) => {
+            let msg = err.message();
             let code = if msg.contains("circular") {
                 "wb-inc-002"
             } else if msg.contains("cannot read") {
@@ -490,8 +491,30 @@ fn field_to_legacy_key(field: &str) -> &str {
 }
 
 fn check_workflow_nodes(wb: &Workbook, path: &Path, out: &mut Vec<Diagnostic>) {
-    let declared = crate::workflow::declared_node_ids(&wb.frontmatter);
-    if declared.is_empty() {
+    let Some(workflow) = wb.frontmatter.workflow.as_ref() else {
+        return;
+    };
+    let Some(workflow_obj) = workflow.as_object() else {
+        out.push(Diagnostic::error(
+            "wb-workflow-002",
+            path,
+            "workflow must be a mapping/object",
+        ));
+        return;
+    };
+    let Some(nodes_value) = workflow_obj.get("nodes") else {
+        return;
+    };
+    let Some(nodes) = nodes_value.as_object() else {
+        out.push(Diagnostic::error(
+            "wb-workflow-002",
+            path,
+            "workflow.nodes must be a mapping/object keyed by step id",
+        ));
+        return;
+    };
+
+    if nodes.is_empty() {
         return;
     }
     let mut step_ids: std::collections::BTreeSet<String> =
@@ -503,8 +526,31 @@ fn check_workflow_nodes(wb: &Workbook, path: &Path, out: &mut Vec<Diagnostic>) {
             }
         }
     }
-    for id in declared {
-        if !step_ids.contains(&id) {
+
+    for (id, node) in nodes {
+        let Some(node_obj) = node.as_object() else {
+            out.push(Diagnostic::error(
+                "wb-workflow-002",
+                path,
+                format!("workflow.nodes.{id} must be a mapping/object"),
+            ));
+            continue;
+        };
+        let primitive_ok = node_obj
+            .get("primitive")
+            .and_then(|v| v.as_str())
+            .is_some_and(|s| !s.trim().is_empty());
+        if !primitive_ok {
+            out.push(
+                Diagnostic::warning(
+                    "wb-workflow-003",
+                    path,
+                    format!("workflow.nodes.{id}.primitive should be a non-empty string"),
+                )
+                .with_help("callbacks compact each workflow node to id, primitive, and title"),
+            );
+        }
+        if !step_ids.contains(id.as_str()) {
             out.push(
                 Diagnostic::warning(
                     "wb-workflow-001",
@@ -710,6 +756,57 @@ bind: approved
         assert!(
             !diags.iter().any(|d| d.code == "wb-workflow-001"),
             "wait ids should satisfy workflow node declarations, got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn workflow_must_be_object() {
+        let diags = validate_content(
+            "---\nworkflow: not-a-map\n---\n\n```bash\necho ok\n```\n",
+            Path::new("wf.md"),
+            &ValidateOptions { strict: false },
+        );
+        assert!(
+            diags.iter().any(|d| d.code == "wb-workflow-002"),
+            "expected wb-workflow-002, got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn workflow_nodes_must_be_object() {
+        let diags = validate_content(
+            "---\nworkflow:\n  slug: demo\n  nodes: [bad]\n---\n\n```bash\necho ok\n```\n",
+            Path::new("wf.md"),
+            &ValidateOptions { strict: false },
+        );
+        assert!(
+            diags.iter().any(|d| d.code == "wb-workflow-002"),
+            "expected wb-workflow-002, got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn workflow_node_without_primitive_warns() {
+        let diags = validate_content(
+            r#"---
+workflow:
+  slug: demo
+  nodes:
+    export:
+      title: Export
+---
+```bash {#export}
+echo ok
+```
+"#,
+            Path::new("wf.md"),
+            &ValidateOptions { strict: false },
+        );
+        assert!(
+            diags
+                .iter()
+                .any(|d| d.code == "wb-workflow-003" && d.severity == Severity::Warning),
+            "expected wb-workflow-003 warning, got: {diags:?}"
         );
     }
 

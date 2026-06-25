@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 
 use serde_json::{json, Value};
 
@@ -29,7 +29,8 @@ impl WorkflowContext {
     }
 }
 
-pub fn declared_node_ids(frontmatter: &Frontmatter) -> BTreeSet<String> {
+#[cfg(test)]
+pub fn declared_node_ids(frontmatter: &Frontmatter) -> std::collections::BTreeSet<String> {
     frontmatter
         .workflow
         .as_ref()

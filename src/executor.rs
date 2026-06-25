@@ -6,6 +6,7 @@ use std::sync::mpsc::{self, Receiver};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use crate::error::{WbError, WbResult};
 use crate::parser::{BrowserSliceSpec, CodeBlock, DirConfig, ExecConfig, Frontmatter};
 use crate::sidecar::{PauseInfo, RestoreArgs, Sidecar, SliceCallbackContext};
 
@@ -455,7 +456,8 @@ impl Session {
                 Err(e) => {
                     // spawn_persistent now returns spawn_error_message text
                     // for ENOENT; propagate the type so agents branch on it.
-                    let kind = if e.starts_with('`') && e.contains("not found on PATH") {
+                    let msg = e.message();
+                    let kind = if msg.starts_with('`') && msg.contains("not found on PATH") {
                         "spawn_not_found"
                     } else {
                         "spawn_failed"
@@ -464,7 +466,7 @@ impl Session {
                         block_index: index,
                         language: block.language.clone(),
                         stdout: String::new(),
-                        stderr: e,
+                        stderr: e.to_string(),
                         exit_code: 127,
                         duration: start.elapsed(),
                         error_type: Some(kind.to_string()),
@@ -577,14 +579,14 @@ impl Session {
                 Ok(sc) => self.browser_sidecar = Some(sc),
                 Err(e) => {
                     if !self.ctx.quiet {
-                        crate::output::print_stderr_dim(&e);
+                        crate::output::print_stderr_dim(&e.to_string());
                     }
                     return (
                         BlockResult {
                             block_index: index,
                             language: "browser".to_string(),
                             stdout: String::new(),
-                            stderr: e,
+                            stderr: e.to_string(),
                             exit_code: 127,
                             duration: start.elapsed(),
                             error_type: Some("spawn_not_found".to_string()),
@@ -667,7 +669,7 @@ fn spawn_persistent(
     working_dir: &str,
     venv: &Option<String>,
     exec_config: &Option<ExecConfig>,
-) -> Result<PersistentProcess, String> {
+) -> WbResult<PersistentProcess> {
     let mut cmd_env = env.clone();
 
     let (program, args): (&str, Vec<String>) = match lang {
@@ -703,7 +705,7 @@ fn spawn_persistent(
         "zsh" => ("zsh", vec![]),
         "node" => ("node", vec!["-e".to_string(), NODE_HARNESS.to_string()]),
         "ruby" => ("ruby", vec!["-e".to_string(), RUBY_HARNESS.to_string()]),
-        _ => return Err(format!("No session support for {}", lang)),
+        _ => return Err(WbError::Io(format!("No session support for {}", lang))),
     };
 
     // exec: "docker exec mycontainer"     → docker exec mycontainer python3 -u -c <harness>
@@ -727,7 +729,7 @@ fn spawn_persistent(
 
     let mut child = cmd
         .spawn()
-        .map_err(|e| spawn_error_message(&effective_program, lang, &e))?;
+        .map_err(|e| WbError::Io(spawn_error_message(&effective_program, lang, &e)))?;
 
     let stdin = BufWriter::new(child.stdin.take().unwrap());
     let stdout = child.stdout.take().unwrap();

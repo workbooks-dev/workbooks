@@ -297,6 +297,53 @@ fn build_step_skipped_payload(
 }
 
 #[allow(clippy::too_many_arguments)]
+fn build_step_lifecycle_payload(
+    event: &str,
+    workbook: &str,
+    checkpoint_id: Option<&str>,
+    block_index: usize,
+    language: &str,
+    heading: Option<&str>,
+    line_number: usize,
+    completed: usize,
+    total: usize,
+    extra: serde_json::Value,
+    run_id: &str,
+    include_chain: &[IncludeFrame],
+    step_id: Option<&str>,
+    workflow: Option<&WorkflowPayload>,
+) -> serde_json::Value {
+    let mut payload = json!({
+        "event": event,
+        "event_version": EVENT_VERSION,
+        "run_id": run_id,
+        "checkpoint_id": checkpoint_id,
+        "workbook": workbook,
+        "block": {
+            "index": block_index,
+            "step_id": step_id,
+            "language": language,
+            "heading": heading,
+            "line_number": line_number,
+        },
+        "progress": {
+            "completed": completed,
+            "total": total,
+        },
+        "include_chain": chain_to_json(include_chain),
+        "timestamp": Utc::now().to_rfc3339(),
+    });
+    // Merge sidecar-supplied top-level fields (slice, reason, resume_url, ...).
+    if let (Some(obj), Some(extra_obj)) = (payload.as_object_mut(), extra.as_object()) {
+        for (k, v) in extra_obj {
+            obj.insert(k.clone(), v.clone());
+        }
+    }
+    attach_workflow(&mut payload, workflow);
+    payload
+}
+
+#[allow(clippy::too_many_arguments)]
 fn build_workbook_paused_payload(
     workbook: &str,
     checkpoint_id: &str,
@@ -539,33 +586,22 @@ impl CallbackConfig {
         step_id: Option<&str>,
         workflow: Option<&WorkflowPayload>,
     ) {
-        let mut payload = json!({
-            "event": event,
-            "event_version": EVENT_VERSION,
-            "run_id": &self.run_id,
-            "checkpoint_id": checkpoint_id,
-            "workbook": workbook,
-            "block": {
-                "index": block_index,
-                "step_id": step_id,
-                "language": language,
-                "heading": heading,
-                "line_number": line_number,
-            },
-            "progress": {
-                "completed": completed,
-                "total": total,
-            },
-            "include_chain": chain_to_json(include_chain),
-            "timestamp": Utc::now().to_rfc3339(),
-        });
-        // Merge sidecar-supplied top-level fields (slice, reason, resume_url, ...).
-        if let (Some(obj), Some(extra_obj)) = (payload.as_object_mut(), extra.as_object()) {
-            for (k, v) in extra_obj {
-                obj.insert(k.clone(), v.clone());
-            }
-        }
-        attach_workflow(&mut payload, workflow);
+        let payload = build_step_lifecycle_payload(
+            event,
+            workbook,
+            checkpoint_id,
+            block_index,
+            language,
+            heading,
+            line_number,
+            completed,
+            total,
+            extra,
+            &self.run_id,
+            include_chain,
+            step_id,
+            workflow,
+        );
         self.send(event, &payload.to_string());
     }
 
@@ -1243,38 +1279,43 @@ mod tests {
 
     #[test]
     fn test_step_lifecycle_envelope_shape() {
-        // We can't assert on send() side effects without a network, but we can
-        // re-build the payload inline to confirm shape by replicating the
-        // builder's logic for a known extra blob.
         let extra = json!({
             "slice": { "verb_index": 7 },
             "reason": "airbase_totp",
             "resume_url": "https://browserbase/live/abc123",
         });
-        let mut payload = json!({
-            "event": "step.paused",
-            "event_version": EVENT_VERSION,
-            "checkpoint_id": "ckpt-1",
-            "workbook": "airbase-login",
-            "block": {
-                "index": 2,
-                "language": "browser",
-                "heading": "Login",
-                "line_number": 18,
-            },
-            "progress": { "completed": 2, "total": 5 },
-            "timestamp": Utc::now().to_rfc3339(),
-        });
-        if let (Some(obj), Some(extra_obj)) = (payload.as_object_mut(), extra.as_object()) {
-            for (k, v) in extra_obj {
-                obj.insert(k.clone(), v.clone());
-            }
-        }
+        let workflow = WorkflowPayload {
+            workflow: json!({"slug": "login-flow"}),
+            workflow_node: json!({"id": "login", "primitive": "browser/login", "title": "Login"}),
+        };
+        let payload = build_step_lifecycle_payload(
+            "step.paused",
+            "airbase-login",
+            Some("ckpt-1"),
+            2,
+            "browser",
+            Some("Login"),
+            18,
+            3,
+            5,
+            extra,
+            "run-lifecycle",
+            &[],
+            Some("login"),
+            Some(&workflow),
+        );
         assert_eq!(payload["event"], "step.paused");
+        assert_eq!(payload["event_version"], EVENT_VERSION);
+        assert_eq!(payload["run_id"], "run-lifecycle");
+        assert_eq!(payload["checkpoint_id"], "ckpt-1");
         assert_eq!(payload["block"]["language"], "browser");
+        assert_eq!(payload["block"]["step_id"], "login");
+        assert_eq!(payload["progress"]["completed"], 3);
+        assert_eq!(payload["progress"]["total"], 5);
         assert_eq!(payload["slice"]["verb_index"], 7);
         assert_eq!(payload["reason"], "airbase_totp");
         assert_eq!(payload["resume_url"], "https://browserbase/live/abc123");
+        assert_eq!(payload["workflow_node"]["id"], "login");
     }
 
     #[test]

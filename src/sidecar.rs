@@ -25,6 +25,7 @@ use serde_json::{json, Value};
 
 use crate::callback::CallbackConfig;
 use crate::callback::WorkflowPayload;
+use crate::error::{WbError, WbResult};
 use crate::parser::BrowserSliceSpec;
 
 /// Binary name we look for on $PATH when WB_BROWSER_RUNTIME is unset.
@@ -166,7 +167,7 @@ fn shutdown_timeout() -> Duration {
 
 impl Sidecar {
     /// Spawn the sidecar and complete the hello/ready handshake.
-    pub fn spawn(env: &HashMap<String, String>, working_dir: &str) -> Result<Self, String> {
+    pub fn spawn(env: &HashMap<String, String>, working_dir: &str) -> WbResult<Self> {
         let binary = resolve_binary()?;
 
         let mut cmd = Command::new(&binary);
@@ -180,7 +181,7 @@ impl Sidecar {
 
         let mut child = cmd
             .spawn()
-            .map_err(|e| format!("failed to spawn sidecar {}: {}", binary, e))?;
+            .map_err(|e| WbError::Sidecar(format!("failed to spawn sidecar {}: {}", binary, e)))?;
 
         let stdin = BufWriter::new(child.stdin.take().unwrap());
         let stdout = child.stdout.take().unwrap();
@@ -224,12 +225,12 @@ impl Sidecar {
     /// `wb resume` can reconnect to the same vendor session. Unlike Drop's
     /// shutdown path, the sidecar must not close the browser or release the
     /// vendor session.
-    pub fn suspend(&mut self) -> Result<(), String> {
+    pub fn suspend(&mut self) -> WbResult<()> {
         writeln!(self.stdin, "{}", json!({ "type": "suspend" }))
-            .map_err(|e| format!("sidecar suspend write failed: {}", e))?;
+            .map_err(|e| WbError::Sidecar(format!("sidecar suspend write failed: {}", e)))?;
         self.stdin
             .flush()
-            .map_err(|e| format!("sidecar suspend flush failed: {}", e))?;
+            .map_err(|e| WbError::Sidecar(format!("sidecar suspend flush failed: {}", e)))?;
 
         let deadline = Instant::now() + shutdown_timeout();
         loop {
@@ -239,39 +240,44 @@ impl Sidecar {
                     return Ok(());
                 }
                 Ok(None) if Instant::now() >= deadline => {
-                    return Err(format!(
+                    return Err(WbError::Sidecar(format!(
                         "sidecar {} did not suspend within {}s",
                         self.binary,
                         shutdown_timeout().as_secs()
-                    ));
+                    )));
                 }
                 Ok(None) => thread::sleep(Duration::from_millis(100)),
-                Err(e) => return Err(format!("sidecar suspend wait failed: {}", e)),
+                Err(e) => {
+                    return Err(WbError::Sidecar(format!(
+                        "sidecar suspend wait failed: {}",
+                        e
+                    )))
+                }
             }
         }
     }
 
-    fn handshake(&mut self) -> Result<(), String> {
+    fn handshake(&mut self) -> WbResult<()> {
         let hello = json!({
             "type": "hello",
             "wb_version": env!("CARGO_PKG_VERSION"),
             "protocol": "wb-sidecar/1",
         });
         writeln!(self.stdin, "{}", hello)
-            .map_err(|e| format!("sidecar handshake write failed: {}", e))?;
+            .map_err(|e| WbError::Sidecar(format!("sidecar handshake write failed: {}", e)))?;
         self.stdin
             .flush()
-            .map_err(|e| format!("sidecar handshake flush failed: {}", e))?;
+            .map_err(|e| WbError::Sidecar(format!("sidecar handshake flush failed: {}", e)))?;
 
         let deadline = Instant::now() + HANDSHAKE_TIMEOUT;
         loop {
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
-                return Err(format!(
+                return Err(WbError::Sidecar(format!(
                     "sidecar {} did not reply `ready` within {}s",
                     self.binary,
                     HANDSHAKE_TIMEOUT.as_secs()
-                ));
+                )));
             }
             match self.events.recv_timeout(remaining) {
                 Ok(line) => {
@@ -284,14 +290,17 @@ impl Sidecar {
                     }
                 }
                 Err(RecvTimeoutError::Timeout) => {
-                    return Err(format!(
+                    return Err(WbError::Sidecar(format!(
                         "sidecar {} did not reply `ready` within {}s",
                         self.binary,
                         HANDSHAKE_TIMEOUT.as_secs()
-                    ));
+                    )));
                 }
                 Err(RecvTimeoutError::Disconnected) => {
-                    return Err(format!("sidecar {} exited during handshake", self.binary));
+                    return Err(WbError::Sidecar(format!(
+                        "sidecar {} exited during handshake",
+                        self.binary
+                    )));
                 }
             }
         }
@@ -610,7 +619,7 @@ fn derive_lifecycle_event_name(slice_event: &str) -> String {
 ///
 /// 1. `WB_BROWSER_RUNTIME` env var — absolute path or bare command name.
 /// 2. `wb-browser-runtime` on `$PATH`.
-fn resolve_binary() -> Result<String, String> {
+fn resolve_binary() -> WbResult<String> {
     if let Ok(p) = std::env::var("WB_BROWSER_RUNTIME") {
         if !p.trim().is_empty() {
             return Ok(p);
@@ -619,11 +628,11 @@ fn resolve_binary() -> Result<String, String> {
     if which_on_path(DEFAULT_SIDECAR_BINARY).is_some() {
         return Ok(DEFAULT_SIDECAR_BINARY.to_string());
     }
-    Err(format!(
+    Err(WbError::Sidecar(format!(
         "browser runtime binary not found. Install with `npm i -g {name}` (requires \
 Node 18+), or set WB_BROWSER_RUNTIME=/path/to/{name} to point at a custom build.",
         name = DEFAULT_SIDECAR_BINARY
-    ))
+    )))
 }
 
 fn which_on_path(name: &str) -> Option<PathBuf> {

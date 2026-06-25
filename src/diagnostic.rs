@@ -19,6 +19,9 @@
 //   wb-secret-001 bad secret provider name
 //   wb-step-001  duplicate explicit step id
 //   wb-step-002  fence-attr policy shadows a legacy block-number map entry
+//   wb-workflow-001 workflow node id has no matching step or wait id
+//   wb-workflow-002 workflow/workflow.nodes shape is not a mapping/object
+//   wb-workflow-003 workflow node primitive is missing or not a non-empty string
 
 use serde::Serialize;
 use std::path::PathBuf;
