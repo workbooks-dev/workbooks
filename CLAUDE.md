@@ -31,6 +31,7 @@ workbooks/
 │   ├── pending.rs     # Pending-signal descriptors for paused workbooks (`wait`)
 │   ├── callback.rs    # HTTP webhook notifications with HMAC signing
 │   ├── secrets.rs     # Secret providers (doppler, yard, env, dotenv, prompt)
+│   ├── mcp.rs         # `wb mcp` — Model Context Protocol server over stdio
 │   └── output.rs      # Results markdown formatter
 └── examples/
     ├── hello.md
@@ -441,6 +442,7 @@ wb config set callback.url <url>      # Persist machine-wide defaults in ~/.wb/c
 wb config list                        # Show set values + known keys (also: get/unset/path)
 wb completion <shell>                 # Print a shell completion script (bash, zsh, fish, …)
 wb man                                # Print a roff man page to stdout
+wb mcp                                # Run a Model Context Protocol server over stdio (for agents)
 wb version --format json              # Management commands take --format text|json
 wb --log-level error <cmd>            # Global stderr verbosity (error|warn|info|debug)
 ```
@@ -617,6 +619,58 @@ Headers sent:
 - `X-WB-Signature: sha256=<hmac-sha256-hex>` (when `--callback-secret` is set)
 
 Payloads include `checkpoint_id`, `workbook`, `progress`, and `timestamp`. The `checkpoint.failed` event includes `failed_block.stderr` for diagnostics.
+
+## MCP server (`wb mcp`)
+
+`wb mcp` exposes wb to the agent ecosystem as a **Model Context Protocol** server
+over stdio. An MCP client (Claude, an inspector, an orchestrator) can author a
+workbook, run it, get paused for human input, resume it, and read back results —
+all over JSON-RPC.
+
+```bash
+wb mcp   # speaks JSON-RPC 2.0 over newline-delimited stdin/stdout; logs to stderr
+```
+
+It is a **thin adapter, not a daemon**. The core stays a CLI: `wb mcp` shells out
+to the same `wb` binary (`current_exe`) for `run`/`inspect`/`validate`/`resume`/
+`pending`, and reads checkpoint + pending state in-process (read-only) for
+`get_run_events`. This is deliberate — `run_single` diverges via `process::exit`
+on pause (code 42) and completion, so a subprocess boundary is what turns that
+exit code into a value the server can map without the run engine killing the
+long-lived server. Zero new dependencies (`serde_json` only). Implemented in
+`src/mcp.rs`.
+
+**Tools** (`tools/list`):
+
+- `author_workbook {path, content, overwrite?}` — write a `.md` workbook to disk.
+- `run_workbook {file, run_id?, vars?, dir?, bail?}` — execute. Returns `run_id`
+  (= checkpoint id) and a task `status`. `bail` defaults true.
+- `resume_workbook {run_id, value? | signal? | action?, rerun_step?, goto_step?}` —
+  satisfy a paused run. `value` is the single-bind shortcut; `signal` is a full
+  JSON payload; `action`/`rerun_step`/`goto_step` map to the resume navigation
+  flags.
+- `inspect_workbook {file}` / `validate_workbook {file, strict?}` — structure /
+  static analysis as JSON (no execution).
+- `list_pending {}` — runs awaiting input (read-only; does not reap timeouts).
+- `get_run_events {run_id}` — replay a run's step timeline (`step.complete` /
+  `step.skipped` + a terminal event) reconstructed from the durable checkpoint.
+
+**State mapping (durable execution → MCP primitives):**
+
+- **Checkpoint + pending descriptor = the Task store.** A run is keyed by a
+  `run_id` that is also its checkpoint id; `list_pending` is the set of tasks
+  awaiting input; `get_run_events` is a task's timeline.
+- **`pause_for_human` / `wait` → elicitation.** A paused run returns
+  `status: "input_required"` plus an `elicitation` object (message + a
+  `requestedSchema` with one property per bound var). The client collects the
+  input and calls `resume_workbook`. We surface this as data-in-the-result
+  rather than a server-initiated `elicitation/create` round-trip because the
+  producing subprocess has already exited — there is nothing to hold open.
+- **Task status rides on the child exit code:** 0 → `completed`,
+  42 → `input_required`, 1 → `failed`, 7 → `timeout`, others → an error category.
+
+The full author→run→pause→resume→read lifecycle is covered end-to-end by
+`tests/mcp_e2e.rs`, which drives the JSON-RPC server exactly as a client would.
 
 ## Sandbox execution
 

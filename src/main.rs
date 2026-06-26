@@ -11,6 +11,7 @@ mod executor;
 mod exit;
 mod exit_codes;
 mod logging;
+mod mcp;
 mod output;
 mod params;
 mod parser;
@@ -754,6 +755,8 @@ enum Command {
     },
     /// Print a man page (roff) for `wb` to stdout.
     Man,
+    /// Run a Model Context Protocol server over stdio (for MCP clients/agents).
+    Mcp,
 }
 
 /// Bare-run args: the flags that work when the user types `wb file.md` without
@@ -878,6 +881,7 @@ fn main() -> std::process::ExitCode {
         }
         Some(Command::Completion { shell }) => cmd_completion(shell),
         Some(Command::Man) => cmd_man(),
+        Some(Command::Mcp) => mcp::run(),
         None => {
             let mut bare = cli.bare_run;
             let Some(file) = bare.file.take() else {
