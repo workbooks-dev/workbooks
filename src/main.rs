@@ -641,6 +641,26 @@ enum RunsSub {
 }
 
 #[derive(clap::Args)]
+struct CaptureArgs {
+    /// Output workbook path (default: stdout).
+    #[arg(short, long)]
+    output: Option<String>,
+    /// Runtime language for captured commands.
+    #[arg(long, default_value = "bash")]
+    runtime: String,
+    /// Add an `expect` fence after each block asserting its exit code (and a
+    /// stdout substring when the output is short + quote-safe).
+    #[arg(long)]
+    assert: bool,
+    /// Title for the generated workbook.
+    #[arg(long)]
+    title: Option<String>,
+    /// Working directory to run the captured commands in.
+    #[arg(short = 'C', long)]
+    dir: Option<String>,
+}
+
+#[derive(clap::Args)]
 struct WatchArgs {
     /// Checkpoint id of the run to watch (the `--checkpoint <id>` of `wb run`).
     id: String,
@@ -838,6 +858,8 @@ enum Command {
     Runs(RunsArgs),
     /// Watch a checkpointed run live (progress, results, pending waits).
     Watch(WatchArgs),
+    /// Capture a sequence of commands (from stdin) into a runnable workbook.
+    Capture(CaptureArgs),
     Doctor(DoctorArgs),
     Pending(PendingArgs),
     Resume(ResumeArgs),
@@ -977,6 +999,7 @@ fn main() -> std::process::ExitCode {
         Some(Command::Artifacts(args)) => cmd_artifacts(args),
         Some(Command::Runs(args)) => cmd_runs(args),
         Some(Command::Watch(args)) => cmd_watch(args),
+        Some(Command::Capture(args)) => cmd_capture(args),
         Some(Command::Doctor(args)) => cmd_doctor(args),
         Some(Command::Pending(args)) => cmd_pending_cmd(args),
         Some(Command::Resume(args)) => cmd_resume_cmd(args),
@@ -1378,6 +1401,114 @@ fn cmd_runs(args: RunsArgs) -> WbExit {
             WbExit::Success
         }
     }
+}
+
+/// `wb capture` (#41) — read a sequence of shell commands from stdin, run each
+/// in a real session, and emit a runnable workbook with each command as a block
+/// (optionally followed by an `expect` fence asserting the observed exit code +
+/// a stdout substring). One command per line; `#`-prefixed lines become
+/// Markdown headings. Turns an ad-hoc session into a checked-in, re-runnable
+/// runbook. PTY/interactive recording is a future extension.
+fn cmd_capture(args: CaptureArgs) -> WbExit {
+    use std::io::Read;
+    let mut input = String::new();
+    if std::io::stdin().read_to_string(&mut input).is_err() {
+        eprintln!("error: capture reads commands from stdin");
+        return WbExit::Usage("capture: no stdin".to_string());
+    }
+
+    // Build a minimal execution session for the chosen runtime.
+    let fm = parser::Frontmatter {
+        runtime: Some(args.runtime.clone()),
+        ..Default::default()
+    };
+    let mut ctx = executor::ExecutionContext::from_frontmatter(&fm, "capture");
+    if let Some(ref d) = args.dir {
+        ctx.working_dir = d.clone();
+    }
+    ctx.quiet = true;
+    let mut session = executor::Session::new(ctx);
+
+    let mut md = String::new();
+    md.push_str("---\n");
+    if let Some(ref t) = args.title {
+        md.push_str(&format!("title: {t}\n"));
+    }
+    md.push_str(&format!("runtime: {}\n", args.runtime));
+    md.push_str("---\n\n");
+    if let Some(ref t) = args.title {
+        md.push_str(&format!("# {t}\n\n"));
+    }
+
+    let mut idx = 0usize;
+    for raw in input.lines() {
+        let line = raw.trim_end();
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        // `#` lines become Markdown prose rather than commands.
+        if let Some(comment) = trimmed.strip_prefix("# ") {
+            md.push_str(&format!("## {comment}\n\n"));
+            continue;
+        }
+
+        let block = parser::CodeBlock {
+            language: args.runtime.clone(),
+            code: line.to_string(),
+            line_number: 0,
+            skip_execution: false,
+            silent: false,
+            when: None,
+            skip_if: None,
+            no_cache: false,
+            attrs: Default::default(),
+        };
+        let result = session.execute_block(&block, idx);
+        idx += 1;
+
+        md.push_str(&format!("```{}\n{}\n```\n\n", args.runtime, line));
+
+        if args.assert {
+            let mut asserts = format!("exit {}\n", result.exit_code);
+            if let Some(sub) = capture_stdout_assertion(&result.stdout) {
+                asserts.push_str(&format!("stdout contains \"{sub}\"\n"));
+            }
+            md.push_str(&format!("```expect\n{asserts}```\n\n"));
+        }
+    }
+
+    if idx == 0 {
+        eprintln!("wb capture: no commands on stdin");
+        return WbExit::Usage("capture: empty input".to_string());
+    }
+
+    match args.output {
+        Some(path) => match std::fs::write(&path, &md) {
+            Ok(_) => {
+                eprintln!("wb: captured {idx} command(s) → {path}");
+                WbExit::Success
+            }
+            Err(e) => {
+                eprintln!("error: write {path}: {e}");
+                WbExit::Io(e.to_string())
+            }
+        },
+        None => {
+            print!("{md}");
+            WbExit::Success
+        }
+    }
+}
+
+/// Pick a stable, quote-safe stdout substring for a capture assertion, or
+/// `None` when the output isn't a good fit (empty, multi-token noise, quotes).
+fn capture_stdout_assertion(stdout: &str) -> Option<String> {
+    let line = stdout.lines().find(|l| !l.trim().is_empty())?.trim();
+    if line.is_empty() || line.len() > 60 || line.contains('"') || line.contains('\\') {
+        return None;
+    }
+    Some(line.to_string())
 }
 
 /// `wb watch <id>` — a local run viewer (#35/#44). Polls the checkpoint +

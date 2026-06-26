@@ -560,3 +560,52 @@ fn changed_runs_only_edited_blocks() {
 
     std::fs::remove_dir_all(&dir).ok();
 }
+
+#[test]
+fn capture_emits_runnable_workbook() {
+    use std::io::Write;
+    let dir = std::env::temp_dir().join(format!("wb-cap-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let out = dir.join("cap.md");
+
+    let mut child = Command::new(wb_binary())
+        .args([
+            "capture",
+            "--assert",
+            "--title",
+            "Cap",
+            "-o",
+            out.to_str().unwrap(),
+        ])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn wb");
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"# Greet\necho captured-ok\n")
+        .unwrap();
+    let status = child.wait().expect("wait");
+    assert!(status.success());
+
+    let md = std::fs::read_to_string(&out).unwrap();
+    assert!(md.contains("```bash"), "should emit a bash block: {md}");
+    assert!(md.contains("echo captured-ok"));
+    assert!(md.contains("stdout contains \"captured-ok\""));
+
+    // The generated workbook must itself pass `wb test`.
+    let test = Command::new(wb_binary())
+        .args(["test", out.to_str().unwrap(), "-q"])
+        .output()
+        .expect("spawn wb");
+    assert_eq!(
+        test.status.code(),
+        Some(0),
+        "captured workbook should re-run green"
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}
