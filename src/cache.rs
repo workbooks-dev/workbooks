@@ -12,12 +12,13 @@
 //! stdout/outputs are not reproduced, so the cache is for idempotent pipelines
 //! where skipping an unchanged step is safe.
 //!
-//! Cache key = sha256(language + body + param_hash + env_hash), where
-//! `env_hash` is the env/secret identity (the wb-managed env minus `WB_*`
-//! internals). Included files are already reflected in the block body (includes
-//! expand into the step list). Runtime versions and artifact-input graphs are
-//! the remaining follow-up (#46); change the cache id or pass `--no-cache` when
-//! a runtime version changes.
+//! Cache key = sha256(language + body + param_hash + env_hash + inputs_hash):
+//! `env_hash` is the env/secret identity (wb-managed env minus `WB_*`), and
+//! `inputs_hash` is the content of the artifact inputs a block declares with
+//! `{reads=foo.csv,bar.json}` (#46) — so a block re-runs when an upstream
+//! artifact it reads changes (the inputs/outputs dependency edge). Included
+//! files are already reflected in the block body. Runtime versions remain a
+//! follow-up; change the cache id or pass `--no-cache` when one changes.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -101,10 +102,18 @@ impl CacheStore {
 }
 
 /// Compute the cache key for a block:
-/// sha256(language\0body\0param_hash\0env_hash), 16 hex. `env_hash` folds in the
-/// env/secret identity (#18) so a block re-runs when the resolved env changes,
-/// not just its source/params.
-pub fn cache_key(language: &str, body: &str, param_hash: Option<&str>, env_hash: &str) -> String {
+/// sha256(language\0body\0param_hash\0env_hash\0inputs_hash), 16 hex. `env_hash`
+/// folds in the env/secret identity (#18); `inputs_hash` folds in the content of
+/// the artifact inputs the block declares with `{reads=…}` (#46), so a block
+/// re-runs when an upstream artifact it depends on changes — the inputs/outputs
+/// dependency edge.
+pub fn cache_key(
+    language: &str,
+    body: &str,
+    param_hash: Option<&str>,
+    env_hash: &str,
+    inputs_hash: &str,
+) -> String {
     let mut hasher = Sha256::new();
     hasher.update(language.as_bytes());
     hasher.update([0u8]);
@@ -113,6 +122,38 @@ pub fn cache_key(language: &str, body: &str, param_hash: Option<&str>, env_hash:
     hasher.update(param_hash.unwrap_or("").as_bytes());
     hasher.update([0u8]);
     hasher.update(env_hash.as_bytes());
+    hasher.update([0u8]);
+    hasher.update(inputs_hash.as_bytes());
+    let digest = hasher.finalize();
+    digest.iter().take(8).map(|b| format!("{b:02x}")).collect()
+}
+
+/// Digest the content of a block's declared artifact inputs (#46). `reads` is
+/// the comma/space-separated `{reads=…}` fence-attr value; each name is resolved
+/// inside `artifacts_dir` and its bytes folded in. A missing input hashes as
+/// absent (so producing it later busts the cache). `None`/empty → a fixed
+/// "no inputs" digest, so blocks without `reads` are unaffected.
+pub fn artifact_inputs_hash(reads: Option<&str>, artifacts_dir: &std::path::Path) -> String {
+    let Some(reads) = reads else {
+        return "noinputs".to_string();
+    };
+    let mut names: Vec<&str> = reads
+        .split([',', ' '])
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .collect();
+    names.sort_unstable();
+    names.dedup();
+    let mut hasher = Sha256::new();
+    for name in names {
+        hasher.update(name.as_bytes());
+        hasher.update(b"=");
+        match std::fs::read(artifacts_dir.join(name)) {
+            Ok(bytes) => hasher.update(Sha256::digest(&bytes)),
+            Err(_) => hasher.update(b"<absent>"),
+        }
+        hasher.update(b"\n");
+    }
     let digest = hasher.finalize();
     digest.iter().take(8).map(|b| format!("{b:02x}")).collect()
 }
@@ -144,15 +185,33 @@ mod tests {
 
     #[test]
     fn key_changes_with_body_params_and_env() {
-        let a = cache_key("bash", "echo 1", None, "e0");
-        let b = cache_key("bash", "echo 2", None, "e0");
-        let c = cache_key("bash", "echo 1", Some("ff00"), "e0");
-        let d = cache_key("bash", "echo 1", None, "e1"); // env changed
+        let a = cache_key("bash", "echo 1", None, "e0", "i0");
+        let b = cache_key("bash", "echo 2", None, "e0", "i0");
+        let c = cache_key("bash", "echo 1", Some("ff00"), "e0", "i0");
+        let d = cache_key("bash", "echo 1", None, "e1", "i0"); // env changed
         assert_ne!(a, b);
         assert_ne!(a, c);
         assert_ne!(a, d);
-        assert_eq!(a, cache_key("bash", "echo 1", None, "e0"));
+        assert_eq!(a, cache_key("bash", "echo 1", None, "e0", "i0"));
         assert_eq!(a.len(), 16);
+    }
+
+    #[test]
+    fn artifact_inputs_hash_tracks_content() {
+        let dir = std::env::temp_dir().join(format!("wb-inputs-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("in.csv"), "v1").unwrap();
+        // No reads → fixed digest, independent of dir.
+        assert_eq!(artifact_inputs_hash(None, &dir), "noinputs");
+        let h1 = artifact_inputs_hash(Some("in.csv"), &dir);
+        // Changing the input's content changes the hash.
+        std::fs::write(dir.join("in.csv"), "v2").unwrap();
+        let h2 = artifact_inputs_hash(Some("in.csv"), &dir);
+        assert_ne!(h1, h2);
+        // A missing input is stable (absent marker), distinct from present.
+        let h_absent = artifact_inputs_hash(Some("nope.csv"), &dir);
+        assert_ne!(h_absent, h2);
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -170,12 +229,12 @@ mod tests {
     #[test]
     fn store_records_and_reads_success() {
         let mut s = CacheStore::default();
-        let k = cache_key("bash", "echo hi", None, "e0");
+        let k = cache_key("bash", "echo hi", None, "e0", "i0");
         assert!(!s.is_cached_success(&k));
         s.record(k.clone(), true, 0, "2026-06-26T00:00:00Z");
         assert!(s.is_cached_success(&k));
         // A failed entry is not a cache hit.
-        let k2 = cache_key("bash", "false", None, "e0");
+        let k2 = cache_key("bash", "false", None, "e0", "i0");
         s.record(k2.clone(), false, 1, "2026-06-26T00:00:00Z");
         assert!(!s.is_cached_success(&k2));
     }
@@ -183,7 +242,7 @@ mod tests {
     #[test]
     fn roundtrip_serialization() {
         let mut s = CacheStore::default();
-        s.record(cache_key("bash", "x", None, "e0"), true, 0, "t");
+        s.record(cache_key("bash", "x", None, "e0", "i0"), true, 0, "t");
         let json = serde_json::to_string(&s).unwrap();
         let back: CacheStore = serde_json::from_str(&json).unwrap();
         assert_eq!(back.entries.len(), 1);

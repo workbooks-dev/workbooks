@@ -205,7 +205,7 @@ wb run pipeline.md --cache pipe --no-cache   # force a full run
 - A side-effecting block opts out with the `{no-cache}` fence flag so it always
   runs. `--no-cache` disables caching for the whole run.
 - Skips emit `step.skipped` with `kind: "cache"`.
-- Not yet in the key (tracked under #18/#33): env/secret identity,
+- A block declares artifact inputs with `{reads=foo.csv}`; the cache key folds in their content, so it re-runs when an upstream artifact it reads changes (#46). Not yet in the key:
   included-file hashes, runtime versions. Change the cache id when those change.
 
 ### Dry-run preview: `--dry-run`

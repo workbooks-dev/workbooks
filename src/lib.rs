@@ -5228,6 +5228,10 @@ fn run_single(cfg: RunConfig) {
                     &block.code,
                     param_hash.as_deref(),
                     &cache_env_hash,
+                    &cache::artifact_inputs_hash(
+                        block.attrs.kv.get("reads").map(String::as_str),
+                        artifacts.dir(),
+                    ),
                 );
                 store.is_cached_success(&key).then(cache_skip_decision)
             });
@@ -5388,6 +5392,10 @@ fn run_single(cfg: RunConfig) {
                         &block.code,
                         param_hash.as_deref(),
                         &cache_env_hash,
+                        &cache::artifact_inputs_hash(
+                            block.attrs.kv.get("reads").map(String::as_str),
+                            artifacts.dir(),
+                        ),
                     );
                     store.record(key, result.success(), result.exit_code, &cache_now);
                 }

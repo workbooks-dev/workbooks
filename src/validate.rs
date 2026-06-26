@@ -509,7 +509,7 @@ fn field_to_legacy_key(field: &str) -> &str {
 /// runtime ignores it silently, which is exactly what `wb validate` exists to
 /// surface. `when=` / `skip_if=` are pulled into dedicated fields by the parser
 /// and never reach `kv`, so they don't need to be listed here.
-const KNOWN_KV_ATTRS: &[&str] = &["timeout", "retries", "continue_on_error"];
+const KNOWN_KV_ATTRS: &[&str] = &["timeout", "retries", "continue_on_error", "reads"];
 
 fn check_fence_attrs(wb: &Workbook, path: &Path, out: &mut Vec<Diagnostic>) {
     for step in wb.build_steps() {
