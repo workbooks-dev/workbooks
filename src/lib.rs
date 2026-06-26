@@ -11,6 +11,7 @@ pub mod error;
 mod executor;
 mod exit;
 mod exit_codes;
+mod lockfile;
 mod logging;
 mod mcp;
 mod output;
@@ -526,6 +527,13 @@ struct RunArgs {
     /// first-use integrity check — not a signature; see `wb trust`.
     #[arg(long = "require-trust")]
     require_trust: bool,
+    /// Refuse to run unless the workbook's input identity matches its lockfile
+    /// (see `wb lock`). Detects drift in the runbook or its included files.
+    #[arg(long = "locked")]
+    locked: bool,
+    /// Lockfile path for `--locked` (default: <file>.lock).
+    #[arg(long = "lockfile", value_name = "PATH")]
+    lockfile: Option<String>,
     /// Enable the source-hash execution cache under this id (`~/.wb/cache/<id>`):
     /// skip blocks whose source + params are unchanged since a prior success.
     #[arg(long = "cache", value_name = "ID")]
@@ -644,6 +652,15 @@ enum RunsSub {
         #[command(flatten)]
         fmt: FormatArg,
     },
+}
+
+#[derive(clap::Args)]
+struct LockArgs {
+    /// Workbook to lock.
+    file: String,
+    /// Lockfile path (default: <file>.lock).
+    #[arg(long = "lockfile", value_name = "PATH")]
+    lockfile: Option<String>,
 }
 
 #[derive(clap::Args)]
@@ -883,7 +900,9 @@ enum ConfigSub {
 
 #[derive(Subcommand)]
 enum Command {
-    Run(RunArgs),
+    // Boxed: RunArgs is much larger than the other variants (clippy
+    // large_enum_variant) now that it carries the full run-flag surface.
+    Run(Box<RunArgs>),
     Inspect(InspectArgs),
     Validate(ValidateArgs),
     /// Run a workbook (or folder) and evaluate its `expect`/`assert` fences.
@@ -901,6 +920,8 @@ enum Command {
     Capture(CaptureArgs),
     /// Manage the trust-on-first-use store (`wb run --require-trust`).
     Trust(TrustArgs),
+    /// Write a reproducibility lockfile of a workbook's input identity (#47).
+    Lock(LockArgs),
     Doctor(DoctorArgs),
     Pending(PendingArgs),
     Resume(ResumeArgs),
@@ -997,6 +1018,10 @@ struct BareRunArgs {
     dry_run: bool,
     #[arg(long = "require-trust")]
     require_trust: bool,
+    #[arg(long = "locked")]
+    locked: bool,
+    #[arg(long = "lockfile", value_name = "PATH")]
+    lockfile: Option<String>,
     #[arg(long = "cache", value_name = "ID")]
     cache: Option<String>,
     #[arg(long = "no-cache")]
@@ -1036,7 +1061,7 @@ pub fn run() -> std::process::ExitCode {
         }
     }
     let exit = match cli.command {
-        Some(Command::Run(args)) => cmd_run(args),
+        Some(Command::Run(args)) => cmd_run(*args),
         Some(Command::Inspect(args)) => cmd_inspect(args),
         Some(Command::Validate(args)) => cmd_validate(args),
         Some(Command::Test(args)) => cmd_test(args),
@@ -1046,6 +1071,7 @@ pub fn run() -> std::process::ExitCode {
         Some(Command::Watch(args)) => cmd_watch(args),
         Some(Command::Capture(args)) => cmd_capture(args),
         Some(Command::Trust(args)) => cmd_trust(args),
+        Some(Command::Lock(args)) => cmd_lock(args),
         Some(Command::Doctor(args)) => cmd_doctor(args),
         Some(Command::Pending(args)) => cmd_pending_cmd(args),
         Some(Command::Resume(args)) => cmd_resume_cmd(args),
@@ -1111,6 +1137,8 @@ pub fn run() -> std::process::ExitCode {
                     profile: bare.profile,
                     dry_run: bare.dry_run,
                     require_trust: bare.require_trust,
+                    locked: bare.locked,
+                    lockfile: bare.lockfile,
                     cache: bare.cache,
                     no_cache: bare.no_cache,
                 })
@@ -1265,6 +1293,36 @@ fn cmd_run_inner(args: RunArgs, remote_forced_trust: bool) -> WbExit {
                     args.file
                 );
                 return WbExit::Usage(format!("untrusted workbook ({})", status.label()));
+            }
+        }
+    }
+
+    // Reproducibility lockfile gate (#47): refuse to run if the workbook's
+    // input identity drifted from its lockfile.
+    if args.locked {
+        if p.is_dir() {
+            eprintln!("error: --locked is not supported for folder runs yet");
+            return WbExit::Usage("locked unsupported for folders".to_string());
+        }
+        let lp = lockfile::lock_path(&args.file, args.lockfile.as_deref());
+        match (std::fs::read_to_string(&args.file), lockfile::load(&lp)) {
+            (Ok(content), Ok(lock)) => {
+                let steps = parse_and_resolve(&content, &args.file).build_steps();
+                if let Err(drift) = lockfile::verify(&lock, &steps) {
+                    eprintln!(
+                        "error: --locked: {drift}. If the change is intended, re-run `wb lock {}`.",
+                        args.file
+                    );
+                    return WbExit::Usage("workbook drifted from lockfile".to_string());
+                }
+            }
+            (_, Err(e)) => {
+                eprintln!("error: --locked: {e}. Run `wb lock {}` first.", args.file);
+                return WbExit::Usage("missing or invalid lockfile".to_string());
+            }
+            (Err(e), _) => {
+                eprintln!("error: {}: {}", args.file, e);
+                return WbExit::Io(e.to_string());
             }
         }
     }
@@ -1658,6 +1716,32 @@ fn capture_stdout_assertion(stdout: &str) -> Option<String> {
         return None;
     }
     Some(line.to_string())
+}
+
+/// `wb lock <file>` — write a reproducibility lockfile of the workbook's input
+/// identity (a sha256 per resolved step, includes expanded) to `<file>.lock`
+/// (#47). Commit it; `wb run --locked` then fails on drift.
+fn cmd_lock(args: LockArgs) -> WbExit {
+    let content = match std::fs::read_to_string(&args.file) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("error: {}: {}", args.file, e);
+            return WbExit::Io(e.to_string());
+        }
+    };
+    let steps = parse_and_resolve(&content, &args.file).build_steps();
+    let lock = lockfile::build(&args.file, &steps);
+    let path = lockfile::lock_path(&args.file, args.lockfile.as_deref());
+    match lockfile::save(&path, &lock) {
+        Ok(_) => {
+            eprintln!("wb: wrote {} ({} steps)", path.display(), lock.steps.len());
+            WbExit::Success
+        }
+        Err(e) => {
+            eprintln!("error: {e}");
+            WbExit::Io(e)
+        }
+    }
 }
 
 /// `wb trust` — manage the trust-on-first-use store (#37). `add` records a

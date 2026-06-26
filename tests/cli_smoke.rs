@@ -641,3 +641,36 @@ fn require_trust_gates_untrusted_and_changed() {
 
     std::fs::remove_dir_all(&dir).ok();
 }
+
+#[test]
+fn lock_and_run_locked_gate_drift() {
+    let dir = std::env::temp_dir().join(format!("wb-lock-cli-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let md = dir.join("w.md");
+    std::fs::write(&md, "---\nruntime: bash\n---\n```bash\necho a\n```\n").unwrap();
+
+    // Lock it.
+    let lock = Command::new(wb_binary())
+        .args(["lock", md.to_str().unwrap()])
+        .output()
+        .expect("spawn wb");
+    assert_eq!(lock.status.code(), Some(0));
+    assert!(dir.join("w.md.lock").exists());
+
+    // Unchanged → --locked runs.
+    let ok = Command::new(wb_binary())
+        .args([md.to_str().unwrap(), "--locked", "-q"])
+        .output()
+        .expect("spawn wb");
+    assert_eq!(ok.status.code(), Some(0));
+
+    // Edit → --locked refuses (exit 2).
+    std::fs::write(&md, "---\nruntime: bash\n---\n```bash\necho DRIFTED\n```\n").unwrap();
+    let drift = Command::new(wb_binary())
+        .args([md.to_str().unwrap(), "--locked", "-q"])
+        .output()
+        .expect("spawn wb");
+    assert_eq!(drift.status.code(), Some(2));
+
+    std::fs::remove_dir_all(&dir).ok();
+}

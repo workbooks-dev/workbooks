@@ -513,6 +513,8 @@ wb capture --assert -o run.md         # Turn a command sequence (stdin) into a w
 wb trust add file.md                  # Record a reviewed workbook as trusted (TOFU)
 wb run file.md --require-trust        # Refuse to run an untrusted/changed workbook
 wb run gh:org/repo/path.md            # Fetch a remote workbook (always trust-gated)
+wb lock file.md                       # Write file.md.lock (input identity, for reproducibility)
+wb run file.md --locked               # Refuse to run if the workbook drifted from its lockfile
 wb inspect file.md                    # Show structure without running
 wb pending                            # List paused workbooks (auto-reaps expired abort-mode descriptors)
 wb pending --no-reap                  # List without reaping — safe for automation/inspection
