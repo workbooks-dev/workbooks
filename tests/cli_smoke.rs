@@ -463,3 +463,51 @@ fn verify_passes_clean_doc_and_fails_broken_block() {
     std::fs::remove_dir_all(ok.parent().unwrap()).ok();
     std::fs::remove_dir_all(bad.parent().unwrap()).ok();
 }
+
+#[test]
+fn watch_once_and_json_snapshot() {
+    let dir = std::env::temp_dir().join(format!("wb-watch-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let md = dir.join("w.md");
+    std::fs::write(&md, "---\nruntime: bash\n---\n```bash\necho one\n```\n").unwrap();
+    let ckpt_id = format!("wb-test-watch-{}", std::process::id());
+    let ckpt_file = format!(
+        "{}/.wb/checkpoints/{}.json",
+        std::env::var("HOME").unwrap(),
+        ckpt_id
+    );
+    std::fs::remove_file(&ckpt_file).ok();
+
+    // Produce a checkpoint.
+    Command::new(wb_binary())
+        .args([md.to_str().unwrap(), "--checkpoint", &ckpt_id, "-q"])
+        .output()
+        .expect("spawn wb");
+
+    // --once snapshot.
+    let once = Command::new(wb_binary())
+        .args(["watch", &ckpt_id, "--once"])
+        .output()
+        .expect("spawn wb");
+    assert_eq!(once.status.code(), Some(0));
+    assert!(String::from_utf8_lossy(&once.stdout).contains("watch"));
+
+    // JSON snapshot.
+    let js = Command::new(wb_binary())
+        .args(["watch", &ckpt_id, "--format", "json"])
+        .output()
+        .expect("spawn wb");
+    let v: serde_json::Value = serde_json::from_slice(&js.stdout).expect("json");
+    assert_eq!(v["checkpoint"], ckpt_id.as_str());
+    assert!(v["total_blocks"].as_u64().is_some());
+
+    // Unknown checkpoint is a usage error.
+    let missing = Command::new(wb_binary())
+        .args(["watch", "definitely-not-a-real-ckpt-xyz", "--once"])
+        .output()
+        .expect("spawn wb");
+    assert_eq!(missing.status.code(), Some(2));
+
+    std::fs::remove_dir_all(&dir).ok();
+    std::fs::remove_file(&ckpt_file).ok();
+}

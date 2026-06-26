@@ -477,6 +477,7 @@ wb artifacts open <name> --run <id>   # Print an artifact's absolute path
 wb artifacts export <name> --to <dst> # Copy an artifact out of the run dir
 wb runs list                          # List known runs (newest first)
 wb runs show <id>                     # Show a run's artifacts + checkpoint state
+wb watch <checkpoint-id>              # Live local viewer for a checkpointed run
 wb inspect file.md                    # Show structure without running
 wb pending                            # List paused workbooks (auto-reaps expired abort-mode descriptors)
 wb pending --no-reap                  # List without reaping — safe for automation/inspection

@@ -634,6 +634,20 @@ enum RunsSub {
 }
 
 #[derive(clap::Args)]
+struct WatchArgs {
+    /// Checkpoint id of the run to watch (the `--checkpoint <id>` of `wb run`).
+    id: String,
+    /// Print a single snapshot and exit instead of watching live.
+    #[arg(long)]
+    once: bool,
+    /// Poll interval in seconds while watching.
+    #[arg(long, default_value = "1")]
+    interval: u64,
+    #[command(flatten)]
+    fmt: FormatArg,
+}
+
+#[derive(clap::Args)]
 struct DoctorArgs {
     /// Run optional deep checks that probe Docker/Redis/sidecar
     #[arg(long)]
@@ -815,6 +829,8 @@ enum Command {
     Artifacts(ArtifactsArgs),
     /// Inspect past runs and their artifacts/checkpoint state.
     Runs(RunsArgs),
+    /// Watch a checkpointed run live (progress, results, pending waits).
+    Watch(WatchArgs),
     Doctor(DoctorArgs),
     Pending(PendingArgs),
     Resume(ResumeArgs),
@@ -949,6 +965,7 @@ fn main() -> std::process::ExitCode {
         Some(Command::Verify(args)) => cmd_verify(args),
         Some(Command::Artifacts(args)) => cmd_artifacts(args),
         Some(Command::Runs(args)) => cmd_runs(args),
+        Some(Command::Watch(args)) => cmd_watch(args),
         Some(Command::Doctor(args)) => cmd_doctor(args),
         Some(Command::Pending(args)) => cmd_pending_cmd(args),
         Some(Command::Resume(args)) => cmd_resume_cmd(args),
@@ -1346,6 +1363,158 @@ fn cmd_runs(args: RunsArgs) -> WbExit {
             WbExit::Success
         }
     }
+}
+
+/// `wb watch <id>` — a local run viewer (#35/#44). Polls the checkpoint +
+/// pending descriptor for a checkpointed run and renders progress, per-block
+/// results, and any pending wait. Watches until the run reaches a terminal
+/// state (complete/failed) or `--once`/`--format json` requests a single
+/// snapshot. No new dependency — a clear-screen redraw over the existing,
+/// already-standardized checkpoint state.
+fn cmd_watch(args: WatchArgs) -> WbExit {
+    let json = match want_json(&args.fmt.format) {
+        Ok(b) => b,
+        Err(e) => return e,
+    };
+
+    // JSON or --once: a single snapshot.
+    if json || args.once {
+        let Some(ckpt) = checkpoint::load(&args.id).ok().flatten() else {
+            eprintln!("wb: no checkpoint '{}' to watch", args.id);
+            return WbExit::Usage(format!("no checkpoint '{}'", args.id));
+        };
+        let pending = pending::load(&args.id).ok().flatten();
+        if json {
+            print_json(&watch_snapshot_json(&args.id, &ckpt, pending.as_ref()));
+        } else {
+            print!("{}", render_watch(&args.id, &ckpt, pending.as_ref()));
+        }
+        return WbExit::Success;
+    }
+
+    // Live: redraw until terminal. Ctrl-C exits.
+    let mut first = true;
+    loop {
+        let ckpt = checkpoint::load(&args.id).ok().flatten();
+        match ckpt {
+            None => {
+                if first {
+                    eprintln!("wb: no checkpoint '{}' to watch", args.id);
+                    return WbExit::Usage(format!("no checkpoint '{}'", args.id));
+                }
+                // The checkpoint vanished mid-watch (completed + cleaned up).
+                break;
+            }
+            Some(ckpt) => {
+                let pending = pending::load(&args.id).ok().flatten();
+                // Clear screen + home cursor for a stable live view.
+                print!(
+                    "\x1b[2J\x1b[H{}",
+                    render_watch(&args.id, &ckpt, pending.as_ref())
+                );
+                use std::io::Write;
+                let _ = std::io::stdout().flush();
+                if matches!(
+                    ckpt.status,
+                    checkpoint::CheckpointStatus::Complete | checkpoint::CheckpointStatus::Failed
+                ) {
+                    break;
+                }
+            }
+        }
+        first = false;
+        std::thread::sleep(Duration::from_secs(args.interval.max(1)));
+    }
+    WbExit::Success
+}
+
+fn watch_snapshot_json(
+    id: &str,
+    ckpt: &checkpoint::Checkpoint,
+    pending: Option<&pending::PendingDescriptor>,
+) -> serde_json::Value {
+    let passed = ckpt.results.iter().filter(|r| r.exit_code == 0).count();
+    let failed = ckpt.results.iter().filter(|r| r.exit_code != 0).count();
+    serde_json::json!({
+        "checkpoint": id,
+        "workbook": ckpt.workbook,
+        "status": format!("{:?}", ckpt.status).to_lowercase(),
+        "next_block": ckpt.next_block,
+        "total_blocks": ckpt.total_blocks,
+        "passed": passed,
+        "failed": failed,
+        "skipped": ckpt.skipped.len(),
+        "results": ckpt.results.iter().map(|r| serde_json::json!({
+            "block_index": r.block_index,
+            "step_id": r.step_id,
+            "language": r.language,
+            "exit_code": r.exit_code,
+            "line": r.line_number,
+            "heading": r.heading,
+        })).collect::<Vec<_>>(),
+        "pending": pending.map(|p| serde_json::json!({
+            "kind": p.kind,
+            "line": p.line_number,
+            "message": p.message,
+            "timeout_at": p.timeout_at,
+        })),
+    })
+}
+
+fn render_watch(
+    id: &str,
+    ckpt: &checkpoint::Checkpoint,
+    pending: Option<&pending::PendingDescriptor>,
+) -> String {
+    let passed = ckpt.results.iter().filter(|r| r.exit_code == 0).count();
+    let failed = ckpt.results.iter().filter(|r| r.exit_code != 0).count();
+    let mut out = String::new();
+    out.push_str(&format!(
+        "{} [{}]\n",
+        output::style_bold(&format!("watch {id}")),
+        format!("{:?}", ckpt.status).to_lowercase()
+    ));
+    out.push_str(&format!("  {}\n", ckpt.workbook));
+    out.push_str(&format!(
+        "  progress: block {}/{}  ({} ok, {} failed, {} skipped)\n",
+        ckpt.next_block.min(ckpt.total_blocks),
+        ckpt.total_blocks,
+        passed,
+        failed,
+        ckpt.skipped.len()
+    ));
+    for r in &ckpt.results {
+        let mark = if r.exit_code == 0 {
+            output::style_ok("✓")
+        } else {
+            output::style_fail("✗")
+        };
+        let head = r.heading.as_deref().unwrap_or("");
+        out.push_str(&format!(
+            "    {} [{}] {} (L{}) {}\n",
+            mark,
+            r.block_index + 1,
+            r.language,
+            r.line_number,
+            head
+        ));
+    }
+    if let Some(p) = pending {
+        out.push_str(&format!(
+            "  {} waiting at L{}{}{}\n",
+            output::style_dim("⏸"),
+            p.line_number,
+            p.kind
+                .as_deref()
+                .map(|k| format!(" ({k})"))
+                .unwrap_or_default(),
+            p.message
+                .as_deref()
+                .map(|m| format!(" — {m}"))
+                .unwrap_or_default(),
+        ));
+    }
+    out
 }
 
 fn cmd_inspect(args: InspectArgs) -> WbExit {
