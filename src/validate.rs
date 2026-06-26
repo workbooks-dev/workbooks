@@ -669,17 +669,17 @@ fn check_param_value(
                 ));
             }
         }
-        "bool" => {
+        "bool"
             if !matches!(
                 value.to_ascii_lowercase().as_str(),
                 "true" | "false" | "1" | "0" | "yes" | "no" | "on" | "off"
-            ) {
-                out.push(Diagnostic::error(
-                    code,
-                    path,
-                    format!("param '{name}': {origin} value '{value}' is not a valid bool"),
-                ));
-            }
+            ) =>
+        {
+            out.push(Diagnostic::error(
+                code,
+                path,
+                format!("param '{name}': {origin} value '{value}' is not a valid bool"),
+            ));
         }
         _ => {}
     }

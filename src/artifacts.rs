@@ -139,7 +139,7 @@ pub fn list_runs() -> Vec<(String, PathBuf)> {
             runs.push((name.to_string(), p.join("artifacts"), mtime));
         }
     }
-    runs.sort_by(|a, b| b.2.cmp(&a.2));
+    runs.sort_by_key(|b| std::cmp::Reverse(b.2));
     runs.into_iter().map(|(id, dir, _)| (id, dir)).collect()
 }
 
