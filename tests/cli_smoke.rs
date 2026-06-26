@@ -827,3 +827,31 @@ fn sign_verify_and_run_gate() {
 
     std::fs::remove_dir_all(&dir).ok();
 }
+
+#[test]
+fn allow_runtime_policy_gate() {
+    let md = write_temp_md(
+        "policy",
+        "---\nruntime: bash\n---\n```bash\necho a\n```\n```python\nprint(1)\n```\n",
+    );
+    // Allowlist excludes python → refused (exit 2), nothing runs.
+    let out = Command::new(wb_binary())
+        .args([md.to_str().unwrap(), "--allow-runtime", "bash", "-q"])
+        .output()
+        .expect("spawn wb");
+    assert_eq!(out.status.code(), Some(2));
+    assert!(!String::from_utf8_lossy(&out.stdout).contains("a"));
+    // Allowlist includes both → runs.
+    let out = Command::new(wb_binary())
+        .args([
+            md.to_str().unwrap(),
+            "--allow-runtime",
+            "bash",
+            "--allow-runtime",
+            "python",
+        ])
+        .output()
+        .expect("spawn wb");
+    assert!(String::from_utf8_lossy(&out.stdout).contains("a"));
+    std::fs::remove_dir_all(md.parent().unwrap()).ok();
+}

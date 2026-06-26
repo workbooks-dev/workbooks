@@ -535,6 +535,11 @@ struct RunArgs {
     /// Required signer public key (hex) for `--verify-sig`.
     #[arg(long = "pubkey", value_name = "HEX")]
     pubkey: Option<String>,
+    /// Allowlist the runtimes a workbook may use (repeatable). A block whose
+    /// language isn't listed makes the run refuse before any block executes —
+    /// an *enforceable* policy gate (wb dispatches by language). (#37)
+    #[arg(long = "allow-runtime", value_name = "LANG")]
+    allow_runtime: Vec<String>,
     /// Refuse to run unless the workbook's input identity matches its lockfile
     /// (see `wb lock`). Detects drift in the runbook or its included files.
     #[arg(long = "locked")]
@@ -1096,6 +1101,8 @@ struct BareRunArgs {
     verify_sig: bool,
     #[arg(long = "pubkey", value_name = "HEX")]
     pubkey: Option<String>,
+    #[arg(long = "allow-runtime", value_name = "LANG")]
+    allow_runtime: Vec<String>,
     #[arg(long = "locked")]
     locked: bool,
     #[arg(long = "lockfile", value_name = "PATH")]
@@ -1226,6 +1233,7 @@ pub fn run() -> std::process::ExitCode {
                     require_trust: bare.require_trust,
                     verify_sig: bare.verify_sig,
                     pubkey: bare.pubkey,
+                    allow_runtime: bare.allow_runtime,
                     locked: bare.locked,
                     lockfile: bare.lockfile,
                     repair: bare.repair,
@@ -1451,6 +1459,33 @@ fn cmd_run_inner(args: RunArgs, remote_forced_trust: bool) -> WbExit {
                     args.file
                 );
                 return WbExit::Usage(format!("untrusted workbook ({})", status.label()));
+            }
+        }
+    }
+
+    // Runtime allowlist (#37): an enforceable policy — refuse before any block
+    // runs if the workbook uses a language not on the allowlist.
+    if !args.allow_runtime.is_empty() && !p.is_dir() {
+        if let Ok(content) = std::fs::read_to_string(&args.file) {
+            let allowed: std::collections::HashSet<String> = args
+                .allow_runtime
+                .iter()
+                .map(|s| s.to_lowercase())
+                .collect();
+            let offenders: Vec<String> = parse_and_resolve(&content, &args.file)
+                .build_steps()
+                .iter()
+                .map(|s| s.language.to_lowercase())
+                .filter(|l| !allowed.contains(l))
+                .collect();
+            if let Some(bad) = offenders.first() {
+                eprintln!(
+                    "error: refusing to run {} — runtime '{}' is not in the --allow-runtime allowlist [{}].",
+                    args.file,
+                    bad,
+                    args.allow_runtime.join(", ")
+                );
+                return WbExit::Usage(format!("disallowed runtime '{bad}'"));
             }
         }
     }
