@@ -4064,6 +4064,14 @@ fn run_single(cfg: RunConfig) {
     let mut run_outputs = ckpt.as_ref().map(|c| c.outputs.clone()).unwrap_or_default();
 
     let cb = resolve_callback_config(callback_url, callback_secret, callback_key, &ctx, &run_id);
+    // Resume: continue the X-WB-Sequence counter from where the pre-pause
+    // process left off, so a run's HTTP callbacks stay totally orderable by
+    // sequence even across pause/resume (the counter is otherwise per-process).
+    if let (Some(cb), Some(c)) = (&cb, &ckpt) {
+        if c.callback_seq > 0 {
+            cb.set_seq(c.callback_seq);
+        }
+    }
 
     // Artifacts: same semantics as the non-checkpoint path — create/read the
     // dir, inject WB_ARTIFACTS_DIR, upload new files after each cell.
@@ -5680,6 +5688,11 @@ fn pause_for_signal(
     if let Some(c) = ckpt {
         c.next_block = block_idx;
         c.next_step_id = next_step_id.map(|s| s.to_string());
+        // Persist the callback sequence high-water mark so resume continues
+        // X-WB-Sequence monotonically instead of restarting at 0.
+        if let Some(cb) = cb {
+            c.callback_seq = cb.seq_value();
+        }
         c.mark_paused();
         if let Err(e) = checkpoint::save(id, c) {
             log_warn!("warning: checkpoint: {}", e);
@@ -5796,6 +5809,9 @@ fn pause_browser_slice(
     if let Some(c) = ckpt {
         c.next_block = block_idx;
         c.next_step_id = step_id.map(|s| s.to_string());
+        if let Some(cb) = cb {
+            c.callback_seq = cb.seq_value();
+        }
         c.mark_paused();
         if let Err(e) = checkpoint::save(id, c) {
             log_warn!("warning: checkpoint: {}", e);

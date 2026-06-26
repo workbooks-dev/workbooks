@@ -388,6 +388,19 @@ pub struct CallbackConfig {
     pub seq: AtomicU64,
 }
 
+impl CallbackConfig {
+    /// Current callback sequence high-water mark (last number handed out).
+    pub fn seq_value(&self) -> u64 {
+        self.seq.load(Ordering::Relaxed)
+    }
+
+    /// Seed the sequence counter (used on resume so `X-WB-Sequence` continues
+    /// monotonically from where the pre-pause process left off).
+    pub fn set_seq(&self, v: u64) {
+        self.seq.store(v, Ordering::Relaxed);
+    }
+}
+
 /// Compute the stable idempotency key for a logical event delivery.
 ///
 /// Hashes `(event, identity, sequence)` where `identity` is the most stable
@@ -992,6 +1005,24 @@ mod tests {
         assert!(validate_callback_config("https://x/wb", None)
             .unwrap()
             .is_empty());
+    }
+
+    #[test]
+    fn seq_seed_and_readback() {
+        let cb = CallbackConfig {
+            url: "https://hooks.example.com/wb".to_string(),
+            secret: None,
+            stream_key: "wb:events".to_string(),
+            run_id: "test-run".to_string(),
+            seq: AtomicU64::new(0),
+        };
+        // Simulate resume: seed from a persisted high-water mark.
+        cb.set_seq(7);
+        assert_eq!(cb.seq_value(), 7);
+        // Next emitted sequence continues monotonically (fetch_add + 1 ⇒ 8).
+        let next = cb.seq.fetch_add(1, Ordering::Relaxed) + 1;
+        assert_eq!(next, 8);
+        assert_eq!(cb.seq_value(), 8);
     }
 
     #[test]

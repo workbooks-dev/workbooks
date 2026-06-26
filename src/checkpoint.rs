@@ -55,6 +55,12 @@ pub struct Checkpoint {
     /// default to fall back on, and resume carries no `--param` flags).
     #[serde(default)]
     pub params: BTreeMap<String, String>,
+    /// Highest callback sequence number emitted so far. Persisted so the
+    /// `X-WB-Sequence` counter stays monotonic across pause/resume instead of
+    /// restarting at 0 — receivers can then totally-order a run's HTTP
+    /// callbacks by sequence even when it spans multiple processes.
+    #[serde(default)]
+    pub callback_seq: u64,
 }
 
 #[derive(Serialize, Deserialize, PartialEq, Clone, Copy, Debug)]
@@ -121,6 +127,7 @@ impl Checkpoint {
             workflow: None,
             param_hash: None,
             params: BTreeMap::new(),
+            callback_seq: 0,
         }
     }
 

@@ -66,7 +66,7 @@ Suggested product sequencing after the 2026-04-29 multi-agent battle test:
 
 - [x] Line/column for malformed frontmatter YAML parse errors (follow-up to #11). Shipped via `wb validate` diagnostic spans (`wb-yaml-001`).
 - [x] Pending-wait descriptors should persist the original run's `--callback` URL so timeout reaping can emit `checkpoint.failed` callbacks (follow-up to #17). Shipped — `PendingDescriptor.callback_url` + `callback_secret` round-trip through save/load, and `reap_expired` fires `checkpoint.failed` against the original endpoint with HMAC signing.
-- [ ] HTTP callback ordering guarantees (currently best-effort; Redis XADD side already orders — follow-up to #12).
+- [x] HTTP callback ordering guarantees (follow-up to #12). HTTP callbacks carry a monotonic `X-WB-Sequence` header (fixed across retries) plus an idempotency key over `(event, run_id, sequence)`, so receivers can totally-order and dedup a run's events. Events are emitted synchronously in sequence order. Wave 5 closed the last gap: the sequence high-water mark is persisted in the checkpoint (`callback_seq`) and re-seeded on resume, so `X-WB-Sequence` stays monotonic across pause/resume instead of restarting at 0 in the new process.
 - [x] `reap_expired` should acquire the per-ckpt file lock before mutating — currently uses a sibling reap lock that serializes reapers against each other but not against a live `wb run` (follow-up to #17 / surfaced during #24). Shipped as Phase 3 of the #29 work: reaper now `try_lock_for`s the checkpoint path inside `with_pending_lock`, skips the descriptor (non-blocking) on contention, and releases before firing callbacks so HTTP doesn't hold disk locks.
 
 ## Runbook-library features (formerly `features-request.md` F1–F7)
