@@ -1150,6 +1150,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "wb-core"
+version = "0.16.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "sha2",
+ "thiserror",
+]
+
+[[package]]
 name = "windows-core"
 version = "0.62.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"

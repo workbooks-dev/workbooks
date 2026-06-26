@@ -37,3 +37,6 @@ lto = true          # Link-time optimization
 codegen-units = 1   # Single codegen unit for better optimization
 strip = true        # Strip debug symbols
 panic = "abort"     # Smaller binary, no unwinding
+
+[workspace]
+members = ["wb-core"]

@@ -26,6 +26,7 @@ workbooks/
 ├── src/
 │   ├── main.rs        # thin binary shim → wb::run()
 │   ├── lib.rs         # library root: pub fn run + embeddable parser/IR/diagnostic core (#48)
+├── wb-core/           # workspace crate: pure analysis core, WASM-buildable (#48)
 │   ├── parser.rs      # Markdown frontmatter + code block extraction
 │   ├── executor.rs    # Multi-runtime subprocess execution
 │   ├── checkpoint.rs  # Save/resume execution state
