@@ -845,10 +845,14 @@ Configured in frontmatter or overridden via CLI flags:
 cargo build              # Debug build
 cargo build --release    # Release build (~650KB)
 cargo test               # Run tests
+scripts/check.sh         # Run the full pre-PR CI gate
 
 # Local dev alias
 alias wb-dev='./target/release/wb'
 ```
+
+Run `scripts/check.sh` before opening a PR. It mirrors CI: rustfmt,
+clippy with warnings denied, the locked full test suite, and a release build.
 
 ## Design Principles
 

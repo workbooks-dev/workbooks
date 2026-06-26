@@ -196,3 +196,178 @@ fn parse_env_lines(input: &str) -> HashMap<String, String> {
     }
     env
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn provider(name: &str) -> SecretProvider {
+        SecretProvider {
+            provider: name.to_string(),
+            project: None,
+            command: None,
+            keys: None,
+        }
+    }
+
+    #[test]
+    fn parse_env_lines_handles_quotes_comments_and_blanks() {
+        let input = "# a comment\n\nFOO=bar\nQUOTED=\"hello world\"\nSINGLE='single quoted'\nNAKED= spaced \nNOEQUALS\n  # indented comment\n";
+        let env = parse_env_lines(input);
+        assert_eq!(env.get("FOO").unwrap(), "bar");
+        assert_eq!(env.get("QUOTED").unwrap(), "hello world");
+        assert_eq!(env.get("SINGLE").unwrap(), "single quoted");
+        assert_eq!(env.get("NAKED").unwrap(), "spaced");
+        assert!(!env.contains_key("NOEQUALS"));
+        // comment lines are skipped
+        assert_eq!(env.len(), 4);
+    }
+
+    #[test]
+    fn resolve_env_pulls_present_keys_only() {
+        std::env::set_var("WB_TEST_SECRET_PRESENT", "yes");
+        std::env::remove_var("WB_TEST_SECRET_ABSENT");
+        let mut p = provider("env");
+        p.keys = Some(vec![
+            "WB_TEST_SECRET_PRESENT".to_string(),
+            "WB_TEST_SECRET_ABSENT".to_string(),
+        ]);
+        let env = resolve_env(&p).unwrap();
+        assert_eq!(env.get("WB_TEST_SECRET_PRESENT").unwrap(), "yes");
+        assert!(!env.contains_key("WB_TEST_SECRET_ABSENT"));
+        std::env::remove_var("WB_TEST_SECRET_PRESENT");
+    }
+
+    #[test]
+    fn resolve_env_with_no_keys_is_empty() {
+        let p = provider("env");
+        let env = resolve_env(&p).unwrap();
+        assert!(env.is_empty());
+    }
+
+    #[test]
+    fn resolve_shell_command_parses_json_object() {
+        let env = resolve_shell_command(r#"echo '{"A":"1","B":2,"C":true}'"#).unwrap();
+        assert_eq!(env.get("A").unwrap(), "1");
+        // non-string JSON values are stringified
+        assert_eq!(env.get("B").unwrap(), "2");
+        assert_eq!(env.get("C").unwrap(), "true");
+    }
+
+    #[test]
+    fn resolve_shell_command_falls_back_to_key_value() {
+        let env = resolve_shell_command("printf 'K1=v1\\nK2=v2\\n'").unwrap();
+        assert_eq!(env.get("K1").unwrap(), "v1");
+        assert_eq!(env.get("K2").unwrap(), "v2");
+    }
+
+    #[test]
+    fn resolve_shell_command_invalid_json_falls_back_to_key_value() {
+        // Starts with '{' but is not valid JSON -> falls through to KEY=VALUE.
+        let env = resolve_shell_command("echo '{not json=oops'").unwrap();
+        // The line "{not json=oops" splits on first '=' to key "{not json" value "oops"
+        assert_eq!(env.get("{not json").unwrap(), "oops");
+    }
+
+    #[test]
+    fn resolve_shell_command_reports_failure() {
+        let err = resolve_shell_command("echo boom >&2; exit 3").unwrap_err();
+        match err {
+            WbError::Secret(msg) => assert!(msg.contains("failed")),
+            other => panic!("unexpected error: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn resolve_command_requires_command_field() {
+        let p = provider("command");
+        let err = resolve_command(&p).unwrap_err();
+        assert!(matches!(err, WbError::Secret(_)));
+    }
+
+    #[test]
+    fn resolve_command_runs_given_command() {
+        let mut p = provider("cmd");
+        p.command = Some("echo TOK=abc".to_string());
+        let env = resolve_command(&p).unwrap();
+        assert_eq!(env.get("TOK").unwrap(), "abc");
+    }
+
+    #[test]
+    fn resolve_yard_uses_command_override() {
+        let mut p = provider("yard");
+        p.command = Some("echo YK=yv".to_string());
+        let env = resolve_yard(&p).unwrap();
+        assert_eq!(env.get("YK").unwrap(), "yv");
+    }
+
+    #[test]
+    fn resolve_prompt_requires_keys() {
+        let p = provider("prompt");
+        let err = resolve_prompt(&p).unwrap_err();
+        assert!(matches!(err, WbError::Secret(_)));
+    }
+
+    #[test]
+    fn load_env_file_reads_and_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("test.env");
+        std::fs::write(&path, "X=1\nY=2\n").unwrap();
+        let env = load_env_file(path.to_str().unwrap()).unwrap();
+        assert_eq!(env.get("X").unwrap(), "1");
+
+        let err = load_env_file("/no/such/path/.env").unwrap_err();
+        assert!(matches!(err, WbError::Secret(_)));
+    }
+
+    #[test]
+    fn resolve_dotenv_default_and_explicit() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("custom.env");
+        std::fs::write(&path, "D=dv\n").unwrap();
+        let mut p = provider("dotenv");
+        p.command = Some(path.to_str().unwrap().to_string());
+        let env = resolve_dotenv(&p).unwrap();
+        assert_eq!(env.get("D").unwrap(), "dv");
+    }
+
+    #[test]
+    fn resolve_provider_unknown_errors() {
+        let p = provider("bogus");
+        let err = resolve_provider(&p).unwrap_err();
+        match err {
+            WbError::Secret(msg) => assert!(msg.contains("Unknown secret provider")),
+            other => panic!("unexpected: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn resolve_provider_dispatches_file_and_command() {
+        // file dispatch
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".env");
+        std::fs::write(&path, "F=fv\n").unwrap();
+        let mut fp = provider("file");
+        fp.command = Some(path.to_str().unwrap().to_string());
+        assert_eq!(resolve_provider(&fp).unwrap().get("F").unwrap(), "fv");
+
+        // command dispatch
+        let mut cp = provider("command");
+        cp.command = Some("echo G=gv".to_string());
+        assert_eq!(resolve_provider(&cp).unwrap().get("G").unwrap(), "gv");
+    }
+
+    #[test]
+    fn resolve_secrets_single_and_multiple() {
+        let mut a = provider("command");
+        a.command = Some("echo A=1".to_string());
+        let single = resolve_secrets(&SecretsConfig::Single(a.clone())).unwrap();
+        assert_eq!(single.get("A").unwrap(), "1");
+
+        let mut b = provider("command");
+        b.command = Some("echo B=2".to_string());
+        let multi = resolve_secrets(&SecretsConfig::Multiple(vec![a, b])).unwrap();
+        assert_eq!(multi.get("A").unwrap(), "1");
+        assert_eq!(multi.get("B").unwrap(), "2");
+    }
+}
