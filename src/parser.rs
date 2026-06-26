@@ -696,7 +696,7 @@ fn extract_frontmatter(input: &str) -> (Frontmatter, String) {
             let frontmatter: Frontmatter = match serde_yaml::from_str(yaml_str) {
                 Ok(fm) => fm,
                 Err(e) => {
-                    eprintln!("wb: frontmatter parse warning: {}", e);
+                    crate::log_warn!("wb: frontmatter parse warning: {}", e);
                     Frontmatter::default()
                 }
             };
@@ -776,7 +776,9 @@ fn parse_info_string(info: &str) -> InfoString {
                             .kv
                             .insert("continue_on_error".into(), "true".into());
                     }
-                    _ => {}
+                    // Retain unrecognized bare flags so `wb validate` can flag
+                    // them (`wb-attr-001`); the runtime still ignores them.
+                    other => out.attrs.unknown.push(other.to_string()),
                 }
             }
         }

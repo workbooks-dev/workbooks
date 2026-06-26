@@ -57,7 +57,7 @@ pub fn init_outputs_path(
         path.to_string_lossy().into_owned(),
     );
     if let Err(e) = write_outputs_file(&path, outputs) {
-        eprintln!("warning: outputs file: {}", e);
+        crate::log_warn!("warning: outputs file: {}", e);
     }
     path
 }

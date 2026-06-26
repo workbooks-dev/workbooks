@@ -314,7 +314,51 @@ wb resume <id> --signal <file>        # Resume a paused workbook with a signal p
 wb resume <id> --rerun-step [step]    # Re-run the current (or named) step instead of resuming forward
 wb resume <id> --goto-step <step>     # Jump the cursor to a step (re-runs earlier / skips later)
 wb cancel <id>                        # Drop a paused workbook without resuming
+wb validate file.md                   # Static analysis (no execution); --format json, --strict
+wb doctor                             # Environment health checks; --deep for Docker/sidecar/Redis probes
+wb config set callback.url <url>      # Persist machine-wide defaults in ~/.wb/config.yaml
+wb config list                        # Show set values + known keys (also: get/unset/path)
+wb completion <shell>                 # Print a shell completion script (bash, zsh, fish, …)
+wb man                                # Print a roff man page to stdout
+wb version --format json              # Management commands take --format text|json
+wb --log-level error <cmd>            # Global stderr verbosity (error|warn|info|debug)
 ```
+
+## Stderr verbosity: `--log-level`
+
+A global `--log-level <error|warn|info|debug>` (also `$WB_LOG_LEVEL`, default
+`info`) gates warning/diagnostic stderr output. Lowering it to `error` silences
+the noisy checkpoint/outputs/upload/callback warnings — useful for CI and agents
+that want clean stderr. The level is process-global and works before or after the
+subcommand. Essential run feedback (progress, results, the run summary) is never
+suppressed. Implemented in `src/logging.rs` as gate macros (`log_warn!` etc.) over
+`eprintln!` — zero new dependencies.
+
+## Consistent JSON for management commands
+
+`version`, `config` (get/set/unset/list/path), `containers` (list/build/prune),
+and `cancel` all accept `--format json` (alongside the existing `validate` /
+`doctor` / `pending` / `inspect`), so agents can script every management command
+uniformly. JSON goes to stdout (pretty-printed); human messages and errors stay on
+stderr; exit codes are unchanged (`config get` on an unset key still exits 2 but
+emits `{"key":…,"value":null}` first).
+
+## Machine-wide config: `wb config`
+
+`wb config` manages a small allowlisted key/value store at `~/.wb/config.yaml`
+(override with `$WB_CONFIG_PATH`). It's the "set my dashboard webhook once" layer.
+Keys are validated against a known set on `set`, so a typo is rejected rather than
+silently stored. Subcommands: `get <key>`, `set <key> <value>`, `unset <key>`,
+`list`, `path`.
+
+Known keys today are the callback defaults — `callback.url`, `callback.secret`,
+`callback.key`. They're consulted at run start as the **lowest-precedence**
+fallback: `--callback*` flag > `WB_CALLBACK_*` env var > config file. A malformed
+config file warns and is ignored rather than aborting the run.
+
+Callback URLs are validated up front (`http`/`https`/`redis`/`rediss` only), so a
+bad endpoint fails fast with one clear message instead of a per-event curl error;
+a Redis URL paired with an HMAC secret, or a plaintext `http://` endpoint, warns.
 
 ## Pausing on external signals
 

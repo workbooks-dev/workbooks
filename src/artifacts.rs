@@ -83,7 +83,7 @@ impl Artifacts {
             // Non-fatal: the dir may not be writable, but cells can still
             // run. Fall back to a unique tmp dir so subsequent uploads
             // don't try to read from a missing path.
-            eprintln!(
+            crate::log_warn!(
                 "warning: could not create WB_ARTIFACTS_DIR at {}: {} — falling back to tmp",
                 dir.display(),
                 e
@@ -238,14 +238,15 @@ impl Artifacts {
                 let code = String::from_utf8_lossy(&out.stdout);
                 let code = code.trim();
                 if !code.starts_with('2') {
-                    eprintln!(
+                    crate::log_warn!(
                         "warning: artifact upload {} returned HTTP {}",
-                        filename, code
+                        filename,
+                        code
                     );
                 }
             }
             Err(e) => {
-                eprintln!("warning: artifact upload {}: {}", filename, e);
+                crate::log_warn!("warning: artifact upload {}: {}", filename, e);
             }
         }
     }
