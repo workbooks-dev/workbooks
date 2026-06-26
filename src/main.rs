@@ -2,12 +2,14 @@ mod artifacts;
 mod atomic_io;
 mod callback;
 mod checkpoint;
+mod config;
 mod diagnostic;
 mod doctor;
 mod error;
 mod executor;
 mod exit;
 mod exit_codes;
+mod logging;
 mod output;
 mod parser;
 mod pending;
@@ -219,7 +221,7 @@ fn capture_outputs_for_result(
     match step_outputs::parse_outputs(&result.stdout) {
         Ok(outputs) => outputs,
         Err(e) if continue_on_error => {
-            eprintln!("warning: structured output ignored: {}", e);
+            log_warn!("warning: structured output ignored: {}", e);
             step_outputs::StepOutputMap::new()
         }
         Err(e) => {
@@ -577,6 +579,8 @@ struct ResumeArgs {
 #[derive(clap::Args)]
 struct CancelArgs {
     id: String,
+    #[command(flatten)]
+    fmt: FormatArg,
 }
 
 #[derive(clap::Args)]
@@ -589,10 +593,18 @@ struct ContainersArgs {
 enum ContainersSub {
     Build {
         path: Option<String>,
+        #[command(flatten)]
+        fmt: FormatArg,
     },
     #[command(alias = "ls")]
-    List,
-    Prune,
+    List {
+        #[command(flatten)]
+        fmt: FormatArg,
+    },
+    Prune {
+        #[command(flatten)]
+        fmt: FormatArg,
+    },
 }
 
 #[derive(clap::Args)]
@@ -606,6 +618,56 @@ struct TransformArgs {
     file: String,
 }
 
+/// Reusable `--format text|json` flag for management commands. Flattened into
+/// each subcommand so it parses after the subcommand token
+/// (`wb config list --format json`), matching the `validate`/`doctor`/`pending`
+/// convention.
+#[derive(clap::Args, Clone)]
+struct FormatArg {
+    /// Output format: text | json
+    #[arg(long, default_value = "text")]
+    format: String,
+}
+
+#[derive(clap::Args)]
+struct ConfigArgs {
+    #[command(subcommand)]
+    sub: ConfigSub,
+}
+
+#[derive(Subcommand)]
+enum ConfigSub {
+    /// List all set config values (and the known keys you can set).
+    List {
+        #[command(flatten)]
+        fmt: FormatArg,
+    },
+    /// Print the value of a single key.
+    Get {
+        key: String,
+        #[command(flatten)]
+        fmt: FormatArg,
+    },
+    /// Set a key to a value (key must be one of the known keys).
+    Set {
+        key: String,
+        value: String,
+        #[command(flatten)]
+        fmt: FormatArg,
+    },
+    /// Remove a key.
+    Unset {
+        key: String,
+        #[command(flatten)]
+        fmt: FormatArg,
+    },
+    /// Print the path to the config file.
+    Path {
+        #[command(flatten)]
+        fmt: FormatArg,
+    },
+}
+
 #[derive(Subcommand)]
 enum Command {
     Run(RunArgs),
@@ -616,18 +678,18 @@ enum Command {
     Resume(ResumeArgs),
     Cancel(CancelArgs),
     Containers(ContainersArgs),
+    Config(ConfigArgs),
     Update(UpdateArgs),
-    Version,
+    Version(FormatArg),
     /// Hidden — frontmatter scaffolding helper, kept for backwards compat.
     #[command(hide = true)]
     Transform(TransformArgs),
-    /// Hidden placeholder; real generation lands with clap_complete.
-    #[command(hide = true)]
+    /// Print a shell completion script to stdout (bash, zsh, fish, …).
     Completion {
-        shell: Option<String>,
+        /// Target shell. Source the output, e.g. `wb completion zsh > _wb`.
+        shell: clap_complete::Shell,
     },
-    /// Hidden placeholder; real generation lands with clap_mangen.
-    #[command(hide = true)]
+    /// Print a man page (roff) for `wb` to stdout.
     Man,
 }
 
@@ -697,12 +759,30 @@ struct Cli {
     #[command(subcommand)]
     command: Option<Command>,
 
+    /// Stderr verbosity: error | warn | info | debug (default info). Lower it to
+    /// `error` to silence checkpoint/outputs/upload warnings in CI/agents.
+    #[arg(
+        long = "log-level",
+        global = true,
+        env = "WB_LOG_LEVEL",
+        default_value = "info",
+        value_name = "LEVEL"
+    )]
+    log_level: String,
+
     #[command(flatten)]
     bare_run: BareRunArgs,
 }
 
 fn main() -> std::process::ExitCode {
     let cli = Cli::parse();
+    match logging::parse_level(&cli.log_level) {
+        Ok(l) => logging::set_level(l),
+        Err(e) => {
+            eprintln!("wb: {e}");
+            return std::process::ExitCode::from(2u8);
+        }
+    }
     let exit = match cli.command {
         Some(Command::Run(args)) => cmd_run(args),
         Some(Command::Inspect(args)) => cmd_inspect(args),
@@ -712,25 +792,18 @@ fn main() -> std::process::ExitCode {
         Some(Command::Resume(args)) => cmd_resume_cmd(args),
         Some(Command::Cancel(args)) => cmd_cancel_cmd(args),
         Some(Command::Containers(args)) => cmd_containers_cmd(args),
+        Some(Command::Config(args)) => cmd_config(args),
         Some(Command::Update(args)) => {
             update::cmd_update(args.check);
             WbExit::Success
         }
-        Some(Command::Version) => {
-            update::cmd_version();
-            WbExit::Success
-        }
+        Some(Command::Version(fmt)) => cmd_version(&fmt),
         Some(Command::Transform(args)) => {
             transform_workbook(&args.file);
             WbExit::Success
         }
-        Some(Command::Completion { shell }) => WbExit::Usage(format!(
-            "completion generation for {} is not implemented yet; pending clap_complete",
-            shell.unwrap_or_else(|| "the requested shell".to_string())
-        )),
-        Some(Command::Man) => WbExit::Usage(
-            "man page generation is not implemented yet; pending clap_mangen".to_string(),
-        ),
+        Some(Command::Completion { shell }) => cmd_completion(shell),
+        Some(Command::Man) => cmd_man(),
         None => {
             let mut bare = cli.bare_run;
             let Some(file) = bare.file.take() else {
@@ -943,19 +1016,39 @@ fn cmd_pending_cmd(args: PendingArgs) -> WbExit {
 }
 
 fn cmd_cancel_cmd(args: CancelArgs) -> WbExit {
-    cmd_cancel(&args.id);
-    WbExit::Success
+    let json = match want_json(&args.fmt.format) {
+        Ok(j) => j,
+        Err(e) => return e,
+    };
+    cmd_cancel(&args.id, json)
 }
 
 fn cmd_containers_cmd(args: ContainersArgs) -> WbExit {
     match args.sub {
-        ContainersSub::Build { path } => {
-            cmd_containers_build(path.as_deref().unwrap_or("."));
+        ContainersSub::Build { path, fmt } => {
+            let json = match want_json(&fmt.format) {
+                Ok(j) => j,
+                Err(e) => return e,
+            };
+            cmd_containers_build(path.as_deref().unwrap_or("."), json)
         }
-        ContainersSub::List => cmd_containers_list(),
-        ContainersSub::Prune => cmd_containers_prune(),
+        ContainersSub::List { fmt } => {
+            let json = match want_json(&fmt.format) {
+                Ok(j) => j,
+                Err(e) => return e,
+            };
+            cmd_containers_list(json);
+            WbExit::Success
+        }
+        ContainersSub::Prune { fmt } => {
+            let json = match want_json(&fmt.format) {
+                Ok(j) => j,
+                Err(e) => return e,
+            };
+            cmd_containers_prune(json);
+            WbExit::Success
+        }
     }
-    WbExit::Success
 }
 
 /// Collect .md files from a directory, sorted by --order
@@ -1442,7 +1535,7 @@ fn run_single_collect(
                     let key = step_key(step_id, block_idx);
                     step_outputs::merge_step_outputs(&mut run_outputs, &key, &current_outputs);
                     if let Err(e) = step_outputs::write_outputs_file(&outputs_path, &run_outputs) {
-                        eprintln!("warning: outputs file: {}", e);
+                        log_warn!("warning: outputs file: {}", e);
                     }
                 }
                 // Folder mode has no callback, so artifact records are
@@ -1504,7 +1597,7 @@ fn run_single_collect(
                     let key = step_key(step_id, block_idx);
                     step_outputs::merge_step_outputs(&mut run_outputs, &key, &current_outputs);
                     if let Err(e) = step_outputs::write_outputs_file(&outputs_path, &run_outputs) {
-                        eprintln!("warning: outputs file: {}", e);
+                        log_warn!("warning: outputs file: {}", e);
                     }
                 }
                 // Folder mode: no callback, so we don't emit
@@ -1989,7 +2082,7 @@ fn prepare_checkpoint(
                 Some(checkpoint::Checkpoint::new(file, block_count)),
             ),
             Err(e) => {
-                eprintln!("warning: {}", e);
+                log_warn!("warning: {}", e);
                 (
                     0,
                     Vec::new(),
@@ -2038,6 +2131,189 @@ fn prepare_checkpoint(
 
 /// Build the callback config, falling back through env-file values when CLI
 /// flags weren't provided. Returns `None` when there's no URL to post to.
+/// `wb config <sub>` — manage machine-wide defaults in `~/.wb/config.yaml`.
+/// Shared `--format` handling for management commands. `text` → false,
+/// `json` → true, anything else → a usage error.
+fn want_json(format: &str) -> Result<bool, WbExit> {
+    match format {
+        "text" => Ok(false),
+        "json" => Ok(true),
+        other => Err(WbExit::Usage(format!(
+            "invalid --format '{other}' (expected text|json)"
+        ))),
+    }
+}
+
+/// Pretty-print a JSON value to stdout — the management-command convention
+/// (matches `inspect`/`validate`/`doctor`/`pending`).
+fn print_json(value: &serde_json::Value) {
+    match serde_json::to_string_pretty(value) {
+        Ok(s) => println!("{s}"),
+        Err(e) => log_error!("wb: json serialize error: {e}"),
+    }
+}
+
+/// `wb version [--format json]`.
+fn cmd_version(fmt: &FormatArg) -> WbExit {
+    let json = match want_json(&fmt.format) {
+        Ok(j) => j,
+        Err(e) => return e,
+    };
+    let version = env!("CARGO_PKG_VERSION");
+    if json {
+        print_json(&serde_json::json!({ "version": version }));
+    } else {
+        println!("wb v{version}");
+    }
+    WbExit::Success
+}
+
+fn cmd_config(args: ConfigArgs) -> WbExit {
+    match args.sub {
+        ConfigSub::Path { fmt } => {
+            let json = match want_json(&fmt.format) {
+                Ok(j) => j,
+                Err(e) => return e,
+            };
+            let path = config::config_path();
+            if json {
+                print_json(&serde_json::json!({ "path": path.display().to_string() }));
+            } else {
+                println!("{}", path.display());
+            }
+            WbExit::Success
+        }
+        ConfigSub::List { fmt } => {
+            let json = match want_json(&fmt.format) {
+                Ok(j) => j,
+                Err(e) => return e,
+            };
+            let cfg = match config::Config::load() {
+                Ok(c) => c,
+                Err(e) => return WbExit::Io(e),
+            };
+            if json {
+                let known: Vec<_> = config::KNOWN_KEYS
+                    .iter()
+                    .map(|(k, desc)| serde_json::json!({ "key": k, "description": desc }))
+                    .collect();
+                print_json(&serde_json::json!({
+                    "path": config::config_path().display().to_string(),
+                    "values": cfg.values,
+                    "known_keys": known,
+                }));
+                return WbExit::Success;
+            }
+            if cfg.values.is_empty() {
+                println!("no config set ({})", config::config_path().display());
+            } else {
+                for (k, v) in &cfg.values {
+                    println!("{k} = {v}");
+                }
+            }
+            eprintln!("\nknown keys:");
+            for (k, desc) in config::KNOWN_KEYS {
+                eprintln!("  {k} — {desc}");
+            }
+            WbExit::Success
+        }
+        ConfigSub::Get { key, fmt } => {
+            let json = match want_json(&fmt.format) {
+                Ok(j) => j,
+                Err(e) => return e,
+            };
+            let cfg = match config::Config::load() {
+                Ok(c) => c,
+                Err(e) => return WbExit::Io(e),
+            };
+            match cfg.get(&key) {
+                Some(v) => {
+                    if json {
+                        print_json(&serde_json::json!({ "key": key, "value": v }));
+                    } else {
+                        println!("{v}");
+                    }
+                    WbExit::Success
+                }
+                None => {
+                    if json {
+                        // Still emit a parseable result, but signal "unset" via exit code.
+                        print_json(&serde_json::json!({ "key": key, "value": null }));
+                    }
+                    WbExit::Usage(format!("config key '{key}' is not set"))
+                }
+            }
+        }
+        ConfigSub::Set { key, value, fmt } => {
+            let json = match want_json(&fmt.format) {
+                Ok(j) => j,
+                Err(e) => return e,
+            };
+            if !config::is_known_key(&key) {
+                return WbExit::Usage(format!(
+                    "unknown config key '{key}'. Run `wb config list` to see known keys"
+                ));
+            }
+            let mut cfg = match config::Config::load() {
+                Ok(c) => c,
+                Err(e) => return WbExit::Io(e),
+            };
+            cfg.values.insert(key.clone(), value.clone());
+            if let Err(e) = cfg.save() {
+                return WbExit::Io(e);
+            }
+            if json {
+                print_json(&serde_json::json!({ "ok": true, "key": key, "value": value }));
+            } else {
+                eprintln!("set {key} = {value}");
+            }
+            WbExit::Success
+        }
+        ConfigSub::Unset { key, fmt } => {
+            let json = match want_json(&fmt.format) {
+                Ok(j) => j,
+                Err(e) => return e,
+            };
+            let mut cfg = match config::Config::load() {
+                Ok(c) => c,
+                Err(e) => return WbExit::Io(e),
+            };
+            let removed = cfg.values.remove(&key).is_some();
+            if removed {
+                if let Err(e) = cfg.save() {
+                    return WbExit::Io(e);
+                }
+            }
+            if json {
+                print_json(&serde_json::json!({ "ok": true, "key": key, "removed": removed }));
+            } else if removed {
+                eprintln!("unset {key}");
+            } else {
+                eprintln!("{key} was not set");
+            }
+            WbExit::Success
+        }
+    }
+}
+
+/// `wb completion <shell>` — write a shell completion script to stdout.
+fn cmd_completion(shell: clap_complete::Shell) -> WbExit {
+    use clap::CommandFactory;
+    let mut cmd = Cli::command();
+    clap_complete::generate(shell, &mut cmd, "wb", &mut std::io::stdout());
+    WbExit::Success
+}
+
+/// `wb man` — write a roff man page for the top-level command to stdout.
+fn cmd_man() -> WbExit {
+    use clap::CommandFactory;
+    let man = clap_mangen::Man::new(Cli::command());
+    if let Err(e) = man.render(&mut std::io::stdout()) {
+        return WbExit::Io(format!("failed to render man page: {e}"));
+    }
+    WbExit::Success
+}
+
 fn resolve_callback_config(
     callback_url: Option<String>,
     callback_secret: Option<String>,
@@ -2045,11 +2321,30 @@ fn resolve_callback_config(
     ctx: &executor::ExecutionContext,
     run_id: &str,
 ) -> Option<callback::CallbackConfig> {
-    let url = callback_url.or_else(|| ctx.env.get("WB_CALLBACK_URL").cloned())?;
-    let secret = callback_secret.or_else(|| ctx.env.get("WB_CALLBACK_SECRET").cloned());
+    // Precedence: CLI flag > env var > ~/.wb/config.yaml. The config file is the
+    // "set my dashboard webhook once" layer; a broken file warns, not aborts.
+    let cfg = config::Config::load_lenient();
+    let url = callback_url
+        .or_else(|| ctx.env.get("WB_CALLBACK_URL").cloned())
+        .or_else(|| cfg.get("callback.url").map(str::to_string))?;
+    let secret = callback_secret
+        .or_else(|| ctx.env.get("WB_CALLBACK_SECRET").cloned())
+        .or_else(|| cfg.get("callback.secret").map(str::to_string));
     let stream_key = callback_key
         .or_else(|| ctx.env.get("WB_CALLBACK_KEY").cloned())
+        .or_else(|| cfg.get("callback.key").map(str::to_string))
         .unwrap_or_else(|| "wb:events".to_string());
+    match callback::validate_callback_config(&url, secret.as_deref()) {
+        Ok(warnings) => {
+            for w in warnings {
+                log_warn!("warning: {w}");
+            }
+        }
+        Err(e) => {
+            eprintln!("error: {e}");
+            std::process::exit(exit_codes::EXIT_USAGE);
+        }
+    }
     Some(callback::CallbackConfig {
         url,
         secret,
@@ -2498,7 +2793,7 @@ fn run_single(cfg: RunConfig) {
                         });
                         c.next_step_id = steps.get(c.next_block).map(|s| s.id.0.clone());
                         if let Err(e) = checkpoint::save(ckpt_id, c) {
-                            eprintln!("warning: checkpoint: {}", e);
+                            log_warn!("warning: checkpoint: {}", e);
                         }
                     }
                     block_idx += 1;
@@ -2546,7 +2841,7 @@ fn run_single(cfg: RunConfig) {
                     let key = step_key(step_id, block_idx);
                     step_outputs::merge_step_outputs(&mut run_outputs, &key, &replay_outputs);
                     if let Err(e) = step_outputs::write_outputs_file(&outputs_path, &run_outputs) {
-                        eprintln!("warning: outputs file: {}", e);
+                        log_warn!("warning: outputs file: {}", e);
                     }
                     if let (Some(ref mut c), Some(ref ckpt_id)) = (&mut ckpt, &checkpoint_id) {
                         c.add_outputs(&key, &raw_outputs(&replay_outputs));
@@ -2638,7 +2933,7 @@ fn run_single(cfg: RunConfig) {
                     });
                     c.next_step_id = steps.get(c.next_block).map(|s| s.id.0.clone());
                     if let Err(e) = checkpoint::save(ckpt_id, c) {
-                        eprintln!("warning: checkpoint: {}", e);
+                        log_warn!("warning: checkpoint: {}", e);
                     }
                 }
                 block_idx += 1;
@@ -2674,7 +2969,7 @@ fn run_single(cfg: RunConfig) {
                 // this step produced.
                 step_outputs::export_to_session(&mut session, &current_outputs);
                 if let Err(e) = step_outputs::write_outputs_file(&outputs_path, &run_outputs) {
-                    eprintln!("warning: outputs file: {}", e);
+                    log_warn!("warning: outputs file: {}", e);
                 }
                 if let (Some(ref mut c), Some(ref ckpt_id)) = (&mut ckpt, &checkpoint_id) {
                     c.add_outputs(&key, &raw_outputs(&current_outputs));
@@ -2812,7 +3107,7 @@ fn run_single(cfg: RunConfig) {
                 );
                 c.next_step_id = steps.get(c.next_block).map(|s| s.id.0.clone());
                 if let Err(e) = checkpoint::save(ckpt_id, c) {
-                    eprintln!("warning: checkpoint: {}", e);
+                    log_warn!("warning: checkpoint: {}", e);
                 }
             }
 
@@ -2878,7 +3173,7 @@ fn run_single(cfg: RunConfig) {
                         });
                         c.next_step_id = steps.get(c.next_block).map(|s| s.id.0.clone());
                         if let Err(e) = checkpoint::save(ckpt_id, c) {
-                            eprintln!("warning: checkpoint: {}", e);
+                            log_warn!("warning: checkpoint: {}", e);
                         }
                     }
                     block_idx += 1;
@@ -2961,7 +3256,7 @@ fn run_single(cfg: RunConfig) {
                     });
                     c.next_step_id = steps.get(c.next_block).map(|s| s.id.0.clone());
                     if let Err(e) = checkpoint::save(ckpt_id, c) {
-                        eprintln!("warning: checkpoint: {}", e);
+                        log_warn!("warning: checkpoint: {}", e);
                     }
                 }
                 block_idx += 1;
@@ -3025,7 +3320,7 @@ fn run_single(cfg: RunConfig) {
                 // this slice produced (e.g. an `eval` of login state).
                 step_outputs::export_to_session(&mut session, &current_outputs);
                 if let Err(e) = step_outputs::write_outputs_file(&outputs_path, &run_outputs) {
-                    eprintln!("warning: outputs file: {}", e);
+                    log_warn!("warning: outputs file: {}", e);
                 }
                 if let (Some(ref mut c), Some(ref ckpt_id)) = (&mut ckpt, &checkpoint_id) {
                     c.add_outputs(&key, &raw_outputs(&current_outputs));
@@ -3171,7 +3466,7 @@ fn run_single(cfg: RunConfig) {
                 );
                 c.next_step_id = steps.get(c.next_block).map(|s| s.id.0.clone());
                 if let Err(e) = checkpoint::save(ckpt_id, c) {
-                    eprintln!("warning: checkpoint: {}", e);
+                    log_warn!("warning: checkpoint: {}", e);
                 }
             }
 
@@ -3601,12 +3896,12 @@ fn write_pause_result(dir: &std::path::Path, signal: Option<&serde_json::Value>)
     let serialized = match serde_json::to_string_pretty(&payload) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("warning: pause_result.json serialize: {}", e);
+            log_warn!("warning: pause_result.json serialize: {}", e);
             return;
         }
     };
     if let Err(e) = std::fs::write(&path, serialized) {
-        eprintln!(
+        log_warn!(
             "warning: pause_result.json write ({}): {}",
             path.display(),
             e
@@ -3794,7 +4089,7 @@ fn pause_for_signal(
         c.next_step_id = next_step_id.map(|s| s.to_string());
         c.mark_paused();
         if let Err(e) = checkpoint::save(id, c) {
-            eprintln!("warning: checkpoint: {}", e);
+            log_warn!("warning: checkpoint: {}", e);
         }
     }
 
@@ -3811,7 +4106,7 @@ fn pause_for_signal(
         cb_for_desc,
     );
     if let Err(e) = pending::save(id, &desc) {
-        eprintln!("warning: pending descriptor: {}", e);
+        log_warn!("warning: pending descriptor: {}", e);
     }
 
     let bind_label = spec
@@ -3910,7 +4205,7 @@ fn pause_browser_slice(
         c.next_step_id = step_id.map(|s| s.to_string());
         c.mark_paused();
         if let Err(e) = checkpoint::save(id, c) {
-            eprintln!("warning: checkpoint: {}", e);
+            log_warn!("warning: checkpoint: {}", e);
         }
     }
 
@@ -3918,7 +4213,7 @@ fn pause_browser_slice(
     let desc =
         pending::build_for_browser_pause(id, file, block_idx, step_id, spec, &pause, cb_for_desc);
     if let Err(e) = pending::save(id, &desc) {
-        eprintln!("warning: pending descriptor: {}", e);
+        log_warn!("warning: pending descriptor: {}", e);
     }
 
     eprintln!(
@@ -4096,7 +4391,7 @@ fn transform_workbook(file: &str) {
 
 // ─── containers subcommand ──────────────────────────────────────────
 
-fn cmd_containers_build(path: &str) {
+fn cmd_containers_build(path: &str, json: bool) -> WbExit {
     let files = if Path::new(path).is_dir() {
         collect_workbooks(path, "a-z")
     } else {
@@ -4104,19 +4399,32 @@ fn cmd_containers_build(path: &str) {
     };
 
     if files.is_empty() {
-        eprintln!("no .md files found in {}", path);
-        std::process::exit(0);
+        if json {
+            print_json(&serde_json::json!({
+                "built": 0, "cached": 0, "errors": 0, "results": [],
+            }));
+        } else {
+            eprintln!("no .md files found in {}", path);
+        }
+        return WbExit::Success;
     }
 
     let mut built = 0;
     let mut skipped = 0;
     let mut errors = 0;
+    let mut results: Vec<serde_json::Value> = Vec::new();
 
     for file in &files {
         let content = match std::fs::read_to_string(file) {
             Ok(c) => c,
             Err(e) => {
-                eprintln!("  error: {}: {}", file, e);
+                if json {
+                    results.push(serde_json::json!({
+                        "file": file, "status": "error", "detail": e.to_string(),
+                    }));
+                } else {
+                    eprintln!("  error: {}: {}", file, e);
+                }
                 errors += 1;
                 continue;
             }
@@ -4126,6 +4434,9 @@ fn cmd_containers_build(path: &str) {
         let requires = match workbook.frontmatter.requires {
             Some(ref r) => r,
             None => {
+                if json {
+                    results.push(serde_json::json!({ "file": file, "status": "skipped" }));
+                }
                 skipped += 1;
                 continue;
             }
@@ -4138,7 +4449,13 @@ fn cmd_containers_build(path: &str) {
 
         let tag = sandbox::image_tag(requires);
         if sandbox::image_exists(&tag) {
-            eprintln!("  ✓ {} (cached: {})", filename, tag);
+            if json {
+                results.push(serde_json::json!({
+                    "file": file, "status": "cached", "tag": tag,
+                }));
+            } else {
+                eprintln!("  ✓ {} (cached: {})", filename, tag);
+            }
             skipped += 1;
             continue;
         }
@@ -4151,26 +4468,56 @@ fn cmd_containers_build(path: &str) {
 
         match sandbox::build_image(requires, &workbook_dir) {
             Ok(t) => {
-                eprintln!("  ✓ {} -> {}", filename, t);
+                if json {
+                    results.push(serde_json::json!({
+                        "file": file, "status": "built", "tag": t,
+                    }));
+                } else {
+                    eprintln!("  ✓ {} -> {}", filename, t);
+                }
                 built += 1;
             }
             Err(e) => {
-                eprintln!("  ✗ {} — {}", filename, e);
+                if json {
+                    results.push(serde_json::json!({
+                        "file": file, "status": "error", "detail": e.to_string(),
+                    }));
+                } else {
+                    eprintln!("  ✗ {} — {}", filename, e);
+                }
                 errors += 1;
             }
         }
     }
 
-    eprintln!();
-    eprintln!("  {} built, {} cached, {} errors", built, skipped, errors);
+    if json {
+        print_json(&serde_json::json!({
+            "built": built, "cached": skipped, "errors": errors, "results": results,
+        }));
+    } else {
+        eprintln!();
+        eprintln!("  {} built, {} cached, {} errors", built, skipped, errors);
+    }
 
     if errors > 0 {
-        std::process::exit(1);
+        WbExit::BlockFailed
+    } else {
+        WbExit::Success
     }
 }
 
-fn cmd_containers_list() {
+fn cmd_containers_list(json: bool) {
     let images = sandbox::list_images();
+    if json {
+        let arr: Vec<serde_json::Value> = images
+            .iter()
+            .map(|(tag, size, created)| {
+                serde_json::json!({ "tag": tag, "size": size, "created": created })
+            })
+            .collect();
+        print_json(&serde_json::json!({ "images": arr }));
+        return;
+    }
     if images.is_empty() {
         eprintln!("no sandbox images");
         return;
@@ -4180,9 +4527,11 @@ fn cmd_containers_list() {
     }
 }
 
-fn cmd_containers_prune() {
+fn cmd_containers_prune(json: bool) {
     let removed = sandbox::prune_images();
-    if removed == 0 {
+    if json {
+        print_json(&serde_json::json!({ "removed": removed }));
+    } else if removed == 0 {
         eprintln!("no sandbox images to remove");
     } else {
         eprintln!("removed {} sandbox images", removed);
@@ -4245,20 +4594,30 @@ fn cmd_pending_impl(json_out: bool, no_reap: bool) {
     }
 }
 
-fn cmd_cancel(id: &str) {
+fn cmd_cancel(id: &str, json: bool) -> WbExit {
     let had_desc = pending::descriptor_path(id).exists();
     let had_ckpt = checkpoint::checkpoint_path(id).exists();
     if !had_desc && !had_ckpt {
-        eprintln!("no checkpoint or pending descriptor for '{}'", id);
-        std::process::exit(1);
+        if json {
+            print_json(&serde_json::json!({
+                "ok": false, "id": id, "cancelled": false,
+                "error": "no checkpoint or pending descriptor",
+            }));
+        }
+        return WbExit::Io(format!("no checkpoint or pending descriptor for '{}'", id));
     }
     if let Err(e) = pending::delete(id) {
-        eprintln!("warning: {}", e);
+        log_warn!("warning: {}", e);
     }
     if let Err(e) = checkpoint::delete(id) {
-        eprintln!("warning: {}", e);
+        log_warn!("warning: {}", e);
     }
-    eprintln!("cancelled '{}'", id);
+    if json {
+        print_json(&serde_json::json!({ "ok": true, "id": id, "cancelled": true }));
+    } else {
+        eprintln!("cancelled '{}'", id);
+    }
+    WbExit::Success
 }
 
 fn cmd_resume_cmd(cli: ResumeArgs) -> WbExit {
@@ -4270,7 +4629,7 @@ fn cmd_resume_cmd(cli: ResumeArgs) -> WbExit {
     for path in &cli.env_files {
         match secrets::load_env_file(path) {
             Ok(env) => env_for_signal.extend(env),
-            Err(e) => eprintln!("warning: env-file {}: {}", path, e),
+            Err(e) => log_warn!("warning: env-file {}: {}", path, e),
         }
     }
 
@@ -4634,7 +4993,7 @@ fn cmd_resume_cmd(cli: ResumeArgs) -> WbExit {
             if bind_names.len() == 1 {
                 new_vars.insert(bind_names[0].clone(), v.clone());
             } else if bind_names.is_empty() {
-                eprintln!("warning: --value provided but wait has no `bind` — ignoring");
+                log_warn!("warning: --value provided but wait has no `bind` — ignoring");
             } else {
                 eprintln!(
                     "error: --value only works for a single bind; this wait binds {:?}",
@@ -4694,7 +5053,7 @@ fn cmd_resume_cmd(cli: ResumeArgs) -> WbExit {
                     }
                     Ok(None) => {}
                     Err(e) => {
-                        eprintln!("warning: {}", e);
+                        log_warn!("warning: {}", e);
                     }
                 }
             }
@@ -5903,25 +6262,38 @@ echo "pin=$pin"
         let Some(Command::Containers(args)) = cli.command else {
             panic!("expected Containers");
         };
-        assert!(matches!(args.sub, ContainersSub::List));
+        assert!(matches!(args.sub, ContainersSub::List { .. }));
 
         let cli2 = Cli::parse_from(["wb", "containers", "ls"]);
         let Some(Command::Containers(args2)) = cli2.command else {
             panic!("expected Containers");
         };
-        assert!(matches!(args2.sub, ContainersSub::List));
+        assert!(matches!(args2.sub, ContainersSub::List { .. }));
 
         let cli3 = Cli::parse_from(["wb", "containers", "build", "some/dir"]);
         let Some(Command::Containers(args3)) = cli3.command else {
             panic!("expected Containers");
         };
-        assert!(matches!(args3.sub, ContainersSub::Build { path: Some(_) }));
+        assert!(matches!(
+            args3.sub,
+            ContainersSub::Build { path: Some(_), .. }
+        ));
 
         let cli4 = Cli::parse_from(["wb", "containers", "prune"]);
         let Some(Command::Containers(args4)) = cli4.command else {
             panic!("expected Containers");
         };
-        assert!(matches!(args4.sub, ContainersSub::Prune));
+        assert!(matches!(args4.sub, ContainersSub::Prune { .. }));
+
+        // --format json parses after the subcommand token.
+        let cli5 = Cli::parse_from(["wb", "containers", "list", "--format", "json"]);
+        let Some(Command::Containers(args5)) = cli5.command else {
+            panic!("expected Containers");
+        };
+        assert!(matches!(
+            args5.sub,
+            ContainersSub::List { fmt } if fmt.format == "json"
+        ));
     }
 
     #[test]
@@ -5944,15 +6316,46 @@ echo "pin=$pin"
     }
 
     #[test]
-    fn parses_hidden_generation_stubs() {
+    fn parses_generation_commands() {
         let cli = Cli::parse_from(["wb", "completion", "bash"]);
         let Some(Command::Completion { shell }) = cli.command else {
             panic!("expected Completion");
         };
-        assert_eq!(shell.as_deref(), Some("bash"));
+        assert_eq!(shell, clap_complete::Shell::Bash);
+
+        // zsh/fish parse too.
+        let cli = Cli::parse_from(["wb", "completion", "zsh"]);
+        assert!(matches!(
+            cli.command,
+            Some(Command::Completion {
+                shell: clap_complete::Shell::Zsh
+            })
+        ));
 
         let cli = Cli::parse_from(["wb", "man"]);
         assert!(matches!(cli.command, Some(Command::Man)));
+    }
+
+    #[test]
+    fn completion_generates_nonempty_script() {
+        use clap::CommandFactory;
+        let mut buf: Vec<u8> = Vec::new();
+        let mut cmd = Cli::command();
+        clap_complete::generate(clap_complete::Shell::Bash, &mut cmd, "wb", &mut buf);
+        let script = String::from_utf8(buf).unwrap();
+        assert!(script.contains("wb"), "completion script should mention wb");
+        assert!(script.contains("validate"), "should list subcommands");
+    }
+
+    #[test]
+    fn man_page_renders_nonempty() {
+        use clap::CommandFactory;
+        let man = clap_mangen::Man::new(Cli::command());
+        let mut buf: Vec<u8> = Vec::new();
+        man.render(&mut buf).unwrap();
+        let page = String::from_utf8(buf).unwrap();
+        assert!(page.contains("wb"), "man page should mention wb");
+        assert!(page.contains(".TH"), "should be roff with a title header");
     }
 
     #[test]

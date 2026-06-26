@@ -90,6 +90,10 @@ pub fn validate_content(content: &str, path: &Path, opts: &ValidateOptions) -> V
     //    line up with executable step ids so callbacks can be correlated.
     check_workflow_nodes(&wb, path, &mut diags);
 
+    // 9. Unknown fence attributes (wb-attr-001). Now that the vocabulary is
+    //    closed, flag typo'd flags / keys the runtime would silently ignore.
+    check_fence_attrs(&wb, path, &mut diags);
+
     // If --strict: promote warnings to errors.
     if opts.strict {
         for d in &mut diags {
@@ -487,6 +491,48 @@ fn field_to_legacy_key(field: &str) -> &str {
     match field {
         "timeout" => "timeouts",
         _ => field,
+    }
+}
+
+// ─── Fence-attribute checks (wb-attr-001) ────────────────────────────────────
+
+/// Key/value fence attrs the runtime acts on. Anything else in `attrs.kv` is a
+/// typo or an attr from a newer wb than the one validating — either way the
+/// runtime ignores it silently, which is exactly what `wb validate` exists to
+/// surface. `when=` / `skip_if=` are pulled into dedicated fields by the parser
+/// and never reach `kv`, so they don't need to be listed here.
+const KNOWN_KV_ATTRS: &[&str] = &["timeout", "retries", "continue_on_error"];
+
+fn check_fence_attrs(wb: &Workbook, path: &Path, out: &mut Vec<Diagnostic>) {
+    for step in wb.build_steps() {
+        let line = step.span.line;
+        for key in step.attrs.kv.keys() {
+            if !KNOWN_KV_ATTRS.contains(&key.as_str()) {
+                out.push(
+                    Diagnostic::warning(
+                        "wb-attr-001",
+                        path,
+                        format!("block at L{line}: unknown fence attribute `{key}=`"),
+                    )
+                    .with_span(Span::point(line, 1))
+                    .with_help(format!(
+                        "known attrs: {}. the runtime ignores unknown attrs",
+                        KNOWN_KV_ATTRS.join(", ")
+                    )),
+                );
+            }
+        }
+        for flag in &step.attrs.unknown {
+            out.push(
+                Diagnostic::warning(
+                    "wb-attr-001",
+                    path,
+                    format!("block at L{line}: unknown fence flag `{flag}`"),
+                )
+                .with_span(Span::point(line, 1))
+                .with_help("known flags: no-run, silent, continue_on_error"),
+            );
+        }
     }
 }
 
@@ -909,5 +955,82 @@ echo ok
             &ValidateOptions { strict: false },
         );
         assert!(!diags.is_empty());
+    }
+
+    #[test]
+    fn unknown_fence_kv_attr_warns() {
+        let content = "```bash {flavor=spicy}\necho hi\n```\n";
+        let diags = validate_content(
+            content,
+            Path::new("test.md"),
+            &ValidateOptions { strict: false },
+        );
+        let d = diags
+            .iter()
+            .find(|d| d.code == "wb-attr-001")
+            .expect("expected wb-attr-001");
+        assert_eq!(d.severity, Severity::Warning);
+        assert!(d.message.contains("flavor"), "message: {}", d.message);
+    }
+
+    #[test]
+    fn unknown_fence_flag_warns() {
+        let content = "```bash {retryable}\necho hi\n```\n";
+        let diags = validate_content(
+            content,
+            Path::new("test.md"),
+            &ValidateOptions { strict: false },
+        );
+        assert!(
+            diags
+                .iter()
+                .any(|d| d.code == "wb-attr-001" && d.message.contains("retryable")),
+            "expected wb-attr-001 for unknown flag, got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn known_fence_attrs_do_not_warn() {
+        let content =
+            "```bash {#step1 .critical timeout=30s retries=2 continue_on_error}\necho hi\n```\n";
+        let diags = validate_content(
+            content,
+            Path::new("test.md"),
+            &ValidateOptions { strict: false },
+        );
+        assert!(
+            !diags.iter().any(|d| d.code == "wb-attr-001"),
+            "known attrs should not warn, got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn conditional_attrs_do_not_warn() {
+        // when= / skip_if= are pulled into dedicated fields, not kv.
+        let content = "```bash {when=$CI skip_if=$DRY_RUN}\necho hi\n```\n";
+        let diags = validate_content(
+            content,
+            Path::new("test.md"),
+            &ValidateOptions { strict: false },
+        );
+        assert!(
+            !diags.iter().any(|d| d.code == "wb-attr-001"),
+            "when/skip_if should not warn, got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn unknown_attr_promoted_to_error_in_strict() {
+        let content = "```bash {flavor=spicy}\necho hi\n```\n";
+        let diags = validate_content(
+            content,
+            Path::new("test.md"),
+            &ValidateOptions { strict: true },
+        );
+        let d = diags
+            .iter()
+            .find(|d| d.code == "wb-attr-001")
+            .expect("expected wb-attr-001");
+        assert_eq!(d.severity, Severity::Error);
     }
 }

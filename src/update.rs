@@ -105,10 +105,6 @@ pub fn cmd_update(check_only: bool) {
     }
 }
 
-pub fn cmd_version() {
-    println!("wb v{}", CURRENT_VERSION);
-}
-
 fn fetch_latest_version() -> WbResult<String> {
     // Hit /releases (not /releases/latest) and pick the newest tag that
     // matches the wb-CLI naming convention (`v<semver>`). The multi-product

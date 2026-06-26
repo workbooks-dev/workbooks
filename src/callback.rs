@@ -405,6 +405,39 @@ fn idempotency_key(event: &str, identity: &str, sequence: u64) -> String {
     digest.iter().map(|b| format!("{:02x}", b)).collect()
 }
 
+/// Callback URL schemes wb knows how to deliver to.
+const CALLBACK_SCHEMES: &[&str] = &["http://", "https://", "redis://", "rediss://"];
+
+/// Validate a callback URL + secret pairing before a run starts, so misconfig
+/// surfaces as one upfront message rather than a per-event curl/redis failure
+/// buried in the log. Returns the list of non-fatal warnings on success; a
+/// fatal scheme problem returns `Err`.
+pub fn validate_callback_config(url: &str, secret: Option<&str>) -> Result<Vec<String>, String> {
+    if !CALLBACK_SCHEMES.iter().any(|s| url.starts_with(s)) {
+        return Err(format!(
+            "unsupported callback URL '{}': expected one of {}",
+            url,
+            CALLBACK_SCHEMES.join(", ")
+        ));
+    }
+    let mut warnings = Vec::new();
+    let is_redis = url.starts_with("redis://") || url.starts_with("rediss://");
+    if is_redis && secret.is_some() {
+        warnings.push(
+            "callback secret is set but the callback URL is a Redis stream; \
+             HMAC signing only applies to HTTP callbacks and is ignored here"
+                .to_string(),
+        );
+    }
+    if url.starts_with("http://") {
+        warnings.push(format!(
+            "callback URL '{url}' uses plaintext http://; payloads and any HMAC \
+             signature are sent unencrypted"
+        ));
+    }
+    Ok(warnings)
+}
+
 impl CallbackConfig {
     fn is_redis(&self) -> bool {
         self.url.starts_with("redis://") || self.url.starts_with("rediss://")
@@ -766,14 +799,15 @@ impl CallbackConfig {
                 HttpSendResult::Ok => return,
                 HttpSendResult::ClientError(code) => {
                     // 4xx — receiver says we're wrong; retrying won't help.
-                    eprintln!(
+                    crate::log_warn!(
                         "warning: callback {} returned HTTP {} (not retrying)",
-                        event, code
+                        event,
+                        code
                     );
                     return;
                 }
                 HttpSendResult::ServerError(code) if is_last => {
-                    eprintln!(
+                    crate::log_warn!(
                         "warning: callback {} failed after {} attempts: HTTP {}",
                         event,
                         HTTP_RETRY_DELAYS.len(),
@@ -781,7 +815,7 @@ impl CallbackConfig {
                     );
                 }
                 HttpSendResult::NetworkError(err) if is_last => {
-                    eprintln!(
+                    crate::log_warn!(
                         "warning: callback {} failed after {} attempts: {}",
                         event,
                         HTTP_RETRY_DELAYS.len(),
@@ -805,7 +839,7 @@ impl CallbackConfig {
         let client = match redis::Client::open(self.url.as_str()) {
             Ok(c) => c,
             Err(e) => {
-                eprintln!("warning: redis callback: {}", e);
+                crate::log_warn!("warning: redis callback: {}", e);
                 return;
             }
         };
@@ -813,7 +847,7 @@ impl CallbackConfig {
         let mut conn = match client.get_connection_with_timeout(std::time::Duration::from_secs(5)) {
             Ok(c) => c,
             Err(e) => {
-                eprintln!("warning: redis callback connect: {}", e);
+                crate::log_warn!("warning: redis callback connect: {}", e);
                 return;
             }
         };
@@ -828,7 +862,7 @@ impl CallbackConfig {
             .query(&mut conn);
 
         if let Err(e) = result {
-            eprintln!("warning: redis callback XADD: {}", e);
+            crate::log_warn!("warning: redis callback XADD: {}", e);
         }
     }
 }
@@ -914,6 +948,51 @@ fn sign(payload: &[u8], secret: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn validate_callback_accepts_known_schemes() {
+        for url in [
+            "https://hooks.example.com/wb",
+            "http://localhost:9000/wb",
+            "redis://localhost:6379",
+            "rediss://upstash.example.com",
+        ] {
+            assert!(
+                validate_callback_config(url, None).is_ok(),
+                "expected {url} to validate"
+            );
+        }
+    }
+
+    #[test]
+    fn validate_callback_rejects_unknown_scheme() {
+        let err = validate_callback_config("ftp://nope", None).unwrap_err();
+        assert!(err.contains("unsupported callback URL"), "{err}");
+        // A bare host with no scheme is also rejected.
+        assert!(validate_callback_config("hooks.example.com", None).is_err());
+    }
+
+    #[test]
+    fn validate_callback_warns_on_redis_with_secret() {
+        let warnings = validate_callback_config("rediss://x", Some("hmac-key")).unwrap();
+        assert!(
+            warnings.iter().any(|w| w.contains("Redis")),
+            "expected redis+secret warning, got: {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn validate_callback_warns_on_plaintext_http() {
+        let warnings = validate_callback_config("http://x/wb", None).unwrap();
+        assert!(
+            warnings.iter().any(|w| w.contains("plaintext")),
+            "expected plaintext warning, got: {warnings:?}"
+        );
+        // https is clean.
+        assert!(validate_callback_config("https://x/wb", None)
+            .unwrap()
+            .is_empty());
+    }
 
     #[test]
     fn is_redis_detection() {

@@ -15,7 +15,7 @@
 //   wb-inc-001   missing include target
 //   wb-inc-002   circular include
 //   wb-inc-003   unreadable include target
-//   wb-attr-001  unknown fence attribute (deferred — vocabulary still open)
+//   wb-attr-001  unknown fence attribute or flag (warning; runtime ignores it)
 //   wb-secret-001 bad secret provider name
 //   wb-step-001  duplicate explicit step id
 //   wb-step-002  fence-attr policy shadows a legacy block-number map entry

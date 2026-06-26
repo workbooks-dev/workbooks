@@ -62,6 +62,12 @@ pub struct FenceAttrs {
     /// Key/value attrs (`timeout=30s`, `retries=2`, `continue_on_error`).
     /// Bare `continue_on_error` is normalized to `continue_on_error=true`.
     pub kv: std::collections::BTreeMap<String, String>,
+    /// Bare flags the parser didn't recognize. Retained verbatim so `wb
+    /// validate` can flag them (`wb-attr-001`); the runtime ignores them for
+    /// forward compatibility. Unknown `key=value` attrs land in `kv` instead
+    /// and are detected there.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub unknown: Vec<String>,
 }
 
 /// Source span for editor integrations.
