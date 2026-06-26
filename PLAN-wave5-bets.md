@@ -39,19 +39,30 @@ Three parallel tracks can run at once without colliding:
 
 ### Phase A — reach with zero new risk (do first, parallelizable)
 
-**#39 `wb mcp`** — *top pick, no gate.*
-- New `src/mcp.rs`: JSON-RPC over stdio (HTTP/SSE later). New `Command::Mcp`.
-- Tools: `author_workbook`, `run_workbook`, `inspect`, `validate`, `resume`,
-  `list_pending`, `get_run_events`.
-- Map state onto MCP primitives: checkpoint/pending → **Tasks** lifecycle;
-  `pause_for_human` → **elicitation**; `step.*` callbacks → progress
-  notifications; `--json`/`$WB_OUTPUTS_PATH` → structured results.
-- Keep it a *thin adapter* over the structured command internals exposed in #38 —
-  spec churn must not bleed into core. Pin a stable Tasks subset.
-- Critical files: `src/mcp.rs` (new), `src/main.rs` (dispatch), reuse
-  `checkpoint.rs`/`pending.rs`/`callback.rs`/`step_outputs.rs`.
-- Verify: an MCP client (Claude/inspector) can author→run→pause→resume→read
-  results end-to-end. `cargo test` + clippy green.
+**#39 `wb mcp`** — ✅ **SHIPPED** (top pick, no gate).
+- New `src/mcp.rs`: JSON-RPC 2.0 over newline-delimited stdio (HTTP/SSE later).
+  New `Command::Mcp`. Implements `initialize` / `notifications/initialized` /
+  `tools/list` / `tools/call` / `ping`.
+- Tools: `author_workbook`, `run_workbook`, `resume_workbook`, `inspect_workbook`,
+  `validate_workbook`, `list_pending`, `get_run_events`.
+- State onto MCP primitives: checkpoint/pending → the **Task** store (`run_id` =
+  checkpoint id); `pause_for_human`/`wait` → **elicitation** (`status:"input_required"`
+  + `elicitation` object with a `requestedSchema` per bound var); task status rides
+  on the child exit code; `--json` run summary + reconstructed step events →
+  structured results (`structuredContent` + a JSON text block).
+- Stayed a *thin adapter*: shells out to the same `wb` binary (`current_exe`) for
+  run/inspect/validate/resume/pending — this is what makes `run_single`'s
+  `process::exit`-on-pause (code 42) a mappable value instead of killing the
+  long-lived server — and reads checkpoint+pending in-process (read-only) for
+  `get_run_events`. Zero new deps. Honors the "wb stays a CLI / never a daemon"
+  guardrail.
+- Critical files: `src/mcp.rs` (new), `src/main.rs` (module + `Command::Mcp`
+  dispatch), reuse of `checkpoint.rs`/`pending.rs`.
+- Verified: end-to-end author→run→pause→resume→read in `tests/mcp_e2e.rs` (drives
+  the JSON-RPC server as a real client); unit coverage in `src/mcp.rs`.
+  `cargo fmt`/`clippy -D warnings`/`test`/`--release` all green.
+- Deferred: hosted HTTP/SSE transport; a true server-initiated `elicitation/create`
+  round-trip (the subprocess model can't hold a tool call open across a pause).
 
 **#43 docs-as-tests + Action** — *needs #31 first.*
 - Land #31 (`wb test` / `expect`/`assert` fences) per existing TODO sequencing.
