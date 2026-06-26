@@ -511,3 +511,52 @@ fn watch_once_and_json_snapshot() {
     std::fs::remove_dir_all(&dir).ok();
     std::fs::remove_file(&ckpt_file).ok();
 }
+
+#[test]
+fn changed_runs_only_edited_blocks() {
+    let dir = std::env::temp_dir().join(format!("wb-changed-{}", std::process::id()));
+    std::fs::remove_dir_all(&dir).ok();
+    std::fs::create_dir_all(&dir).unwrap();
+    let run_git = |args: &[&str]| {
+        Command::new("git")
+            .args(args)
+            .current_dir(&dir)
+            .output()
+            .expect("git");
+    };
+    run_git(&["init", "-q"]);
+    run_git(&["config", "user.email", "t@t.co"]);
+    run_git(&["config", "user.name", "t"]);
+    let md = dir.join("flow.md");
+    std::fs::write(
+        &md,
+        "---\nruntime: bash\n---\n```bash\necho AAA\n```\n```bash\necho BBB\n```\n",
+    )
+    .unwrap();
+    run_git(&["add", "flow.md"]);
+    run_git(&["commit", "-qm", "init"]);
+
+    // Edit only the second block.
+    std::fs::write(
+        &md,
+        "---\nruntime: bash\n---\n```bash\necho AAA\n```\n```bash\necho BBB_EDITED\n```\n",
+    )
+    .unwrap();
+
+    let out = Command::new(wb_binary())
+        .args([md.to_str().unwrap(), "--changed"])
+        .current_dir(&dir)
+        .output()
+        .expect("spawn wb");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("BBB_EDITED"),
+        "edited block should run: {stdout}"
+    );
+    assert!(
+        !stdout.contains("AAA"),
+        "unchanged block should be skipped: {stdout}"
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}

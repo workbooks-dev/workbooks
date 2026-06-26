@@ -492,6 +492,13 @@ struct RunArgs {
     /// with --from/--until; conflicts with --only.
     #[arg(long = "tag", value_name = "CLASS", conflicts_with = "only")]
     tag: Vec<String>,
+    /// Run only blocks new or edited vs a git ref (default HEAD). Composes with
+    /// --from/--until/--tag; conflicts with --only.
+    #[arg(long = "changed", conflicts_with = "only")]
+    changed: bool,
+    /// Git ref that --changed diffs against (default HEAD).
+    #[arg(long = "changed-base", value_name = "REF", default_value = "HEAD")]
+    changed_base: String,
     /// Cap how long a block may run before wb kills it. Accepts duration
     /// strings ("30s", "5m", "2h") or bare seconds. Without this flag and
     /// without a `timeouts._default` frontmatter entry, blocks run unbounded.
@@ -911,6 +918,10 @@ struct BareRunArgs {
     until: Option<String>,
     #[arg(long = "tag", value_name = "CLASS", conflicts_with = "only")]
     tag: Vec<String>,
+    #[arg(long = "changed", conflicts_with = "only")]
+    changed: bool,
+    #[arg(long = "changed-base", value_name = "REF", default_value = "HEAD")]
+    changed_base: String,
     #[arg(long = "default-block-timeout", value_name = "DURATION")]
     default_block_timeout: Option<String>,
     #[arg(long = "param", value_name = "KEY=VALUE")]
@@ -1023,6 +1034,8 @@ fn main() -> std::process::ExitCode {
                     from: bare.from,
                     until: bare.until,
                     tag: bare.tag,
+                    changed: bare.changed,
+                    changed_base: bare.changed_base,
                     default_block_timeout: bare.default_block_timeout,
                     param: bare.param,
                     param_file: bare.param_file,
@@ -1130,6 +1143,8 @@ fn cmd_run(args: RunArgs) -> WbExit {
                 from: args.from,
                 until: args.until,
                 tag: args.tag,
+                changed: args.changed,
+                changed_base: args.changed_base,
             },
             default_block_timeout: cli_default_timeout,
             browser_restart: false,
@@ -2768,11 +2783,19 @@ struct SelectionArgs {
     /// `--tag <class>` (repeatable): run only blocks carrying one of these
     /// fence `.class` tags. Composes with `--from`/`--until` (intersection).
     tag: Vec<String>,
+    /// `--changed`: run only blocks new/edited vs the `changed_base` git ref.
+    changed: bool,
+    /// Git ref `--changed` diffs against (default `HEAD`).
+    changed_base: String,
 }
 
 impl SelectionArgs {
     fn is_empty(&self) -> bool {
-        self.only.is_none() && self.from.is_none() && self.until.is_none() && self.tag.is_empty()
+        self.only.is_none()
+            && self.from.is_none()
+            && self.until.is_none()
+            && self.tag.is_empty()
+            && !self.changed
     }
 }
 
@@ -2804,14 +2827,83 @@ fn resolve_tag_set(
     Ok(Some(set))
 }
 
-/// Whether a block index is selected, given the resolved range and optional tag
-/// set. A block must be in the range AND (if tags are active) in the tag set.
+/// Whether a block index is selected: it must be in the `--from`/`--until`
+/// range AND in every active restriction set (`--tag`, `--changed`). An empty
+/// `restricts` slice means range-only.
 fn block_selected(
     range: &std::ops::Range<usize>,
-    tags: &Option<std::collections::BTreeSet<usize>>,
+    restricts: &[std::collections::BTreeSet<usize>],
     idx: usize,
 ) -> bool {
-    range.contains(&idx) && tags.as_ref().is_none_or(|s| s.contains(&idx))
+    range.contains(&idx) && restricts.iter().all(|s| s.contains(&idx))
+}
+
+/// Build the active restriction sets (`--tag`, `--changed`) for a run. Each
+/// returned set further narrows the `--from`/`--until` range via intersection.
+fn resolve_restrictions(
+    sel: &SelectionArgs,
+    steps: &[step_ir::Step],
+    file: &str,
+) -> Result<Vec<std::collections::BTreeSet<usize>>, String> {
+    let mut restricts = Vec::new();
+    if let Some(tags) = resolve_tag_set(sel, steps)? {
+        restricts.push(tags);
+    }
+    if sel.changed {
+        let base = if sel.changed_base.is_empty() {
+            "HEAD"
+        } else {
+            sel.changed_base.as_str()
+        };
+        restricts.push(resolve_changed_set(steps, file, base)?);
+    }
+    Ok(restricts)
+}
+
+/// `--changed`: the set of block indices whose `(language, body)` is NOT present
+/// in the same file at the git ref `base` — i.e. blocks that are new or edited.
+/// Matching by content (not position) makes it robust to inserting/reordering
+/// blocks. An untracked file (or unreadable ref) means "everything changed".
+fn resolve_changed_set(
+    steps: &[step_ir::Step],
+    file: &str,
+    base: &str,
+) -> Result<std::collections::BTreeSet<usize>, String> {
+    let all: std::collections::BTreeSet<usize> = (0..steps.len()).collect();
+
+    // Repo-relative path; empty output ⇒ the file isn't tracked.
+    let rel = std::process::Command::new("git")
+        .args(["ls-files", "--full-name", "--", file])
+        .output()
+        .map_err(|e| format!("--changed: git not available: {e}"))?;
+    let relpath = String::from_utf8_lossy(&rel.stdout).trim().to_string();
+    if relpath.is_empty() {
+        eprintln!("wb: --changed: {file} is untracked — treating all blocks as changed");
+        return Ok(all);
+    }
+
+    let show = std::process::Command::new("git")
+        .arg("show")
+        .arg(format!("{base}:{relpath}"))
+        .output()
+        .map_err(|e| format!("--changed: git show failed: {e}"))?;
+    if !show.status.success() {
+        eprintln!("wb: --changed: no '{relpath}' at {base} — treating all blocks as changed");
+        return Ok(all);
+    }
+    let base_content = String::from_utf8_lossy(&show.stdout);
+    let base_steps = parser::parse(&base_content).build_steps();
+    let base_bodies: std::collections::HashSet<(String, String)> = base_steps
+        .iter()
+        .map(|s| (s.language.clone(), s.body.clone()))
+        .collect();
+
+    Ok(steps
+        .iter()
+        .enumerate()
+        .filter(|(_, s)| !base_bodies.contains(&(s.language.clone(), s.body.clone())))
+        .map(|(i, _)| i)
+        .collect())
 }
 
 /// If the workbook declares `requires:` and we're not already running inside
@@ -3042,7 +3134,7 @@ fn dry_run_preview(
             std::process::exit(exit_codes::EXIT_USAGE);
         }
     };
-    let selection_tags = match resolve_tag_set(&cfg.selection, steps) {
+    let selection_restricts = match resolve_restrictions(&cfg.selection, steps, &cfg.file) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("error: {e}");
@@ -3121,7 +3213,7 @@ fn dry_run_preview(
         let policy = step_policy_for(resolved_step_policies, block_idx);
 
         // Skip precedence mirrors the run loop: selection > no-run > conditional.
-        let status = if !block_selected(&selection_range, &selection_tags, block_idx) {
+        let status = if !block_selected(&selection_range, &selection_restricts, block_idx) {
             "skip (selection)".to_string()
         } else if no_run {
             "skip (no-run)".to_string()
@@ -3786,7 +3878,7 @@ fn run_single(cfg: RunConfig) {
             std::process::exit(exit_codes::EXIT_USAGE);
         }
     };
-    let selection_tags = match resolve_tag_set(&selection, &steps) {
+    let selection_restricts = match resolve_restrictions(&selection, &steps, file) {
         Ok(set) => set,
         Err(e) => {
             eprintln!("error: {}", e);
@@ -4207,7 +4299,7 @@ fn run_single(cfg: RunConfig) {
             }
 
             let block_heading = last_heading.take();
-            let live_skip = if !block_selected(&selection_range, &selection_tags, block_idx) {
+            let live_skip = if !block_selected(&selection_range, &selection_restricts, block_idx) {
                 Some(selection_skip_decision())
             } else if block.skip_execution {
                 Some(no_run_skip_decision())
@@ -4552,7 +4644,7 @@ fn run_single(cfg: RunConfig) {
             }
 
             let block_heading = last_heading.take();
-            let live_skip = if !block_selected(&selection_range, &selection_tags, block_idx) {
+            let live_skip = if !block_selected(&selection_range, &selection_restricts, block_idx) {
                 Some(selection_skip_decision())
             } else if spec.skip_execution {
                 Some(no_run_skip_decision())

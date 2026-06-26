@@ -158,24 +158,30 @@ wb run deploy.md --until smoke-test        # stop after smoke-test
 wb run deploy.md --from migrate --until smoke-test   # bounded range
 wb run deploy.md --tag smoke               # only blocks tagged {.smoke}
 wb run deploy.md --tag smoke --tag db      # union of .smoke and .db blocks
+wb run deploy.md --changed                 # only blocks new/edited vs git HEAD
+wb run deploy.md --changed --changed-base main   # …vs another ref
 ```
 
 `--only`/`--from`/`--until` take a step id — either explicit (`{#login}`) or
 auto-derived (`auto-<hash>`). `--tag` takes a fence `.class` (repeatable; a
-block matches if it carries any of the given classes) and composes with
-`--from`/`--until` as an intersection. Unknown step ids, and tags that match no
-block, fail with a usage error before any block runs. Skipped blocks emit
-`step.skipped` callbacks with `kind: "selection"` so agents see the gap.
+block matches if it carries any of the given classes). `--changed` selects
+blocks whose `(language, body)` is new or edited versus a git ref
+(`--changed-base`, default `HEAD`) — matched by content, so it's robust to
+inserting/reordering blocks; an untracked file means "all changed". `--tag`,
+`--changed`, and `--from`/`--until` compose as an intersection. Unknown step
+ids, and tags that match no block, fail with a usage error before any block
+runs. Skipped blocks emit `step.skipped` callbacks with `kind: "selection"` so
+agents see the gap.
 
 Limits in this milestone:
 
-- `--only` conflicts with `--from`/`--until`/`--tag` (clap rejects at parse).
+- `--only` conflicts with `--from`/`--until`/`--tag`/`--changed` (clap rejects at parse).
 - Selection cannot be combined with `--checkpoint` — partial-run state
   semantics aren't defined yet (which "completed" do we track when most
   blocks are intentionally skipped?). Run ephemerally instead.
 - A selective run is *ephemeral*: it doesn't read or write the default
   checkpoint, so subsequent normal runs still see the previous state.
-- `--changed` and the source-hash cache (`--no-cache`) are tracked in #33.
+- Transparent source-hash caching is `--cache` (see below), separate from selection.
 
 ### Source-hash execution cache: `--cache`
 
