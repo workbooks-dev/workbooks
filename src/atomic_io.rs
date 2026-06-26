@@ -95,12 +95,17 @@ mod tests {
     use std::io::Write;
 
     fn tempdir() -> std::path::PathBuf {
+        // A per-process atomic counter guarantees uniqueness even when two
+        // parallel tests read the same (coarse) clock nanosecond — otherwise
+        // they could collide on the same temp dir and clobber each other.
+        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let base = std::env::temp_dir();
         let n = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let dir = base.join(format!("wb_atomic_io_{}_{}", std::process::id(), n));
+        let c = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let dir = base.join(format!("wb_atomic_io_{}_{}_{}", std::process::id(), n, c));
         std::fs::create_dir_all(&dir).unwrap();
         dir
     }
@@ -166,6 +171,45 @@ mod tests {
     }
 
     #[test]
+    fn lock_creates_missing_parent_dirs() {
+        // The lock path's parent doesn't exist yet → try_lock_for runs the
+        // create_dir_all branch (line 53) for real, not as a no-op.
+        let dir = tempdir();
+        let path = dir.join("nested").join("deeper").join("state.json");
+        assert!(!path.parent().unwrap().exists());
+        let guard = try_lock_for(&path).expect("lock should succeed after creating parents");
+        assert!(path.parent().unwrap().exists());
+        drop(guard);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn lock_contention_maps_to_would_block_where_supported() {
+        // On platforms where intra-process flock conflicts (e.g. Linux), a
+        // second acquisition while the first is held returns the mapped
+        // WouldBlock error (lines 61-65). On BSD/macOS flock is permissive
+        // intra-process, so the second lock may succeed — in that case there's
+        // nothing to assert and we simply skip. Either way this never fails.
+        let dir = tempdir();
+        let path = dir.join("state.json");
+        let _held = try_lock_for(&path).expect("first lock should succeed");
+        match try_lock_for(&path) {
+            Err(e) => {
+                assert_eq!(
+                    e.kind(),
+                    std::io::ErrorKind::WouldBlock,
+                    "contention should map to WouldBlock, got {e:?}"
+                );
+                assert!(e.to_string().contains("already in use"), "{e}");
+            }
+            Ok(_g) => {
+                // Permissive platform (BSD/macOS): no contention to observe.
+            }
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn lock_blocks_subprocess() {
         // Cross-process is the real scenario: a second `wb` invocation must
         // see the lock and fail fast. We hold the lock in this test process
@@ -197,6 +241,45 @@ mod tests {
             }
         }
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn rename_failure_cleans_up_tmp_and_errors() {
+        // Destination is an existing (non-empty) directory: rename(tmp -> dir)
+        // fails, exercising the error branch that removes the tmp file.
+        let dir = tempdir();
+        let dest = dir.join("state.json");
+        std::fs::create_dir_all(&dest).unwrap();
+        std::fs::write(dest.join("inside"), b"x").unwrap(); // make it non-empty
+        let err = write_secret_file(&dest, b"payload");
+        assert!(err.is_err(), "writing onto a directory should fail");
+        // No leftover .tmp file in the parent dir.
+        let leftover: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().contains(".tmp"))
+            .collect();
+        assert!(leftover.is_empty(), "tmp not cleaned up: {:?}", leftover);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn write_to_missing_parent_errors() {
+        let dir = tempdir();
+        let path = dir.join("no-such-subdir").join("state.json");
+        assert!(write_secret_file(&path, b"x").is_err());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn sibling_helpers_fallback_without_filename() {
+        // A path that has no file_name component (root) falls back to "wb".
+        let root = Path::new("/");
+        let lock = lock_sibling(root);
+        assert!(lock.to_string_lossy().contains(".wb.lock"));
+        let tmp = tmp_sibling(root);
+        assert!(tmp.to_string_lossy().contains(".wb."));
+        assert!(tmp.to_string_lossy().ends_with(".tmp"));
     }
 
     #[test]

@@ -674,11 +674,21 @@ fn which_on_path(name: &str) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
+
+    // Serializes every test that mutates a process-global env var (PATH,
+    // WB_BROWSER_RUNTIME, WB_SIDECAR_SHUTDOWN_TIMEOUT_SECS). cargo runs unit
+    // tests on multiple threads within one process, so two tests swapping the
+    // same env var concurrently would race. Each holder saves + restores the
+    // var inside its critical section, so the window where the var is "wrong"
+    // never overlaps another env-sensitive test.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     // Combined test: cargo runs tests on multiple threads and env vars are
     // process-global, so we verify both branches in a single sequential body.
     #[test]
     fn resolve_binary_env_and_missing() {
+        let _guard = ENV_LOCK.lock().unwrap();
         let saved_env = std::env::var_os("WB_BROWSER_RUNTIME");
         let saved_path = std::env::var_os("PATH");
 
@@ -806,5 +816,234 @@ mod tests {
             derive_lifecycle_event_name("verb.complete"),
             "verb.complete"
         );
+    }
+
+    #[test]
+    fn derive_event_name_handles_degenerate_suffixes() {
+        // Empty suffix after the prefix → "step." with nothing trailing.
+        assert_eq!(derive_lifecycle_event_name("slice."), "step.");
+        // "session_" with an empty remainder still routes to the session
+        // namespace (with an empty trailing segment).
+        assert_eq!(derive_lifecycle_event_name("slice.session_"), "session.");
+        // A lone "session" (no trailing underscore) is NOT the session_
+        // prefix, so it stays a step.* event.
+        assert_eq!(derive_lifecycle_event_name("slice.session"), "step.session");
+    }
+
+    // ---- extract_pause_info edge cases -------------------------------------
+
+    #[test]
+    fn extract_pause_info_empty_object_is_all_defaults() {
+        let info = extract_pause_info(&json!({}));
+        assert!(info.sidecar_state.is_none());
+        assert!(info.reason.is_none());
+        assert!(info.resume_url.is_none());
+        assert!(info.verb_index.is_none());
+        assert!(info.message.is_none());
+        assert!(info.context_url.is_none());
+        assert!(info.resume_on.is_none());
+        assert!(info.timeout.is_none());
+        assert!(info.actions.is_empty());
+    }
+
+    #[test]
+    fn extract_pause_info_non_array_actions_yields_empty_vec() {
+        // A non-array `actions` (object, string, number) must degrade to "no
+        // custom actions" so the run page renders a single default Resume.
+        for actions in [json!({"label": "x"}), json!("approve"), json!(5)] {
+            let msg = json!({ "reason": "x", "actions": actions });
+            assert!(extract_pause_info(&msg).actions.is_empty());
+        }
+    }
+
+    #[test]
+    fn extract_pause_info_string_verb_index_is_none() {
+        // verb_index must be an integer; a stringly-typed value is rejected
+        // (as_u64 returns None) rather than coerced.
+        let msg = json!({ "reason": "x", "verb_index": "7" });
+        assert!(extract_pause_info(&msg).verb_index.is_none());
+        // A negative number likewise has no u64 representation.
+        let neg = json!({ "reason": "x", "verb_index": -3 });
+        assert!(extract_pause_info(&neg).verb_index.is_none());
+    }
+
+    #[test]
+    fn extract_pause_info_scalar_sidecar_state_is_preserved() {
+        // sidecar_state is opaque — even a scalar (string) is captured verbatim.
+        let msg = json!({ "reason": "x", "sidecar_state": "opaque-token" });
+        let info = extract_pause_info(&msg);
+        let state = info.sidecar_state.expect("scalar state should be captured");
+        assert_eq!(state.value(), &serde_yaml::Value::from("opaque-token"));
+    }
+
+    #[test]
+    fn extract_pause_info_non_string_scalar_fields_are_ignored() {
+        // reason/resume_url/etc. must be strings; a numeric reason is dropped.
+        let msg = json!({ "reason": 123, "resume_url": true, "timeout": 60 });
+        let info = extract_pause_info(&msg);
+        assert!(info.reason.is_none());
+        assert!(info.resume_url.is_none());
+        assert!(info.timeout.is_none());
+    }
+
+    // ---- SidecarState --------------------------------------------------------
+
+    #[test]
+    fn sidecar_state_get_and_value_on_mapping() {
+        let yaml: serde_yaml::Value =
+            serde_yaml::from_str("step: awaiting_totp\nnav: abc").unwrap();
+        let state = SidecarState(yaml);
+        assert_eq!(
+            state.get("step"),
+            Some(&serde_yaml::Value::from("awaiting_totp"))
+        );
+        assert_eq!(state.get("missing"), None);
+        assert!(state.value().is_mapping());
+    }
+
+    #[test]
+    fn sidecar_state_get_on_non_mapping_is_none() {
+        let state = SidecarState(serde_yaml::Value::from("scalar"));
+        assert_eq!(state.get("anything"), None);
+    }
+
+    #[test]
+    fn sidecar_state_is_transparent_over_json() {
+        // #[serde(transparent)] means the wire shape is the inner value with no
+        // wrapping object — round-trips through JSON byte-identically.
+        let state = SidecarState(serde_yaml::Value::from("hi"));
+        let j = serde_json::to_value(&state).unwrap();
+        assert_eq!(j, json!("hi"));
+        let back: SidecarState = serde_json::from_value(json!("hi")).unwrap();
+        assert_eq!(back, state);
+
+        let map_state: SidecarState =
+            serde_json::from_value(json!({ "a": 1, "b": "two" })).unwrap();
+        let reser = serde_json::to_value(&map_state).unwrap();
+        assert_eq!(reser, json!({ "a": 1, "b": "two" }));
+    }
+
+    // ---- RestoreArgs / outbound restore frame --------------------------------
+
+    #[test]
+    fn restore_args_state_serializes_for_outbound_frame() {
+        // Mirrors the restore-frame construction in run_slice: a SidecarState
+        // serializes into a JSON value the sidecar can read back.
+        let state = SidecarState(serde_yaml::from_str("nav: page-3\nattempt: 2").unwrap());
+        let args = RestoreArgs {
+            state: Some(state),
+            signal: Some(json!({ "otp_code": "123456" })),
+        };
+        let state_json = serde_json::to_value(args.state.as_ref().unwrap()).unwrap();
+        assert_eq!(state_json["nav"], json!("page-3"));
+        assert_eq!(state_json["attempt"], json!(2));
+        assert_eq!(args.signal.unwrap()["otp_code"], json!("123456"));
+    }
+
+    #[test]
+    fn restore_args_default_is_empty() {
+        let args = RestoreArgs::default();
+        assert!(args.state.is_none());
+        assert!(args.signal.is_none());
+    }
+
+    #[test]
+    fn pause_info_default_is_empty() {
+        let p = PauseInfo::default();
+        assert!(p.sidecar_state.is_none());
+        assert!(p.reason.is_none());
+        assert!(p.actions.is_empty());
+    }
+
+    // ---- fire_lifecycle (no-callback fast path) ------------------------------
+
+    #[test]
+    fn fire_lifecycle_without_callback_is_a_noop() {
+        // ctx.cb == None must return early with no side effects (no panic, no
+        // network). This covers the guard branch without spawning curl.
+        let ctx = SliceCallbackContext {
+            cb: None,
+            workbook: "wb.md",
+            checkpoint_id: None,
+            block_index: 0,
+            heading: None,
+            line_number: 1,
+            completed: 0,
+            total: 1,
+            include_chain: &[],
+            step_id: None,
+            workflow: None,
+        };
+        fire_lifecycle(
+            &ctx,
+            "step.recovered",
+            &json!({ "type": "slice.recovered" }),
+        );
+    }
+
+    // ---- shutdown_timeout (env-gated) ----------------------------------------
+
+    #[test]
+    fn shutdown_timeout_parses_env_variants() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let key = "WB_SIDECAR_SHUTDOWN_TIMEOUT_SECS";
+        let saved = std::env::var_os(key);
+
+        // Unset → the compiled-in default.
+        std::env::remove_var(key);
+        assert_eq!(shutdown_timeout(), SHUTDOWN_TIMEOUT);
+
+        // Valid non-negative integer → that many seconds.
+        std::env::set_var(key, "10");
+        assert_eq!(shutdown_timeout(), Duration::from_secs(10));
+
+        // Whitespace is trimmed before parsing.
+        std::env::set_var(key, "  3  ");
+        assert_eq!(shutdown_timeout(), Duration::from_secs(3));
+
+        // Zero disables the wait entirely (legacy fast-teardown behavior).
+        std::env::set_var(key, "0");
+        assert_eq!(shutdown_timeout(), Duration::from_secs(0));
+
+        // Non-integer → fall back to the default rather than aborting.
+        std::env::set_var(key, "not-a-number");
+        assert_eq!(shutdown_timeout(), SHUTDOWN_TIMEOUT);
+
+        match saved {
+            Some(v) => std::env::set_var(key, v),
+            None => std::env::remove_var(key),
+        }
+    }
+
+    // ---- which_on_path (env-gated) -------------------------------------------
+
+    #[test]
+    fn which_on_path_finds_existing_file_and_misses_absent() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let saved_path = std::env::var_os("PATH");
+
+        // Build a temp dir holding a single known file.
+        let dir = std::env::temp_dir().join(format!(
+            "wb-sidecar-which-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let bin_name = "wb-fake-sidecar-bin";
+        std::fs::write(dir.join(bin_name), b"#!/bin/sh\n").unwrap();
+
+        std::env::set_var("PATH", &dir);
+        assert_eq!(which_on_path(bin_name), Some(dir.join(bin_name)));
+        // A name that isn't in the dir is not found.
+        assert_eq!(which_on_path("definitely-not-here-xyz"), None);
+
+        match saved_path {
+            Some(v) => std::env::set_var("PATH", v),
+            None => std::env::remove_var("PATH"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

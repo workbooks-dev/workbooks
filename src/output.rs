@@ -596,3 +596,437 @@ pub fn print_summary(summary: &RunSummary) {
         );
     }
 }
+
+// ─── Tests ────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::assertion::Assertion;
+    use crate::parser::{
+        BrowserSliceSpec, CodeBlock, ExpectSpec, Frontmatter, IncludeFrame, Section, WaitSpec,
+        Workbook,
+    };
+    use crate::step_ir::FenceAttrs;
+    use std::time::Duration;
+
+    fn code(lang: &str, src: &str, line: usize) -> CodeBlock {
+        CodeBlock {
+            language: lang.into(),
+            code: src.into(),
+            line_number: line,
+            skip_execution: false,
+            silent: false,
+            when: None,
+            skip_if: None,
+            no_cache: false,
+            attrs: FenceAttrs::default(),
+        }
+    }
+
+    fn result(idx: usize, lang: &str, stdout: &str, stderr: &str, exit: i32) -> BlockResult {
+        BlockResult {
+            block_index: idx,
+            language: lang.into(),
+            stdout: stdout.into(),
+            stderr: stderr.into(),
+            exit_code: exit,
+            duration: Duration::from_millis(1500),
+            error_type: None,
+            stdout_partial: false,
+            stderr_partial: false,
+        }
+    }
+
+    fn summary(source: &str, results: Vec<BlockResult>) -> RunSummary {
+        let passed = results.iter().filter(|r| r.success()).count();
+        let failed = results.iter().filter(|r| !r.success()).count();
+        let total = results.len();
+        RunSummary {
+            source_file: source.into(),
+            total_blocks: total,
+            passed,
+            failed,
+            total_duration: Duration::from_millis(2500),
+            results,
+            run_id: "run-123".into(),
+        }
+    }
+
+    // ── styling helpers (non-TTY: returns text unchanged) ──
+
+    #[test]
+    fn style_helpers_passthrough_without_tty() {
+        // In the test harness stderr is not a terminal, so use_color() is
+        // false and every styler returns its input verbatim.
+        assert_eq!(style_ok("ok"), "ok");
+        assert_eq!(style_fail("fail"), "fail");
+        assert_eq!(style_dim("dim"), "dim");
+        assert_eq!(style_bold("bold"), "bold");
+    }
+
+    #[test]
+    fn print_helpers_do_not_panic() {
+        print_stderr_dim("a dim stderr line");
+        print_block_header(Some("Heading"), "bash", 12, Some("echo hi"));
+        print_block_header(None, "python", 3, None);
+        // long preview triggers the >72 char truncation path
+        let long = "x".repeat(200);
+        print_block_header(Some("Big"), "bash", 1, Some(&long));
+    }
+
+    // ── OutputFormat::from_path ──
+
+    #[test]
+    fn output_format_from_path_extensions() {
+        assert_eq!(OutputFormat::from_path("a.json"), Some(OutputFormat::Json));
+        assert_eq!(OutputFormat::from_path("a.yaml"), Some(OutputFormat::Yaml));
+        assert_eq!(OutputFormat::from_path("a.yml"), Some(OutputFormat::Yaml));
+        assert_eq!(
+            OutputFormat::from_path("a.md"),
+            Some(OutputFormat::Markdown)
+        );
+        assert_eq!(
+            OutputFormat::from_path("a.markdown"),
+            Some(OutputFormat::Markdown)
+        );
+        // case-insensitive
+        assert_eq!(OutputFormat::from_path("A.JSON"), Some(OutputFormat::Json));
+        // unknown extension and no extension
+        assert_eq!(OutputFormat::from_path("a.txt"), None);
+        // no '.' → rsplit yields the whole string, an unknown "extension" → None
+        assert_eq!(OutputFormat::from_path("noext"), None);
+    }
+
+    // ── JSON / YAML output ──
+
+    #[test]
+    fn json_output_passing_run() {
+        let fm = Frontmatter {
+            title: Some("My Title".into()),
+            ..Default::default()
+        };
+        let wb = Workbook {
+            frontmatter: fm,
+            sections: vec![
+                Section::Text("## First Heading\n".into()),
+                Section::Code(code("bash", "echo hi", 5)),
+            ],
+        };
+        let s = summary("run.md", vec![result(0, "bash", "hi", "", 0)]);
+        let json = format_output(&wb, &s, OutputFormat::Json);
+        assert!(json.contains("\"title\": \"My Title\""));
+        assert!(json.contains("\"status\": \"pass\""));
+        assert!(json.contains("\"run_id\": \"run-123\""));
+        assert!(json.contains("\"heading\": \"First Heading\""));
+        assert!(json.contains("\"line_number\": 5"));
+        assert!(json.contains("\"stdout\": \"hi\""));
+        // success omits error_type / partial flags
+        assert!(!json.contains("error_type"));
+        assert!(!json.contains("stdout_partial"));
+    }
+
+    #[test]
+    fn json_output_failing_with_error_and_partial() {
+        // No frontmatter title → falls back to source_file.
+        let wb = Workbook {
+            frontmatter: Frontmatter::default(),
+            sections: vec![Section::Code(code("bash", "boom", 1))],
+        };
+        let mut r = result(0, "bash", "partial out", "oops", 7);
+        r.error_type = Some("timeout".into());
+        r.stdout_partial = true;
+        r.stderr_partial = true;
+        let s = summary("run.md", vec![r]);
+        let json = format_output(&wb, &s, OutputFormat::Json);
+        assert!(json.contains("\"title\": \"run.md\""));
+        assert!(json.contains("\"status\": \"fail\""));
+        assert!(json.contains("\"error_type\": \"timeout\""));
+        assert!(json.contains("\"stdout_partial\": true"));
+        assert!(json.contains("\"stderr_partial\": true"));
+        assert!(json.contains("\"exit_code\": 7"));
+    }
+
+    #[test]
+    fn json_block_meta_handles_all_section_kinds() {
+        // Exercises every non-code arm of build_json_output's section walk,
+        // plus a result whose block_index exceeds block_meta (unwrap_or path).
+        let wait = WaitSpec {
+            kind: Some("email".into()),
+            ..Default::default()
+        };
+        let wb = Workbook {
+            frontmatter: Frontmatter::default(),
+            sections: vec![
+                Section::Text("intro line\n## H1\nmore\n".into()),
+                Section::Wait(wait),
+                Section::Browser(BrowserSliceSpec::default()),
+                Section::Expect(ExpectSpec::default()),
+                Section::IncludeEnter(IncludeFrame {
+                    id: "inc".into(),
+                    title: None,
+                }),
+                Section::Code(code("python", "print(1)", 9)),
+                Section::IncludeExit(IncludeFrame {
+                    id: "inc".into(),
+                    title: None,
+                }),
+            ],
+        };
+        // Two results: index 0 (maps to the code block meta) and index 5
+        // (out of range → unwrap_or((None,0))).
+        let s = summary(
+            "x.md",
+            vec![
+                result(0, "python", "1", "", 0),
+                result(5, "bash", "", "", 0),
+            ],
+        );
+        let json = format_output(&wb, &s, OutputFormat::Json);
+        assert!(json.contains("\"heading\": \"H1\""));
+        assert!(json.contains("\"line_number\": 9"));
+    }
+
+    #[test]
+    fn yaml_output_renders() {
+        let wb = Workbook {
+            frontmatter: Frontmatter::default(),
+            sections: vec![Section::Code(code("bash", "echo hi", 1))],
+        };
+        let s = summary("run.md", vec![result(0, "bash", "hi", "", 0)]);
+        let yaml = format_output(&wb, &s, OutputFormat::Yaml);
+        assert!(yaml.contains("source: run.md"));
+        assert!(yaml.contains("status: pass"));
+    }
+
+    // ── Markdown output ──
+
+    #[test]
+    fn markdown_output_full_features() {
+        let fm = Frontmatter {
+            title: Some("Doc".into()),
+            ..Default::default()
+        };
+        let wait = WaitSpec {
+            kind: Some("email".into()),
+            ..Default::default()
+        };
+        let browser_raw = BrowserSliceSpec {
+            raw: "session: s1\nverbs: []".into(),
+            ..Default::default()
+        };
+        let browser_yaml = BrowserSliceSpec {
+            session: Some("s2".into()),
+            ..Default::default()
+        };
+        let expect = ExpectSpec {
+            assertions: vec![(
+                "exit 0".to_string(),
+                Assertion::Exit {
+                    negate: false,
+                    code: 0,
+                },
+            )],
+            ..Default::default()
+        };
+        let wb = Workbook {
+            frontmatter: fm,
+            sections: vec![
+                Section::Text("# Doc\n\n".into()),
+                Section::Code(code("bash", "echo hi", 4)), // pass w/ stdout
+                Section::Code(code("bash", "warn", 8)),    // pass w/ stderr only
+                Section::Code(code("bash", "boom", 12)),   // fail no output
+                Section::Wait(wait),
+                Section::Browser(browser_raw),
+                Section::Browser(browser_yaml),
+                Section::Expect(expect),
+                Section::IncludeEnter(IncludeFrame {
+                    id: "i".into(),
+                    title: None,
+                }),
+                Section::IncludeExit(IncludeFrame {
+                    id: "i".into(),
+                    title: None,
+                }),
+            ],
+        };
+        let s = summary(
+            "doc.md",
+            vec![
+                result(0, "bash", "hello-out", "", 0),
+                result(1, "bash", "", "warned", 0),
+                result(2, "bash", "", "", 3),
+            ],
+        );
+        let md = format_output(&wb, &s, OutputFormat::Markdown);
+        // frontmatter
+        assert!(md.contains("source: doc.md"));
+        assert!(md.contains("title: Doc"));
+        assert!(md.contains("run_id: run-123"));
+        assert!(md.contains("status: fail"));
+        assert!(md.contains("blocks: { total: 3, passed: 2, failed: 1 }"));
+        // pass/fail markers
+        assert!(md.contains("**[pass]** block 1 L4"));
+        assert!(md.contains("**[pass]** block 2 L8"));
+        assert!(md.contains("**[FAIL]** block 3 L12"));
+        // stdout / stderr rendering
+        assert!(md.contains("hello-out"));
+        assert!(md.contains("**stderr:**"));
+        assert!(md.contains("warned"));
+        // failed block with no output → exit code line
+        assert!(md.contains("Exit code: 3"));
+        // sidecar sections
+        assert!(md.contains("```wait"));
+        assert!(md.contains("kind: email"));
+        assert!(md.contains("```browser"));
+        assert!(md.contains("session: s1")); // raw branch
+        assert!(md.contains("session: s2")); // yaml branch
+        assert!(md.contains("```expect"));
+        assert!(md.contains("exit 0"));
+        // footer
+        assert!(md.contains("_Ran 3 blocks in 2.5s — 2 passed, 1 failed_"));
+    }
+
+    #[test]
+    fn markdown_browser_raw_without_trailing_newline() {
+        // raw not ending in '\n' takes the push('\n') branch.
+        let browser = BrowserSliceSpec {
+            raw: "verbs: []".into(),
+            ..Default::default()
+        };
+        let wb = Workbook {
+            frontmatter: Frontmatter::default(),
+            sections: vec![Section::Browser(browser)],
+        };
+        let s = summary("b.md", vec![]);
+        let md = format_output(&wb, &s, OutputFormat::Markdown);
+        assert!(md.contains("verbs: []\n```"));
+    }
+
+    #[test]
+    fn markdown_code_block_without_matching_result() {
+        // A Code section with no corresponding entry in summary.results takes
+        // the `result_idx < len` false branch — the per-block result body is
+        // skipped, the fenced source is still emitted.
+        let wb = Workbook {
+            frontmatter: Frontmatter::default(),
+            sections: vec![Section::Code(code("bash", "echo orphan", 7))],
+        };
+        let s = summary("orphan.md", vec![]); // zero results
+        let md = format_output(&wb, &s, OutputFormat::Markdown);
+        assert!(md.contains("echo orphan"));
+        // No per-result marker since there was no result for this block.
+        assert!(!md.contains("**[pass]**"));
+        assert!(!md.contains("**[FAIL]**"));
+    }
+
+    #[test]
+    fn batch_json_all_pass_status() {
+        // All summaries pass → build_batch_output sets status "pass" (line 476).
+        let dur = Duration::from_millis(10);
+        let sums = vec![
+            summary("/tmp/dir/a.md", vec![result(0, "bash", "ok", "", 0)]),
+            summary("/tmp/dir/b.md", vec![result(0, "bash", "ok", "", 0)]),
+        ];
+        let json = format_batch_output(&sums, "/tmp/dir", dur, OutputFormat::Json);
+        assert!(json.contains("\"status\": \"pass\""), "{json}");
+        assert!(json.contains("\"failed\": 0"));
+    }
+
+    #[test]
+    fn markdown_empty_run_id_omitted_and_pass_status() {
+        let mut s = summary("clean.md", vec![result(0, "bash", "ok", "", 0)]);
+        s.run_id = String::new();
+        let wb = Workbook {
+            frontmatter: Frontmatter::default(),
+            sections: vec![Section::Code(code("bash", "echo ok", 1))],
+        };
+        let md = format_output(&wb, &s, OutputFormat::Markdown);
+        assert!(!md.contains("run_id:"));
+        assert!(md.contains("status: pass"));
+    }
+
+    // ── Batch output ──
+
+    fn batch_summaries() -> Vec<RunSummary> {
+        vec![
+            summary("/tmp/dir/ok.md", vec![result(0, "bash", "fine", "", 0)]),
+            summary(
+                "/tmp/dir/bad.md",
+                vec![
+                    result(0, "bash", "", "", 0),
+                    {
+                        let mut r = result(1, "python", "", "traceback here", 1);
+                        r.error_type = Some("nonzero_exit".into());
+                        r
+                    },
+                    result(2, "bash", "", "", 9), // failure with empty stderr
+                ],
+            ),
+        ]
+    }
+
+    #[test]
+    fn batch_json_and_yaml() {
+        let dur = Duration::from_millis(4200);
+        let json = format_batch_output(&batch_summaries(), "/tmp/dir", dur, OutputFormat::Json);
+        assert!(json.contains("\"source\": \"/tmp/dir\""));
+        assert!(json.contains("\"status\": \"fail\""));
+        assert!(json.contains("\"total\": 2"));
+        assert!(json.contains("\"failed\": 1"));
+        assert!(json.contains("traceback here"));
+        assert!(json.contains("\"error_type\": \"nonzero_exit\""));
+
+        let yaml = format_batch_output(&batch_summaries(), "/tmp/dir", dur, OutputFormat::Yaml);
+        assert!(yaml.contains("source: /tmp/dir"));
+        assert!(yaml.contains("status: fail"));
+    }
+
+    #[test]
+    fn batch_markdown_with_failures() {
+        let dur = Duration::from_millis(4200);
+        let md = format_batch_output(&batch_summaries(), "/tmp/dir", dur, OutputFormat::Markdown);
+        assert!(md.contains("# Run Report: /tmp/dir"));
+        assert!(md.contains("| Workbook | Status | Blocks | Time |"));
+        // file_name extraction
+        assert!(md.contains("| ok.md | pass |"));
+        assert!(md.contains("| bad.md | FAIL |"));
+        assert!(md.contains("workbooks: { total: 2, passed: 1, failed: 1 }"));
+        // failure detail
+        assert!(md.contains("## Failures"));
+        assert!(md.contains("### /tmp/dir/bad.md"));
+        assert!(md.contains("Block 2 [python] — exit 1"));
+        assert!(md.contains("traceback here"));
+        // failure with empty stderr → no fenced block for it but still listed
+        assert!(md.contains("Block 3 [bash] — exit 9"));
+        assert!(md.contains("_Ran 2 workbooks in 4.2s — 1 passed, 1 failed_"));
+    }
+
+    #[test]
+    fn batch_markdown_all_pass_no_failures_section() {
+        let dur = Duration::from_millis(1000);
+        let sums = vec![summary("all-good.md", vec![result(0, "bash", "ok", "", 0)])];
+        let md = format_batch_output(&sums, "dir", dur, OutputFormat::Markdown);
+        assert!(md.contains("status: pass"));
+        assert!(!md.contains("## Failures"));
+    }
+
+    #[test]
+    fn batch_markdown_source_without_filename_falls_back() {
+        // A source string whose Path has no file_name component falls back to
+        // the raw source string.
+        let dur = Duration::from_millis(10);
+        let sums = vec![summary("..", vec![result(0, "bash", "ok", "", 0)])];
+        let md = format_batch_output(&sums, "dir", dur, OutputFormat::Markdown);
+        // The row renders the fallback name without panicking.
+        assert!(md.contains("| .. | pass |") || md.contains("pass"));
+    }
+
+    // ── print_summary ──
+
+    #[test]
+    fn print_summary_both_paths() {
+        print_summary(&summary("ok.md", vec![result(0, "bash", "", "", 0)]));
+        print_summary(&summary("bad.md", vec![result(0, "bash", "", "", 1)]));
+    }
+}

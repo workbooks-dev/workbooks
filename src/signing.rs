@@ -173,4 +173,93 @@ mod tests {
         assert_eq!(from_hex(&to_hex(&[0, 255, 16])).unwrap(), vec![0, 255, 16]);
         assert!(from_hex("xyz").is_err());
     }
+
+    #[test]
+    fn verify_rejects_unsupported_algorithm() {
+        // Covers the `alg != "ed25519"` early-return branch (line 110).
+        let dir = tempfile::tempdir().unwrap();
+        let key = dir.path().join("k");
+        keygen(&key).unwrap();
+        let mut sig = sign(&key, b"hello").unwrap();
+        sig.alg = "rsa".to_string();
+        let err = verify(&sig, b"hello", None).unwrap_err();
+        assert!(err.contains("unsupported algorithm"), "got: {err}");
+    }
+
+    #[test]
+    fn verify_with_wrong_key_fails() {
+        // Sign with key A, then swap in key B's pubkey: the signature no longer
+        // verifies against the content.
+        let dir = tempfile::tempdir().unwrap();
+        let key_a = dir.path().join("a");
+        let key_b = dir.path().join("b");
+        keygen(&key_a).unwrap();
+        let pub_b = keygen(&key_b).unwrap();
+
+        let content = b"signed-by-a";
+        let mut sig = sign(&key_a, content).unwrap();
+        // Tampered pubkey: well-formed (32 bytes) but the wrong key.
+        sig.pubkey = pub_b;
+        let err = verify(&sig, content, None).unwrap_err();
+        assert!(err.contains("does not verify"), "got: {err}");
+    }
+
+    #[test]
+    fn verify_tampered_signature_bytes_fail() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = dir.path().join("k");
+        let pubhex = keygen(&key).unwrap();
+        let content = b"abc";
+        let mut sig = sign(&key, content).unwrap();
+        // Flip the first hex nibble of the signature so it stays 64 bytes but
+        // no longer matches.
+        let mut chars: Vec<char> = sig.signature.chars().collect();
+        chars[0] = if chars[0] == 'a' { 'b' } else { 'a' };
+        sig.signature = chars.into_iter().collect();
+        assert!(verify(&sig, content, Some(&pubhex)).is_err());
+    }
+
+    #[test]
+    fn keygen_fails_when_parent_cannot_be_created() {
+        // Covers the create_dir_all error branch (line 66): a regular file sits
+        // where the key's parent directory would need to be.
+        let dir = tempfile::tempdir().unwrap();
+        let blocker = dir.path().join("blocker");
+        std::fs::write(&blocker, b"i am a file").unwrap();
+        // parent would be `blocker/nested`, but `blocker` is a file.
+        let prefix = blocker.join("nested").join("key");
+        let err = keygen(&prefix).unwrap_err();
+        assert!(err.contains("keys dir"), "got: {err}");
+    }
+
+    #[test]
+    fn keygen_with_parentless_prefix_skips_create_dir() {
+        // A prefix with no parent ("/") takes the `if let Some(parent)` false
+        // arm (line 66), skipping create_dir_all; the write to root then fails.
+        let err = keygen(Path::new("/")).unwrap_err();
+        assert!(err.contains("write key"), "got: {err}");
+    }
+
+    #[test]
+    fn sig_path_explicit_overrides_default() {
+        // Explicit path branch (line 132) vs the default `<file>.sig` branch.
+        assert_eq!(
+            sig_path("deploy.md", Some("custom.sig")),
+            PathBuf::from("custom.sig")
+        );
+        assert_eq!(sig_path("deploy.md", None), PathBuf::from("deploy.md.sig"));
+    }
+
+    #[test]
+    fn save_then_load_sig_roundtrip() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = dir.path().join("k");
+        keygen(&key).unwrap();
+        let sig = sign(&key, b"payload").unwrap();
+        let path = dir.path().join("out.sig");
+        save_sig(&path, &sig).unwrap();
+        let loaded = load_sig(&path).unwrap();
+        assert_eq!(loaded.signature, sig.signature);
+        assert_eq!(loaded.pubkey, sig.pubkey);
+    }
 }

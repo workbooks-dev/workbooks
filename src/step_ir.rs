@@ -369,4 +369,106 @@ mod tests {
         let body = "echo '日本語日本語日本語日本語日本語日本語日本語日本語日本語日本語'";
         let _id = Step::compute_id(&[], 0, "bash", body, None);
     }
+
+    #[test]
+    fn step_id_display_writes_inner_string() {
+        // Covers the Display impl (lines 48-50).
+        let id = StepId("login".to_string());
+        assert_eq!(format!("{}", id), "login");
+        assert_eq!(id.to_string(), "login");
+    }
+
+    // --- resolve_step_policies coverage helpers ---
+
+    fn step_with_attrs(kv: &[(&str, &str)]) -> Step {
+        let mut map = std::collections::BTreeMap::new();
+        for (k, v) in kv {
+            map.insert(k.to_string(), v.to_string());
+        }
+        Step {
+            id: StepId("s".to_string()),
+            attrs: FenceAttrs {
+                explicit_id: None,
+                classes: Vec::new(),
+                kv: map,
+                unknown: Vec::new(),
+            },
+            span: Span::point(1),
+            source: Source {
+                file: PathBuf::from("x.md"),
+                position: 0,
+            },
+            language: "bash".to_string(),
+            body: "echo hi".to_string(),
+            include_chain: Vec::new(),
+        }
+    }
+
+    fn fm_with(
+        timeouts: &[(u32, &str)],
+        retries: &[(u32, u32)],
+        continue_on_error: &[u32],
+    ) -> crate::parser::Frontmatter {
+        let mut fm = crate::parser::Frontmatter::default();
+        if !timeouts.is_empty() {
+            let mut tc = crate::parser::TimeoutsConfig::default();
+            for (k, v) in timeouts {
+                tc.blocks.insert(*k, v.to_string());
+            }
+            fm.timeouts = Some(tc);
+        }
+        if !retries.is_empty() {
+            fm.retries = Some(retries.iter().cloned().collect());
+        }
+        if !continue_on_error.is_empty() {
+            fm.continue_on_error = Some(continue_on_error.to_vec());
+        }
+        fm
+    }
+
+    #[test]
+    fn invalid_timeout_attr_falls_back_to_legacy() {
+        // attr timeout is unparseable -> Err(_) arm (lines 245-247) uses legacy.
+        let steps = vec![step_with_attrs(&[("timeout", "notaduration")])];
+        let fm = fm_with(&[(1, "30s")], &[], &[]);
+        let resolved = resolve_step_policies(&steps, &fm);
+        assert_eq!(resolved[0].policy.timeout_secs, Some(30));
+        // No shadow recorded since the attr didn't take effect.
+        assert!(resolved[0].shadowed_legacy.is_empty());
+    }
+
+    #[test]
+    fn valid_retries_attr_shadows_legacy() {
+        // Both attr (valid) and legacy retries present -> push shadow (line 258).
+        let steps = vec![step_with_attrs(&[("retries", "3")])];
+        let fm = fm_with(&[], &[(1, 1)], &[]);
+        let resolved = resolve_step_policies(&steps, &fm);
+        assert_eq!(resolved[0].policy.retries, 3);
+        assert!(resolved[0]
+            .shadowed_legacy
+            .iter()
+            .any(|(f, v)| *f == "retries" && v == "1"));
+    }
+
+    #[test]
+    fn invalid_retries_attr_falls_back_to_legacy() {
+        // attr retries unparseable -> Err(_) arm (line 262) uses legacy value.
+        let steps = vec![step_with_attrs(&[("retries", "notanumber")])];
+        let fm = fm_with(&[], &[(1, 2)], &[]);
+        let resolved = resolve_step_policies(&steps, &fm);
+        assert_eq!(resolved[0].policy.retries, 2);
+    }
+
+    #[test]
+    fn continue_on_error_attr_shadows_legacy() {
+        // attr continue_on_error AND legacy continue -> push shadow (line 269).
+        let steps = vec![step_with_attrs(&[("continue_on_error", "true")])];
+        let fm = fm_with(&[], &[], &[1]);
+        let resolved = resolve_step_policies(&steps, &fm);
+        assert!(resolved[0].policy.continue_on_error);
+        assert!(resolved[0]
+            .shadowed_legacy
+            .iter()
+            .any(|(f, v)| *f == "continue_on_error" && v == "true"));
+    }
 }

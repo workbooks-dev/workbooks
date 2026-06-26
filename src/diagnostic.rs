@@ -214,6 +214,48 @@ mod tests {
     }
 
     #[test]
+    fn span_from_byte_offset_clamps_past_end() {
+        let src = "ab\ncd"; // len 5
+        let sp = Span::from_byte_offset(src, 1000);
+        // clamped to end: line 2 ("cd"), col 3 (after 'd'), offset preserved.
+        assert_eq!(sp.line, 2);
+        assert_eq!(sp.col, 3);
+        assert_eq!(sp.byte_offset, 1000);
+    }
+
+    #[test]
+    fn render_text_without_span_uses_file_only_and_emits_help() {
+        let d = Diagnostic::warning("wb-fm-001", "/f.md", "unknown key")
+            .with_help("did you mean 'env'?");
+        let text = render_text(&[d]);
+        // No span → location is just the file path, no :line:col.
+        assert!(
+            text.contains("/f.md: warning[wb-fm-001]: unknown key"),
+            "got: {text}"
+        );
+        assert!(
+            !text.contains("/f.md:1"),
+            "should not have a line/col: {text}"
+        );
+        assert!(text.contains("= help: did you mean 'env'?"), "got: {text}");
+    }
+
+    #[test]
+    fn render_text_handles_note_severity() {
+        // Construct a Note-severity diagnostic directly (no public ctor).
+        let d = Diagnostic {
+            severity: Severity::Note,
+            code: "wb-fm-001",
+            message: "fyi".into(),
+            span: None,
+            file: PathBuf::from("/n.md"),
+            help: None,
+        };
+        let text = render_text(&[d]);
+        assert!(text.contains("note[wb-fm-001]: fyi"), "got: {text}");
+    }
+
+    #[test]
     fn counts_separates_errors_and_warnings() {
         let diags = vec![
             Diagnostic::error("wb-yaml-001", "/f.md", "e1"),

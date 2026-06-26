@@ -359,4 +359,162 @@ mod tests {
         assert!(evaluate("", &eq, 0, "done\n", "").ok);
         assert!(!evaluate("", &eq, 0, "done now", "").ok);
     }
+
+    #[test]
+    fn parses_exit_aliases_and_eq_prefix() {
+        assert_eq!(
+            parse_line("exit-code 2").unwrap(),
+            Assertion::Exit {
+                negate: false,
+                code: 2
+            }
+        );
+        // `==` prefix on exit is accepted (negate=false).
+        assert_eq!(
+            parse_line("exit == 0").unwrap(),
+            Assertion::Exit {
+                negate: false,
+                code: 0
+            }
+        );
+    }
+
+    #[test]
+    fn parses_all_stream_operators_and_aliases() {
+        assert_eq!(
+            parse_line("stdout not-empty").unwrap(),
+            Assertion::NotEmpty {
+                stream: Stream::Stdout
+            }
+        );
+        assert_eq!(
+            parse_line("stderr notempty").unwrap(),
+            Assertion::NotEmpty {
+                stream: Stream::Stderr
+            }
+        );
+        assert_eq!(
+            parse_line("stdout not-contains 'x'").unwrap(),
+            Assertion::NotContains {
+                stream: Stream::Stdout,
+                needle: "x".to_string()
+            }
+        );
+        assert_eq!(
+            parse_line("stdout notcontains y").unwrap(),
+            Assertion::NotContains {
+                stream: Stream::Stdout,
+                needle: "y".to_string()
+            }
+        );
+        // `==` is an alias for equals.
+        assert_eq!(
+            parse_line("stdout == done").unwrap(),
+            Assertion::Equals {
+                stream: Stream::Stdout,
+                value: "done".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn single_quoted_and_spaced_text_unquoted() {
+        assert_eq!(
+            parse_line("stdout contains 'hello world'").unwrap(),
+            Assertion::Contains {
+                stream: Stream::Stdout,
+                needle: "hello world".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn malformed_operator_argument_errors() {
+        assert!(parse_line("stdout contains").is_err());
+        assert!(parse_line("stderr not-contains").is_err());
+        assert!(parse_line("stdout equals").is_err());
+        // bare stream with no operator
+        assert!(parse_line("stdout").is_err());
+        // unknown operator
+        let e = parse_line("stdout wibble x").unwrap_err();
+        assert!(e.contains("unknown stdout operator"));
+        // empty line / unknown head
+        assert!(parse_line("").is_err());
+        let e = parse_line("frobnicate").unwrap_err();
+        assert!(e.contains("unknown assertion"));
+        // non-integer exit code
+        assert!(parse_line("exit nope").is_err());
+    }
+
+    #[test]
+    fn evaluate_exit_negate() {
+        let a = Assertion::Exit {
+            negate: true,
+            code: 1,
+        };
+        assert!(evaluate("exit != 1", &a, 0, "", "").ok); // 0 != 1 → pass
+        let r = evaluate("exit != 1", &a, 1, "", "");
+        assert!(!r.ok);
+        assert!(r.detail.contains("expected != 1"));
+    }
+
+    #[test]
+    fn evaluate_not_contains_and_not_empty() {
+        let nc = Assertion::NotContains {
+            stream: Stream::Stdout,
+            needle: "bad".to_string(),
+        };
+        assert!(evaluate("", &nc, 0, "all good", "").ok);
+        let r = evaluate("", &nc, 0, "this is bad", "");
+        assert!(!r.ok);
+        assert!(r.detail.contains("unexpectedly contains"));
+
+        let ne = Assertion::NotEmpty {
+            stream: Stream::Stderr,
+        };
+        assert!(evaluate("", &ne, 0, "", "boom").ok);
+        let r = evaluate("", &ne, 0, "", "   ");
+        assert!(!r.ok);
+        assert!(r.detail.contains("stderr is empty"));
+    }
+
+    #[test]
+    fn evaluate_failure_detail_for_each_kind() {
+        // Contains fail detail.
+        let c = Assertion::Contains {
+            stream: Stream::Stdout,
+            needle: "z".to_string(),
+        };
+        let r = evaluate("", &c, 0, "abc", "");
+        assert!(!r.ok && r.detail.contains("does not contain"));
+        // Equals fail detail.
+        let eq = Assertion::Equals {
+            stream: Stream::Stderr,
+            value: "v".to_string(),
+        };
+        let r = evaluate("", &eq, 0, "", "other");
+        assert!(!r.ok && r.detail.contains("does not equal"));
+        // Empty fail detail.
+        let em = Assertion::Empty {
+            stream: Stream::Stdout,
+        };
+        let r = evaluate("", &em, 0, "x", "");
+        assert!(!r.ok && r.detail.contains("is not empty"));
+        // A passing assertion has empty detail.
+        assert!(evaluate("", &em, 0, "", "").detail.is_empty());
+    }
+
+    #[test]
+    fn parse_skips_blank_and_comment_lines() {
+        let p = parse("\n   \n# just a comment\nexit 0\n");
+        assert_eq!(p.assertions.len(), 1);
+        assert!(p.errors.is_empty());
+    }
+
+    #[test]
+    fn unquote_leaves_unmatched_quotes() {
+        // Single short string / mismatched quotes pass through untouched.
+        assert_eq!(unquote("\"only-left"), "\"only-left".to_string());
+        assert_eq!(unquote("a"), "a".to_string());
+    }
 }

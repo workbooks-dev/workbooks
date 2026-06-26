@@ -97,4 +97,25 @@ mod tests {
         assert_eq!(WbExit::Paused.code(), exit_codes::EXIT_PAUSED);
         assert_eq!(WbExit::Io("x".into()).code(), 1);
     }
+
+    #[test]
+    fn message_returns_inner_string_for_carrying_variants() {
+        assert_eq!(WbExit::Usage("u".into()).message(), Some("u"));
+        assert_eq!(WbExit::WorkbookInvalid("w".into()).message(), Some("w"));
+        assert_eq!(WbExit::SandboxUnavailable("s".into()).message(), Some("s"));
+        assert_eq!(WbExit::CheckpointBusy("c".into()).message(), Some("c"));
+        assert_eq!(WbExit::SignalTimeout("t".into()).message(), Some("t"));
+        assert_eq!(WbExit::Io("i".into()).message(), Some("i"));
+    }
+
+    #[test]
+    fn message_is_none_for_empty_and_message_free_variants() {
+        // Variants that never carry a message.
+        assert_eq!(WbExit::Success.message(), None);
+        assert_eq!(WbExit::Paused.message(), None);
+        assert_eq!(WbExit::BlockFailed.message(), None);
+        // An empty carried string is treated as "no message".
+        assert_eq!(WbExit::Usage(String::new()).message(), None);
+        assert_eq!(WbExit::Io(String::new()).message(), None);
+    }
 }

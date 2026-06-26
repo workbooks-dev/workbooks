@@ -416,4 +416,204 @@ mod tests {
         assert!(r.hash.is_none());
         assert!(r.values.is_empty());
     }
+
+    // ---- scalar_to_string (lines 93-99) ----
+
+    #[test]
+    fn scalar_to_string_covers_every_variant() {
+        use serde_yaml::Value;
+        assert_eq!(scalar_to_string(&Value::Null), None);
+        assert_eq!(scalar_to_string(&Value::Bool(true)), Some("true".into()));
+        assert_eq!(scalar_to_string(&Value::Bool(false)), Some("false".into()));
+        assert_eq!(
+            scalar_to_string(&Value::Number(42.into())),
+            Some("42".into())
+        );
+        assert_eq!(
+            scalar_to_string(&Value::String("hi".into())),
+            Some("hi".into())
+        );
+        // Non-scalar (sequence / mapping) is not injectable.
+        let seq = Value::Sequence(vec![Value::Number(1.into())]);
+        assert_eq!(scalar_to_string(&seq), None);
+        let map = Value::Mapping(serde_yaml::Mapping::new());
+        assert_eq!(scalar_to_string(&map), None);
+    }
+
+    // ---- parse_cli_params (lines 103-115) ----
+
+    #[test]
+    fn parse_cli_params_requires_equals() {
+        let err = parse_cli_params(&["noequals".to_string()]).unwrap_err();
+        assert!(err.contains("not in key=value form"), "{err}");
+    }
+
+    #[test]
+    fn parse_cli_params_rejects_empty_key() {
+        let err = parse_cli_params(&["=value".to_string()]).unwrap_err();
+        assert!(err.contains("empty key"), "{err}");
+    }
+
+    #[test]
+    fn parse_cli_params_value_may_contain_equals() {
+        let out = parse_cli_params(&["conn=a=b=c".to_string()]).unwrap();
+        assert_eq!(out.get("conn").unwrap(), "a=b=c");
+    }
+
+    // ---- load_param_file (lines 118-141, 202) ----
+
+    fn write_tmp(contents: &str) -> tempfile::NamedTempFile {
+        use std::io::Write;
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        f.write_all(contents.as_bytes()).unwrap();
+        f.flush().unwrap();
+        f
+    }
+
+    #[test]
+    fn load_param_file_reads_scalar_mapping() {
+        let f = write_tmp("region: eu-west-1\nreplicas: 7\nflag: true\n");
+        let out = load_param_file(f.path().to_str().unwrap()).unwrap();
+        assert_eq!(out.get("region").unwrap(), "eu-west-1");
+        assert_eq!(out.get("replicas").unwrap(), "7");
+        assert_eq!(out.get("flag").unwrap(), "true");
+    }
+
+    #[test]
+    fn load_param_file_missing_file_errors() {
+        let err = load_param_file("/no/such/param-file.yaml").unwrap_err();
+        assert!(err.contains("--param-file"), "{err}");
+    }
+
+    #[test]
+    fn load_param_file_non_mapping_errors() {
+        let f = write_tmp("- just\n- a\n- list\n");
+        let err = load_param_file(f.path().to_str().unwrap()).unwrap_err();
+        assert!(err.contains("expected a YAML mapping"), "{err}");
+    }
+
+    #[test]
+    fn load_param_file_non_string_key_errors() {
+        let f = write_tmp("123: value\n");
+        let err = load_param_file(f.path().to_str().unwrap()).unwrap_err();
+        assert!(err.contains("non-string key"), "{err}");
+    }
+
+    #[test]
+    fn load_param_file_non_scalar_value_errors() {
+        let f = write_tmp("region:\n  nested: map\n");
+        let err = load_param_file(f.path().to_str().unwrap()).unwrap_err();
+        assert!(err.contains("must be a scalar"), "{err}");
+    }
+
+    #[test]
+    fn param_file_feeds_resolve() {
+        let p = spec_full("region:\n  type: string\n  default: us-east-1\n");
+        let f = write_tmp("region: ap-south-1\n");
+        let r = resolve(Some(&p), None, None, Some(f.path().to_str().unwrap()), &[]).unwrap();
+        assert_eq!(r.values.get("region").unwrap(), "ap-south-1");
+    }
+
+    #[test]
+    fn param_file_key_must_be_declared() {
+        let p = spec_full("region: us-east-1\n");
+        let f = write_tmp("undeclared: 1\n");
+        let err = resolve(Some(&p), None, None, Some(f.path().to_str().unwrap()), &[]).unwrap_err();
+        assert!(err.contains("not a declared parameter"), "{err}");
+        assert!(err.contains("--param-file"), "{err}");
+    }
+
+    // ---- precedence: CLI > param-file > profile > default ----
+
+    #[test]
+    fn cli_beats_param_file() {
+        let p = spec_full("region:\n  type: string\n  default: d\n");
+        let f = write_tmp("region: from-file\n");
+        let r = resolve(
+            Some(&p),
+            None,
+            None,
+            Some(f.path().to_str().unwrap()),
+            &["region=from-cli".to_string()],
+        )
+        .unwrap();
+        assert_eq!(r.values.get("region").unwrap(), "from-cli");
+    }
+
+    #[test]
+    fn param_file_beats_profile() {
+        let p = spec_full("region:\n  type: string\n");
+        let mut profiles: HashMap<String, HashMap<String, serde_yaml::Value>> = HashMap::new();
+        let mut prod = HashMap::new();
+        prod.insert(
+            "region".to_string(),
+            serde_yaml::Value::String("from-profile".into()),
+        );
+        profiles.insert("prod".to_string(), prod);
+        let f = write_tmp("region: from-file\n");
+        let r = resolve(
+            Some(&p),
+            Some(&profiles),
+            Some("prod"),
+            Some(f.path().to_str().unwrap()),
+            &[],
+        )
+        .unwrap();
+        assert_eq!(r.values.get("region").unwrap(), "from-file");
+    }
+
+    // ---- bool false + invalid (lines 163-166) ----
+
+    #[test]
+    fn bool_false_aliases_normalize() {
+        let p = spec_full("flag:\n  type: bool\n  default: true\n");
+        for raw in ["false", "0", "no", "off", "OFF"] {
+            let r = resolve(Some(&p), None, None, None, &[format!("flag={raw}")]).unwrap();
+            assert_eq!(r.values.get("flag").unwrap(), "false", "raw={raw}");
+        }
+    }
+
+    #[test]
+    fn bool_invalid_value_errors() {
+        let p = spec_full("flag:\n  type: bool\n  default: true\n");
+        let err = resolve(Some(&p), None, None, None, &["flag=maybe".to_string()]).unwrap_err();
+        assert!(err.contains("not a valid bool"), "{err}");
+    }
+
+    // ---- profile given but workbook declares none (lines 210-211) ----
+
+    #[test]
+    fn profile_without_profiles_block_errors() {
+        let p = spec_full("region: us-east-1\n");
+        let err = resolve(Some(&p), None, Some("prod"), None, &[]).unwrap_err();
+        assert!(err.contains("declares no profiles"), "{err}");
+    }
+
+    // ---- undeclared key when nothing is declared → "none" (line 242) ----
+
+    #[test]
+    fn unknown_param_with_no_declarations_says_none() {
+        // No params declared at all: the error lists "declared: none".
+        let empty: HashMap<String, ParamSpec> = HashMap::new();
+        let err = resolve(Some(&empty), None, None, None, &["x=1".to_string()]).unwrap_err();
+        assert!(err.contains("declared: none"), "{err}");
+    }
+
+    #[test]
+    fn empty_secret_value_not_collected() {
+        // A secret param resolving to the empty string is not added to the
+        // redaction list (guards the `!value.is_empty()` branch).
+        let p = spec_full("token:\n  secret: true\n  default: \"\"\n");
+        let r = resolve(Some(&p), None, None, None, &[]).unwrap();
+        assert!(r.secret_values.is_empty());
+    }
+
+    #[test]
+    fn hash_is_stable_across_runs() {
+        let p = spec_full("region:\n  type: string\n  default: a\nn:\n  type: int\n  default: 1\n");
+        let h1 = resolve(Some(&p), None, None, None, &[]).unwrap().hash;
+        let h2 = resolve(Some(&p), None, None, None, &[]).unwrap().hash;
+        assert_eq!(h1, h2);
+        assert_eq!(h1.unwrap().len(), 12);
+    }
 }

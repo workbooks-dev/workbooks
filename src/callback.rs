@@ -1755,4 +1755,437 @@ mod tests {
             "header idempotency key must match the helper for the same inputs"
         );
     }
+
+    // ---- HMAC signing (`sign`) ----------------------------------------
+
+    #[test]
+    fn test_sign_known_vector() {
+        // Canonical HMAC-SHA256 test vector: key="key", msg="The quick brown
+        // fox jumps over the lazy dog" → f7bc83f4...1a3cd8. Locks the exact hex
+        // so a future refactor of the digest/encoding can't silently drift.
+        let got = sign(b"The quick brown fox jumps over the lazy dog", b"key");
+        assert_eq!(
+            got,
+            "f7bc83f430538424b13298e6aa6fb143ef4d59a14946175997479dbc2d1a3cd8"
+        );
+    }
+
+    #[test]
+    fn test_sign_is_deterministic_and_lowercase_hex() {
+        let a = sign(b"payload-body", b"secret-key");
+        let b = sign(b"payload-body", b"secret-key");
+        assert_eq!(a, b, "same key+message must produce the same signature");
+        assert_eq!(a.len(), 64, "sha256 hex is 64 chars");
+        assert!(a
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_uppercase()));
+    }
+
+    #[test]
+    fn test_sign_changes_with_body_and_with_key() {
+        let base = sign(b"body-one", b"key");
+        // Changing the body changes the signature (tamper detection).
+        assert_ne!(base, sign(b"body-two", b"key"));
+        // Changing the key changes the signature.
+        assert_ne!(base, sign(b"body-one", b"other-key"));
+    }
+
+    #[test]
+    fn test_sign_accepts_empty_key_and_empty_body() {
+        // new_from_slice "accepts any key size" — empty key/body must not panic.
+        let out = sign(b"", b"");
+        assert_eq!(out.len(), 64);
+        assert!(out.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    // ---- URL validation: remaining branches ---------------------------
+
+    #[test]
+    fn test_validate_redis_plain_with_secret_warns() {
+        // The non-TLS redis:// scheme triggers the same HMAC-ignored warning.
+        let warnings = validate_callback_config("redis://localhost:6379", Some("hmac")).unwrap();
+        assert!(
+            warnings.iter().any(|w| w.contains("Redis")),
+            "expected redis+secret warning, got: {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn test_validate_redis_without_secret_has_no_warnings() {
+        // No secret → no HMAC-ignored warning; redis is not plaintext-http.
+        assert!(validate_callback_config("redis://localhost:6379", None)
+            .unwrap()
+            .is_empty());
+        assert!(
+            validate_callback_config("rediss://upstash.example.com", None)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn test_validate_http_with_secret_warns_only_plaintext() {
+        // http:// + secret: the secret IS used over http, so only the
+        // plaintext warning fires (not the redis-ignored one).
+        let warnings = validate_callback_config("http://x/wb", Some("k")).unwrap();
+        assert_eq!(warnings.len(), 1, "got: {warnings:?}");
+        assert!(warnings[0].contains("plaintext"));
+        assert!(!warnings.iter().any(|w| w.contains("Redis")));
+    }
+
+    // ---- Partial-output flags (timeout case) --------------------------
+
+    #[test]
+    fn test_build_step_complete_payload_carries_partial_flags() {
+        // A timed-out block sets stdout_partial / stderr_partial and an
+        // error_type; the payload must surface all three so agents can tell
+        // "cut off mid-run" from "ran to completion and failed".
+        let result = BlockResult {
+            block_index: 2,
+            language: "bash".to_string(),
+            stdout: "partial out".to_string(),
+            stderr: "partial err".to_string(),
+            exit_code: 124,
+            duration: std::time::Duration::from_millis(30000),
+            error_type: Some("timeout".to_string()),
+            stdout_partial: true,
+            stderr_partial: true,
+        };
+        let payload = build_step_complete_payload(
+            &result,
+            3,
+            5,
+            "wb.md",
+            None,
+            None,
+            0,
+            "run-to",
+            &[],
+            None,
+            None,
+            None,
+        );
+        assert_eq!(payload["block"]["stdout_partial"], true);
+        assert_eq!(payload["block"]["stderr_partial"], true);
+        assert_eq!(payload["block"]["error_type"], "timeout");
+        assert_eq!(payload["block"]["exit_code"], 124);
+    }
+
+    // ---- Local JSONL event sink (`events_path`, no network) -----------
+
+    #[test]
+    fn test_events_path_sink_writes_jsonl_without_network() {
+        // url empty + events_path set: send() must write a JSONL line and
+        // never touch the network transport. Two events append two lines.
+        let path = std::env::temp_dir().join(format!(
+            "wb-cb-events-{}-{}.jsonl",
+            std::process::id(),
+            // monotonic-ish unique suffix
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_file(&path);
+
+        let cb = CallbackConfig {
+            url: String::new(), // empty => events-only sink, no network send
+            secret: None,
+            stream_key: "wb:events".to_string(),
+            run_id: "run-events".to_string(),
+            seq: AtomicU64::new(0),
+            events_path: Some(path.clone()),
+        };
+        cb.send(
+            "step.complete",
+            r#"{"event":"step.complete","block":{"index":0}}"#,
+        );
+        cb.send(
+            "run.complete",
+            r#"{"event":"run.complete","status":"pass"}"#,
+        );
+
+        let contents = std::fs::read_to_string(&path).expect("event file written");
+        let _ = std::fs::remove_file(&path);
+
+        let lines: Vec<&str> = contents.lines().collect();
+        assert_eq!(lines.len(), 2, "one JSONL line per event");
+
+        let first: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
+        assert_eq!(first["event"], "step.complete");
+        assert_eq!(first["run_id"], "run-events");
+        // The original payload is nested under "data" as parsed JSON, not a string.
+        assert_eq!(first["data"]["event"], "step.complete");
+        assert_eq!(first["data"]["block"]["index"], 0);
+
+        let second: serde_json::Value = serde_json::from_str(lines[1]).unwrap();
+        assert_eq!(second["event"], "run.complete");
+        assert_eq!(second["data"]["status"], "pass");
+    }
+
+    #[test]
+    fn test_events_path_sink_tolerates_invalid_json_payload() {
+        // append_event_line falls back to Value::Null on unparsable payloads,
+        // best-effort — it must not panic and still writes a line.
+        let path = std::env::temp_dir().join(format!(
+            "wb-cb-events-bad-{}-{}.jsonl",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let cb = CallbackConfig {
+            url: String::new(),
+            secret: None,
+            stream_key: "wb:events".to_string(),
+            run_id: "run-bad".to_string(),
+            seq: AtomicU64::new(0),
+            events_path: Some(path.clone()),
+        };
+        cb.send("weird", "this is not json");
+        let contents = std::fs::read_to_string(&path).expect("event file written");
+        let _ = std::fs::remove_file(&path);
+        let line: serde_json::Value =
+            serde_json::from_str(contents.lines().next().unwrap()).unwrap();
+        assert_eq!(line["event"], "weird");
+        assert!(line["data"].is_null());
+    }
+
+    // ---- Body capture over a loopback listener -------------------------
+
+    /// Bind an ephemeral loopback port and capture exactly one HTTP request,
+    /// replying 200 so curl doesn't retry. Returns (port, join-handle yielding
+    /// the raw request text). A 2s socket read timeout guarantees no hang, and
+    /// we break early once the full Content-Length body has arrived.
+    fn spawn_one_shot_capture() -> (u16, std::thread::JoinHandle<String>) {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind ephemeral");
+        let port = listener.local_addr().unwrap().port();
+        let handle = std::thread::spawn(move || {
+            let (mut stream, _addr) = listener.accept().expect("accept");
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+                .ok();
+            let mut data: Vec<u8> = Vec::new();
+            let mut tmp = [0u8; 4096];
+            loop {
+                match stream.read(&mut tmp) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        data.extend_from_slice(&tmp[..n]);
+                        if request_is_complete(&data) {
+                            break;
+                        }
+                    }
+                    Err(_) => break, // read timeout — stop waiting, never hang
+                }
+            }
+            let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
+            let _ = stream.shutdown(std::net::Shutdown::Both);
+            String::from_utf8_lossy(&data).to_string()
+        });
+        (port, handle)
+    }
+
+    /// True once `data` holds a full HTTP request: headers terminated by the
+    /// blank line and at least Content-Length body bytes after it.
+    fn request_is_complete(data: &[u8]) -> bool {
+        let text = String::from_utf8_lossy(data);
+        let Some(hdr_end) = text.find("\r\n\r\n") else {
+            return false;
+        };
+        let header_block = &text[..hdr_end];
+        let body_start = hdr_end + 4;
+        let cl = header_block
+            .lines()
+            .find_map(|l| {
+                let l = l.trim();
+                let lower = l.to_ascii_lowercase();
+                lower
+                    .strip_prefix("content-length:")
+                    .map(|v| v.trim().parse::<usize>().unwrap_or(0))
+            })
+            .unwrap_or(0);
+        data.len() >= body_start + cl
+    }
+
+    fn split_body(req: &str) -> &str {
+        req.split("\r\n\r\n").nth(1).unwrap_or("")
+    }
+
+    #[test]
+    fn test_checkpoint_failed_body_and_signature_header() {
+        // End-to-end through send → send_http: the checkpoint.failed payload
+        // (only constructed inline) carries failed_block.stderr + partial
+        // flags, and with a secret the X-WB-Signature header is sha256=<sign>.
+        let (port, handle) = spawn_one_shot_capture();
+        let cb = CallbackConfig {
+            url: format!("http://127.0.0.1:{}/hook", port),
+            secret: Some("super-secret".to_string()),
+            stream_key: "wb:events".to_string(),
+            run_id: "run-ckpt".to_string(),
+            seq: AtomicU64::new(0),
+            events_path: None,
+        };
+        let result = BlockResult {
+            block_index: 4,
+            language: "bash".to_string(),
+            stdout: "".to_string(),
+            stderr: "boom: connection refused".to_string(),
+            exit_code: 1,
+            duration: std::time::Duration::from_millis(7),
+            error_type: Some("nonzero_exit".to_string()),
+            stdout_partial: false,
+            stderr_partial: true,
+        };
+        cb.checkpoint_failed(
+            &result,
+            4,
+            10,
+            "deploy.md",
+            "ckpt-99",
+            Some("Migrate"),
+            55,
+            &[],
+            Some("migrate"),
+            None,
+        );
+        let req = handle.join().expect("server thread");
+
+        // --- header assertions ---
+        let header_block = req.split("\r\n\r\n").next().unwrap();
+        let event = header_block
+            .lines()
+            .find_map(|l| l.strip_prefix("X-WB-Event: "))
+            .map(|s| s.trim());
+        assert_eq!(event, Some("checkpoint.failed"));
+        let sig = header_block
+            .lines()
+            .find_map(|l| l.strip_prefix("X-WB-Signature: "))
+            .map(|s| s.trim().to_string())
+            .expect("X-WB-Signature header present when secret set");
+
+        // --- body assertions ---
+        let body = split_body(&req);
+        let payload: serde_json::Value = serde_json::from_str(body).expect("body is JSON");
+        assert_eq!(payload["event"], "checkpoint.failed");
+        assert_eq!(payload["run_id"], "run-ckpt");
+        assert_eq!(payload["checkpoint_id"], "ckpt-99");
+        assert_eq!(payload["failed_block"]["index"], 4);
+        assert_eq!(payload["failed_block"]["step_id"], "migrate");
+        assert_eq!(
+            payload["failed_block"]["stderr"],
+            "boom: connection refused"
+        );
+        assert_eq!(payload["failed_block"]["stdout_partial"], false);
+        assert_eq!(payload["failed_block"]["stderr_partial"], true);
+        assert_eq!(payload["failed_block"]["error_type"], "nonzero_exit");
+        assert_eq!(payload["progress"]["total"], 10);
+
+        // The signature must equal sha256= over the exact bytes we received.
+        let expected = format!("sha256={}", sign(body.as_bytes(), b"super-secret"));
+        assert_eq!(sig, expected, "HMAC must cover the verbatim request body");
+    }
+
+    #[test]
+    fn test_run_complete_body_status_and_no_signature_without_secret() {
+        // run.complete payload shape (status derived from failed count) +
+        // confirms NO X-WB-Signature header when secret is None.
+        let (port, handle) = spawn_one_shot_capture();
+        let cb = CallbackConfig {
+            url: format!("http://127.0.0.1:{}/hook", port),
+            secret: None,
+            stream_key: "wb:events".to_string(),
+            run_id: "run-done".to_string(),
+            seq: AtomicU64::new(0),
+            events_path: None,
+        };
+        cb.run_complete(3, 1, 4, 1234, "deploy.md", Some("ckpt-z"));
+        let req = handle.join().expect("server thread");
+
+        let header_block = req.split("\r\n\r\n").next().unwrap();
+        assert!(
+            !header_block
+                .lines()
+                .any(|l| l.starts_with("X-WB-Signature:")),
+            "no signature header without a secret"
+        );
+
+        let payload: serde_json::Value =
+            serde_json::from_str(split_body(&req)).expect("body is JSON");
+        assert_eq!(payload["event"], "run.complete");
+        assert_eq!(payload["status"], "fail"); // failed > 0
+        assert_eq!(payload["blocks"]["total"], 4);
+        assert_eq!(payload["blocks"]["passed"], 3);
+        assert_eq!(payload["blocks"]["failed"], 1);
+        assert_eq!(payload["duration_ms"], 1234);
+        assert_eq!(payload["checkpoint_id"], "ckpt-z");
+    }
+
+    #[test]
+    fn test_run_complete_status_pass_when_no_failures() {
+        let (port, handle) = spawn_one_shot_capture();
+        let cb = CallbackConfig {
+            url: format!("http://127.0.0.1:{}/hook", port),
+            secret: None,
+            stream_key: "wb:events".to_string(),
+            run_id: "run-ok".to_string(),
+            seq: AtomicU64::new(0),
+            events_path: None,
+        };
+        cb.run_complete(5, 0, 5, 10, "ok.md", None);
+        let req = handle.join().expect("server thread");
+        let payload: serde_json::Value =
+            serde_json::from_str(split_body(&req)).expect("body is JSON");
+        assert_eq!(payload["status"], "pass");
+        assert!(payload["checkpoint_id"].is_null());
+    }
+
+    #[test]
+    fn test_send_http_client_error_does_not_retry() {
+        // A 4xx response must terminate immediately (one request, no retries).
+        // The listener counts connections to prove the no-retry contract.
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::sync::atomic::AtomicUsize;
+        use std::sync::Arc;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().unwrap().port();
+        let count = Arc::new(AtomicUsize::new(0));
+        let count2 = count.clone();
+        let handle = std::thread::spawn(move || {
+            // Accept up to 3 connections (the max retry count) within a short
+            // window; a 4xx should produce exactly one.
+            listener.set_nonblocking(false).ok();
+            // Only block for the first accept; a 4xx makes the client return
+            // without retrying, so exactly one connection should arrive.
+            if let Ok((mut stream, _)) = listener.accept() {
+                count2.fetch_add(1, Ordering::Relaxed);
+                let mut tmp = [0u8; 2048];
+                let _ = stream.read(&mut tmp);
+                let _ = stream.write_all(b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\n\r\n");
+                let _ = stream.shutdown(std::net::Shutdown::Both);
+            }
+        });
+
+        let cb = CallbackConfig {
+            url: format!("http://127.0.0.1:{}/hook", port),
+            secret: None,
+            stream_key: "wb:events".to_string(),
+            run_id: "run-4xx".to_string(),
+            seq: AtomicU64::new(0),
+            events_path: None,
+        };
+        cb.send_http("step.complete", r#"{"event":"step.complete"}"#);
+        handle.join().expect("server thread");
+        assert_eq!(
+            count.load(Ordering::Relaxed),
+            1,
+            "a 4xx response must not be retried"
+        );
+    }
 }

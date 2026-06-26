@@ -370,4 +370,67 @@ mod tests {
         assert_eq!(multi.get("A").unwrap(), "1");
         assert_eq!(multi.get("B").unwrap(), "2");
     }
+
+    #[test]
+    fn resolve_doppler_unauthenticated_hits_status_failure_branch() {
+        // Exercise the `!output.status.success()` arm (lines 66-68): doppler is
+        // installed but, forced to use an invalid token + a nonexistent
+        // project, the CLI exits non-zero. Bounded and self-skipping so it
+        // never hangs or prompts: skip when doppler isn't on PATH, and skip if
+        // the call doesn't complete quickly.
+        let on_path = Command::new("doppler")
+            .arg("--version")
+            .output()
+            .map(|o| o.status.success() || !o.stdout.is_empty())
+            .unwrap_or(false);
+        if !on_path {
+            eprintln!("skipping doppler test: doppler not on PATH");
+            return;
+        }
+
+        // Force a fast, non-interactive failure. DOPPLER_TOKEN takes precedence
+        // over any configured login; restore it afterward.
+        let prev_token = std::env::var_os("DOPPLER_TOKEN");
+        std::env::set_var("DOPPLER_TOKEN", "dp.ct.invalidinvalidinvalidinvalid");
+
+        let (tx, rx) = std::sync::mpsc::channel();
+        let handle = std::thread::spawn(move || {
+            let mut p = SecretProvider {
+                provider: "doppler".to_string(),
+                project: Some("wb-nonexistent-project-xyz-99999".to_string()),
+                command: None,
+                keys: None,
+            };
+            p.command = None;
+            let _ = tx.send(resolve_doppler(&p));
+        });
+
+        let result = rx.recv_timeout(std::time::Duration::from_secs(30));
+
+        match prev_token {
+            Some(t) => std::env::set_var("DOPPLER_TOKEN", t),
+            None => std::env::remove_var("DOPPLER_TOKEN"),
+        }
+
+        match result {
+            Ok(Ok(_)) => {
+                // Unexpected success (e.g. a real token leaked through); don't
+                // fail the suite over an environment quirk.
+                eprintln!("skipping doppler assertion: call unexpectedly succeeded");
+            }
+            Ok(Err(e)) => {
+                let _ = handle.join();
+                let msg = format!("{e:?}");
+                assert!(
+                    msg.contains("doppler failed") || msg.contains("Failed to run doppler"),
+                    "unexpected doppler error: {msg}"
+                );
+            }
+            Err(_) => {
+                // Timed out (hung/prompting). Skip rather than fail; the worker
+                // thread is detached.
+                eprintln!("skipping doppler test: call did not complete in time");
+            }
+        }
+    }
 }

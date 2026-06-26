@@ -720,4 +720,346 @@ mod tests {
         assert_eq!(url_encode("orders.json"), "orders.json");
         assert_eq!(url_encode("foo bar"), "foo%20bar");
     }
+
+    use tempfile::tempdir;
+
+    /// Build an `Artifacts` handle rooted at `dir` without going through any
+    /// global env or `~/.wb`. Uses the `ENV_DIR` map seam, so no process-env
+    /// mutation and no race with concurrently-running tests.
+    fn artifacts_at(dir: &Path, run_id: &str) -> Artifacts {
+        let mut env = HashMap::new();
+        env.insert(ENV_RUN_ID.to_string(), run_id.to_string());
+        env.insert(ENV_DIR.to_string(), dir.to_string_lossy().into_owned());
+        Artifacts::init(&mut env)
+    }
+
+    #[test]
+    fn sha256_file_matches_known_vector() {
+        let tmp = tempdir().unwrap();
+        let p = tmp.path().join("hello.txt");
+        fs::write(&p, "hello").unwrap();
+        // Well-known sha256("hello").
+        assert_eq!(
+            sha256_file(&p).unwrap(),
+            "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+        );
+    }
+
+    #[test]
+    fn sha256_file_none_on_missing() {
+        let tmp = tempdir().unwrap();
+        assert_eq!(sha256_file(&tmp.path().join("nope.txt")), None);
+    }
+
+    #[test]
+    fn manifest_path_appends_filename() {
+        let tmp = tempdir().unwrap();
+        assert_eq!(
+            manifest_path(tmp.path()),
+            tmp.path().join(MANIFEST_FILENAME)
+        );
+    }
+
+    #[test]
+    fn manifest_roundtrip_write_then_load() {
+        let tmp = tempdir().unwrap();
+        let manifest = Manifest {
+            run_id: "run-xyz".to_string(),
+            artifacts: vec![ManifestEntry {
+                filename: "report.csv".to_string(),
+                bytes: 12,
+                content_type: "text/csv".to_string(),
+                sha256: "deadbeef".to_string(),
+                label: Some("Q2".to_string()),
+                description: None,
+                step_id: Some("gen-report".to_string()),
+                updated_at: "2026-06-26T00:00:00Z".to_string(),
+            }],
+        };
+        write_manifest(tmp.path(), &manifest).unwrap();
+
+        let loaded = load_manifest(tmp.path()).expect("manifest should load");
+        assert_eq!(loaded.run_id, "run-xyz");
+        assert_eq!(loaded.artifacts.len(), 1);
+        let e = &loaded.artifacts[0];
+        assert_eq!(e.filename, "report.csv");
+        assert_eq!(e.bytes, 12);
+        assert_eq!(e.content_type, "text/csv");
+        assert_eq!(e.sha256, "deadbeef");
+        assert_eq!(e.label.as_deref(), Some("Q2"));
+        assert_eq!(e.description, None);
+        assert_eq!(e.step_id.as_deref(), Some("gen-report"));
+    }
+
+    #[test]
+    fn load_manifest_none_when_absent() {
+        let tmp = tempdir().unwrap();
+        assert!(load_manifest(tmp.path()).is_none());
+    }
+
+    #[test]
+    fn load_manifest_none_when_invalid_json() {
+        let tmp = tempdir().unwrap();
+        fs::write(manifest_path(tmp.path()), "{ not json").unwrap();
+        assert!(load_manifest(tmp.path()).is_none());
+    }
+
+    #[test]
+    fn record_persists_entry_with_checksum_and_provenance() {
+        let tmp = tempdir().unwrap();
+        let mut a = artifacts_at(tmp.path(), "run-rec");
+
+        let p = tmp.path().join("data.json");
+        fs::write(&p, "hello").unwrap();
+        let rec = ArtifactRecord {
+            path: p.clone(),
+            filename: "data.json".to_string(),
+            bytes: 5,
+            content_type: "application/json",
+            label: Some("dataset".to_string()),
+            description: Some("the thing".to_string()),
+        };
+        a.record(Some("step-7"), &[rec]);
+
+        let m = load_manifest(tmp.path()).expect("manifest written");
+        assert_eq!(m.run_id, "run-rec");
+        assert_eq!(m.artifacts.len(), 1);
+        let e = &m.artifacts[0];
+        assert_eq!(e.filename, "data.json");
+        assert_eq!(e.bytes, 5);
+        assert_eq!(e.content_type, "application/json");
+        // Checksum is computed from the file on disk.
+        assert_eq!(
+            e.sha256,
+            "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+        );
+        assert_eq!(e.label.as_deref(), Some("dataset"));
+        assert_eq!(e.description.as_deref(), Some("the thing"));
+        assert_eq!(e.step_id.as_deref(), Some("step-7"));
+        assert!(!e.updated_at.is_empty());
+    }
+
+    #[test]
+    fn record_upserts_by_filename() {
+        let tmp = tempdir().unwrap();
+        let mut a = artifacts_at(tmp.path(), "run-up");
+        let p = tmp.path().join("out.txt");
+
+        fs::write(&p, "v1").unwrap();
+        a.record(
+            Some("s1"),
+            &[ArtifactRecord {
+                path: p.clone(),
+                filename: "out.txt".to_string(),
+                bytes: 2,
+                content_type: "text/plain",
+                label: None,
+                description: None,
+            }],
+        );
+        // Rewrite + re-record the same filename: should update, not duplicate.
+        fs::write(&p, "v2-longer").unwrap();
+        a.record(
+            Some("s2"),
+            &[ArtifactRecord {
+                path: p.clone(),
+                filename: "out.txt".to_string(),
+                bytes: 9,
+                content_type: "text/plain",
+                label: Some("final".to_string()),
+                description: None,
+            }],
+        );
+
+        let m = load_manifest(tmp.path()).unwrap();
+        assert_eq!(m.artifacts.len(), 1, "same filename upserts in place");
+        let e = &m.artifacts[0];
+        assert_eq!(e.bytes, 9);
+        assert_eq!(e.label.as_deref(), Some("final"));
+        assert_eq!(e.step_id.as_deref(), Some("s2"));
+        assert_eq!(e.sha256, sha256_file(&p).unwrap());
+    }
+
+    #[test]
+    fn record_appends_distinct_filenames() {
+        let tmp = tempdir().unwrap();
+        let mut a = artifacts_at(tmp.path(), "run-multi");
+        for name in ["a.csv", "b.json"] {
+            let p = tmp.path().join(name);
+            fs::write(&p, name).unwrap();
+            a.record(
+                None,
+                &[ArtifactRecord {
+                    path: p,
+                    filename: name.to_string(),
+                    bytes: name.len() as u64,
+                    content_type: "application/octet-stream",
+                    label: None,
+                    description: None,
+                }],
+            );
+        }
+        let m = load_manifest(tmp.path()).unwrap();
+        assert_eq!(m.artifacts.len(), 2);
+        let names: Vec<&str> = m.artifacts.iter().map(|e| e.filename.as_str()).collect();
+        assert!(names.contains(&"a.csv"));
+        assert!(names.contains(&"b.json"));
+        // step_id was None — should serialize/deserialize as absent.
+        assert!(m.artifacts.iter().all(|e| e.step_id.is_none()));
+    }
+
+    #[test]
+    fn record_empty_is_noop() {
+        let tmp = tempdir().unwrap();
+        let mut a = artifacts_at(tmp.path(), "run-empty");
+        a.record(Some("s"), &[]);
+        // No manifest should be written for an empty record set.
+        assert!(load_manifest(tmp.path()).is_none());
+    }
+
+    #[test]
+    fn dir_accessor_returns_resolved_dir() {
+        let tmp = tempdir().unwrap();
+        let a = artifacts_at(tmp.path(), "run-dir");
+        assert_eq!(a.dir(), tmp.path());
+    }
+
+    #[test]
+    fn read_sidecar_missing_returns_none_pair() {
+        let tmp = tempdir().unwrap();
+        let artifact = tmp.path().join("x.csv");
+        fs::write(&artifact, "data").unwrap();
+        assert_eq!(read_sidecar(&artifact), (None, None));
+    }
+
+    #[test]
+    fn read_sidecar_partial_fields() {
+        let tmp = tempdir().unwrap();
+        let artifact = tmp.path().join("x.csv");
+        fs::write(&artifact, "data").unwrap();
+        // Only a label, no description.
+        fs::write(
+            tmp.path().join("x.csv.meta.json"),
+            r#"{"label":"only-label"}"#,
+        )
+        .unwrap();
+        let (label, desc) = read_sidecar(&artifact);
+        assert_eq!(label.as_deref(), Some("only-label"));
+        assert_eq!(desc, None);
+    }
+
+    #[test]
+    fn read_sidecar_ignores_non_string_and_unknown_fields() {
+        let tmp = tempdir().unwrap();
+        let artifact = tmp.path().join("x.csv");
+        fs::write(&artifact, "data").unwrap();
+        // label is a number (not a string) and there's an unknown key.
+        fs::write(
+            tmp.path().join("x.csv.meta.json"),
+            r#"{"label":42,"description":"ok","extra":"ignored"}"#,
+        )
+        .unwrap();
+        let (label, desc) = read_sidecar(&artifact);
+        assert_eq!(label, None, "non-string label is ignored");
+        assert_eq!(desc.as_deref(), Some("ok"));
+    }
+
+    #[test]
+    fn content_type_covers_all_known_extensions() {
+        assert_eq!(guess_content_type("a.json"), "application/json");
+        assert_eq!(guess_content_type("a.yaml"), "application/yaml");
+        assert_eq!(guess_content_type("a.yml"), "application/yaml");
+        assert_eq!(guess_content_type("a.txt"), "text/plain");
+        assert_eq!(guess_content_type("a.log"), "text/plain");
+        assert_eq!(guess_content_type("a.csv"), "text/csv");
+        assert_eq!(guess_content_type("a.md"), "text/markdown");
+        assert_eq!(guess_content_type("a.png"), "image/png");
+        assert_eq!(guess_content_type("a.jpg"), "image/jpeg");
+        assert_eq!(guess_content_type("a.jpeg"), "image/jpeg");
+        assert_eq!(guess_content_type("a.html"), "text/html");
+        // Case-insensitive.
+        assert_eq!(guess_content_type("REPORT.CSV"), "text/csv");
+        // Unknown / no extension.
+        assert_eq!(guess_content_type("a.bin"), "application/octet-stream");
+        assert_eq!(guess_content_type("noext"), "application/octet-stream");
+    }
+
+    #[test]
+    fn sanitize_replaces_unsafe_chars() {
+        assert_eq!(sanitize("ok-run_1"), "ok-run_1");
+        assert_eq!(sanitize("a/b c:d"), "a_b_c_d");
+        assert_eq!(sanitize("trip..//"), "trip____");
+    }
+
+    #[test]
+    fn resolve_run_id_prefers_run_id_then_trigger() {
+        let mut env = HashMap::new();
+        env.insert(ENV_RUN_ID.to_string(), "primary".to_string());
+        env.insert(ENV_TRIGGER_RUN_ID.to_string(), "secondary".to_string());
+        assert_eq!(resolve_run_id(&env), "primary");
+
+        let mut env2 = HashMap::new();
+        env2.insert(ENV_TRIGGER_RUN_ID.to_string(), "secondary".to_string());
+        assert_eq!(resolve_run_id(&env2), "secondary");
+
+        // Empty values are skipped in favor of the next source.
+        let mut env3 = HashMap::new();
+        env3.insert(ENV_RUN_ID.to_string(), String::new());
+        env3.insert(ENV_TRIGGER_RUN_ID.to_string(), "third".to_string());
+        assert_eq!(resolve_run_id(&env3), "third");
+    }
+
+    #[test]
+    fn default_dir_and_run_artifacts_dir_share_suffix() {
+        // Both build the same path; assert the stable suffix regardless of HOME.
+        let a = run_artifacts_dir("my/run id");
+        let b = default_dir("my/run id");
+        assert_eq!(a, b);
+        // Run id is sanitized into the path.
+        assert!(a.ends_with(PathBuf::from("my_run_id").join("artifacts")));
+    }
+
+    #[test]
+    fn runs_root_ends_with_wb_runs_when_home_set() {
+        if std::env::var_os("HOME").is_some() {
+            let root = runs_root().expect("HOME is set");
+            assert!(root.ends_with(PathBuf::from(".wb").join("runs")));
+        }
+    }
+
+    #[test]
+    fn upload_url_and_secret_read_from_env_map() {
+        let mut env = HashMap::new();
+        env.insert(
+            ENV_UPLOAD_URL.to_string(),
+            "https://up.example/{run_id}/{filename}".to_string(),
+        );
+        env.insert(ENV_UPLOAD_SECRET.to_string(), "tok".to_string());
+        assert_eq!(
+            upload_url(&env).as_deref(),
+            Some("https://up.example/{run_id}/{filename}")
+        );
+        assert_eq!(upload_secret(&env).as_deref(), Some("tok"));
+    }
+
+    #[test]
+    fn list_runs_is_callable_without_panicking() {
+        // Smoke test: reads the real (possibly absent) ~/.wb/runs; must not
+        // panic and must return a Vec. We don't mutate HOME to avoid racing
+        // other tests in the same binary.
+        let _ = list_runs();
+    }
+
+    #[test]
+    fn sync_returns_empty_when_dir_missing() {
+        let tmp = tempdir().unwrap();
+        let missing = tmp.path().join("does-not-exist");
+        // Construct an Artifacts pointing at a dir, then remove it.
+        let mut env = HashMap::new();
+        env.insert(ENV_DIR.to_string(), missing.to_string_lossy().into_owned());
+        let mut a = Artifacts::init(&mut env);
+        // init created `missing`; remove so read_dir fails.
+        let _ = fs::remove_dir_all(&missing);
+        assert!(a.sync().is_empty());
+    }
 }

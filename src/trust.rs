@@ -152,4 +152,136 @@ mod tests {
             Some("deadbeef")
         );
     }
+
+    // Serialize tests that mutate the shared WB_TRUST_PATH / HOME env vars.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn trust_path_override_and_home_fallback() {
+        let _g = ENV_LOCK.lock().unwrap();
+        std::env::set_var("WB_TRUST_PATH", "/custom/trust.json");
+        assert_eq!(trust_path(), PathBuf::from("/custom/trust.json"));
+        std::env::remove_var("WB_TRUST_PATH");
+
+        let prev_home = std::env::var_os("HOME");
+        std::env::set_var("HOME", "/home/tester");
+        assert_eq!(
+            trust_path(),
+            PathBuf::from("/home/tester").join(".wb").join("trust.json")
+        );
+        // No HOME, no override → temp_dir base.
+        std::env::remove_var("HOME");
+        assert_eq!(
+            trust_path(),
+            std::env::temp_dir().join(".wb").join("trust.json")
+        );
+        if let Some(h) = prev_home {
+            std::env::set_var("HOME", h)
+        }
+    }
+
+    #[test]
+    fn save_load_roundtrip_on_disk() {
+        let _g = ENV_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        // Nested non-existent parent to exercise create_dir_all.
+        let path = dir.path().join("nested").join("trust.json");
+        let prev = std::env::var_os("WB_TRUST_PATH");
+        std::env::set_var("WB_TRUST_PATH", &path);
+
+        let f = tmp("ondisk", "echo hi");
+        let mut store = TrustStore::default();
+        store.trust(&f).unwrap();
+        store.save().unwrap();
+        assert!(path.exists());
+
+        let loaded = TrustStore::load();
+        assert_eq!(loaded.status(&f), TrustStatus::Trusted);
+
+        match prev {
+            Some(p) => std::env::set_var("WB_TRUST_PATH", p),
+            None => std::env::remove_var("WB_TRUST_PATH"),
+        }
+    }
+
+    #[test]
+    fn save_create_dir_all_failure_is_error() {
+        // WB_TRUST_PATH whose parent can't be created (a file blocks the dir)
+        // makes save's create_dir_all fail and propagate (line 67-68 error arm).
+        let _g = ENV_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let blocker = dir.path().join("blocker");
+        std::fs::write(&blocker, b"i am a file").unwrap();
+        let path = blocker.join("nested").join("trust.json");
+        let prev = std::env::var_os("WB_TRUST_PATH");
+        std::env::set_var("WB_TRUST_PATH", &path);
+
+        let err = TrustStore::default().save();
+        assert!(err.is_err(), "save under a file path should error");
+
+        match prev {
+            Some(p) => std::env::set_var("WB_TRUST_PATH", p),
+            None => std::env::remove_var("WB_TRUST_PATH"),
+        }
+    }
+
+    #[test]
+    fn save_with_parentless_path_skips_create_dir() {
+        // A path with no parent ("/") takes the `if let Some(parent)` false
+        // arm (line 68), skipping create_dir_all; the write to root then fails.
+        let _g = ENV_LOCK.lock().unwrap();
+        let prev = std::env::var_os("WB_TRUST_PATH");
+        std::env::set_var("WB_TRUST_PATH", "/");
+        let res = TrustStore::default().save();
+        match prev {
+            Some(p) => std::env::set_var("WB_TRUST_PATH", p),
+            None => std::env::remove_var("WB_TRUST_PATH"),
+        }
+        assert!(res.is_err(), "writing trust store to / should fail");
+    }
+
+    #[test]
+    fn load_missing_file_is_default() {
+        let _g = ENV_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("does-not-exist.json");
+        let prev = std::env::var_os("WB_TRUST_PATH");
+        std::env::set_var("WB_TRUST_PATH", &path);
+        assert!(TrustStore::load().entries.is_empty());
+        match prev {
+            Some(p) => std::env::set_var("WB_TRUST_PATH", p),
+            None => std::env::remove_var("WB_TRUST_PATH"),
+        }
+    }
+
+    #[test]
+    fn unreadable_file_status_and_trust_error() {
+        let missing = "/no/such/wb-trust-file.md";
+        let store = TrustStore::default();
+        assert_eq!(store.status(missing), TrustStatus::Unreadable);
+        assert!(hash_file(missing).is_none());
+        let mut store = TrustStore::default();
+        let err = store.trust(missing).unwrap_err();
+        assert!(err.contains("cannot read"));
+    }
+
+    #[test]
+    fn remove_absent_returns_false() {
+        let mut store = TrustStore::default();
+        assert!(!store.remove("/never/added.md"));
+    }
+
+    #[test]
+    fn status_labels_cover_all_variants() {
+        assert_eq!(TrustStatus::Trusted.label(), "trusted");
+        assert_eq!(TrustStatus::Untrusted.label(), "untrusted");
+        assert_eq!(TrustStatus::Changed.label(), "changed");
+        assert_eq!(TrustStatus::Unreadable.label(), "unreadable");
+    }
+
+    #[test]
+    fn canonical_key_falls_back_for_missing_path() {
+        // A non-existent path cannot canonicalize; key is the original string.
+        assert_eq!(canonical_key("/no/such/path.md"), "/no/such/path.md");
+    }
 }

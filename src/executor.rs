@@ -1746,3 +1746,812 @@ mod tests {
         assert_eq!(r.error_type.as_deref(), Some("timeout"));
     }
 }
+
+#[cfg(test)]
+mod coverage_tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    // ─── Test fixtures ───────────────────────────────────────────────
+
+    /// Probe whether a runtime binary is on PATH. Tests that need an optional
+    /// interpreter (python3/node/ruby/sqlite3/psql) gate their assertions on
+    /// this so the suite still passes on a machine that lacks it.
+    fn have(bin: &str) -> bool {
+        Command::new(bin)
+            .arg("--version")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .is_ok()
+    }
+
+    fn ctx_bash() -> ExecutionContext {
+        ExecutionContext {
+            env: HashMap::new(),
+            working_dir: ".".to_string(),
+            venv: None,
+            default_runtime: Some("bash".to_string()),
+            exec_config: None,
+            dir_config: None,
+            quiet: true,
+            vars: HashMap::new(),
+            redact_values: Vec::new(),
+            block_timeout: None,
+        }
+    }
+
+    fn block(lang: &str, code: &str) -> CodeBlock {
+        CodeBlock {
+            language: lang.to_string(),
+            code: code.to_string(),
+            line_number: 0,
+            skip_execution: false,
+            silent: false,
+            when: None,
+            skip_if: None,
+            no_cache: false,
+            attrs: Default::default(),
+        }
+    }
+
+    fn unique_tmp(name: &str) -> std::path::PathBuf {
+        let mut p = std::env::temp_dir();
+        let pid = std::process::id();
+        let nanos = Instant::now().elapsed().as_nanos();
+        p.push(format!("wb_exec_test_{}_{}_{}", pid, nanos, name));
+        p
+    }
+
+    // ─── classify_exit / auto_classify ───────────────────────────────
+
+    #[test]
+    fn classify_exit_zero_is_empty() {
+        assert_eq!(classify_exit(0), "");
+    }
+
+    #[test]
+    fn classify_exit_nonzero_is_nonzero_exit() {
+        assert_eq!(classify_exit(1), "nonzero_exit");
+        assert_eq!(classify_exit(2), "nonzero_exit");
+        assert_eq!(classify_exit(127), "nonzero_exit");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn classify_exit_signal_range_is_signal_killed() {
+        assert_eq!(classify_exit(137), "signal_killed"); // SIGKILL
+        assert_eq!(classify_exit(143), "signal_killed"); // SIGTERM
+        assert_eq!(classify_exit(128), "signal_killed");
+        // Out of the signal window falls back to nonzero_exit.
+        assert_eq!(classify_exit(192), "nonzero_exit");
+    }
+
+    #[test]
+    fn auto_classify_success_leaves_none() {
+        let mut r = ok_result();
+        r.exit_code = 0;
+        r.auto_classify();
+        assert!(r.error_type.is_none());
+    }
+
+    #[test]
+    fn auto_classify_nonzero_sets_token() {
+        let mut r = ok_result();
+        r.exit_code = 3;
+        r.auto_classify();
+        assert_eq!(r.error_type.as_deref(), Some("nonzero_exit"));
+    }
+
+    #[test]
+    fn auto_classify_preserves_existing_type() {
+        let mut r = ok_result();
+        r.exit_code = 1;
+        r.error_type = Some("http_status".to_string());
+        r.auto_classify();
+        assert_eq!(r.error_type.as_deref(), Some("http_status"));
+    }
+
+    fn ok_result() -> BlockResult {
+        BlockResult {
+            block_index: 0,
+            language: "bash".to_string(),
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: 0,
+            duration: Duration::from_millis(1),
+            error_type: None,
+            stdout_partial: false,
+            stderr_partial: false,
+        }
+    }
+
+    #[test]
+    fn block_result_success_helper() {
+        let mut r = ok_result();
+        assert!(r.success());
+        r.exit_code = 1;
+        assert!(!r.success());
+    }
+
+    // ─── normalize_language / supports_session / is_python_language ──
+
+    #[test]
+    fn normalize_language_aliases() {
+        let none = None;
+        assert_eq!(normalize_language("python3", &none), "python");
+        assert_eq!(normalize_language("py", &none), "python");
+        assert_eq!(normalize_language("PYTHON", &none), "python");
+        assert_eq!(normalize_language("shell", &none), "bash");
+        assert_eq!(normalize_language("bash", &none), "bash");
+        assert_eq!(normalize_language("sh", &none), "sh");
+        assert_eq!(normalize_language("zsh", &none), "zsh");
+        assert_eq!(normalize_language("javascript", &none), "node");
+        assert_eq!(normalize_language("js", &none), "node");
+        assert_eq!(normalize_language("rb", &none), "ruby");
+    }
+
+    #[test]
+    fn normalize_language_unknown_uses_default() {
+        let dflt = Some("python".to_string());
+        assert_eq!(normalize_language("cobol", &dflt), "python");
+    }
+
+    #[test]
+    fn normalize_language_unknown_without_default_is_passthrough() {
+        let none = None;
+        assert_eq!(normalize_language("cobol", &none), "cobol");
+    }
+
+    #[test]
+    fn supports_session_matrix() {
+        for s in ["python", "bash", "sh", "zsh", "node", "ruby"] {
+            assert!(supports_session(s), "{s} should support sessions");
+        }
+        for s in ["http", "sql", "perl", "go", "cobol"] {
+            assert!(!supports_session(s), "{s} should not support sessions");
+        }
+    }
+
+    #[test]
+    fn is_python_language_matrix() {
+        assert!(is_python_language("python"));
+        assert!(is_python_language("Py"));
+        assert!(is_python_language("PYTHON3"));
+        assert!(!is_python_language("bash"));
+        assert!(!is_python_language("node"));
+    }
+
+    // ─── parse_sentinel ──────────────────────────────────────────────
+
+    #[test]
+    fn parse_sentinel_valid_and_invalid() {
+        assert_eq!(parse_sentinel("__WB_DONE_0__"), Some(0));
+        assert_eq!(parse_sentinel("  __WB_DONE_42__  "), Some(42));
+        assert_eq!(parse_sentinel("__WB_DONE_-1__"), Some(-1));
+        assert_eq!(parse_sentinel("not a sentinel"), None);
+        assert_eq!(parse_sentinel("__WB_DONE_abc__"), None);
+        assert_eq!(parse_sentinel("__WB_DONE_"), None);
+    }
+
+    // ─── substitute_env_dollar edge cases ────────────────────────────
+
+    #[test]
+    fn substitute_env_dollar_unterminated_brace_is_literal() {
+        let env = HashMap::new();
+        // No closing brace → the `${` is emitted literally.
+        assert_eq!(substitute_env_dollar("a ${UNCLOSED", &env), "a ${UNCLOSED");
+    }
+
+    #[test]
+    fn substitute_env_dollar_trailing_dollar() {
+        let env = HashMap::new();
+        assert_eq!(substitute_env_dollar("cost$", &env), "cost$");
+    }
+
+    #[test]
+    fn substitute_env_dollar_brace_form() {
+        let mut env = HashMap::new();
+        env.insert("A".to_string(), "1".to_string());
+        assert_eq!(substitute_env_dollar("x=${A}y", &env), "x=1y");
+    }
+
+    // ─── parse_http_request error branches ───────────────────────────
+
+    #[test]
+    fn parse_http_request_bad_header() {
+        let err = parse_http_request("GET https://h/x\nNoColonHeader\n").unwrap_err();
+        assert!(err.contains("bad header"), "got: {err}");
+    }
+
+    #[test]
+    fn parse_http_request_method_lowercased_to_upper() {
+        let req = parse_http_request("delete https://h/x").unwrap();
+        assert_eq!(req.method, "DELETE");
+    }
+
+    // ─── resolve_exec ────────────────────────────────────────────────
+
+    #[test]
+    fn resolve_exec_none_config() {
+        assert!(resolve_exec(&None, "python").is_none());
+    }
+
+    #[test]
+    fn resolve_exec_global_empty_is_none() {
+        let cfg = Some(ExecConfig::Global("   ".to_string()));
+        assert!(resolve_exec(&cfg, "bash").is_none());
+    }
+
+    #[test]
+    fn resolve_exec_global_prefix() {
+        let cfg = Some(ExecConfig::Global("docker exec c".to_string()));
+        match resolve_exec(&cfg, "bash") {
+            Some(ExecMode::Prefix(p)) => assert_eq!(p, vec!["docker", "exec", "c"]),
+            other => panic!("expected prefix, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn resolve_exec_per_language_hit_and_miss() {
+        let mut map = HashMap::new();
+        map.insert("python".to_string(), "uv run python".to_string());
+        let cfg = Some(ExecConfig::PerLanguage(map));
+        match resolve_exec(&cfg, "python") {
+            Some(ExecMode::Replace(p)) => assert_eq!(p, vec!["uv", "run", "python"]),
+            other => panic!("expected replace, got {other:?}"),
+        }
+        assert!(resolve_exec(&cfg, "node").is_none());
+    }
+
+    // ExecMode needs Debug for the panic messages above.
+    impl std::fmt::Debug for ExecMode {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            match self {
+                ExecMode::Prefix(p) => write!(f, "Prefix({p:?})"),
+                ExecMode::Replace(p) => write!(f, "Replace({p:?})"),
+            }
+        }
+    }
+
+    // ─── resolve_working_dir ─────────────────────────────────────────
+
+    #[test]
+    fn resolve_working_dir_none_returns_base() {
+        assert_eq!(resolve_working_dir(&None, "bash", "/work"), "/work");
+    }
+
+    #[test]
+    fn resolve_working_dir_global_absolute() {
+        let cfg = Some(DirConfig::Global("/abs/path".to_string()));
+        assert_eq!(resolve_working_dir(&cfg, "bash", "/work"), "/abs/path");
+    }
+
+    #[test]
+    fn resolve_working_dir_global_relative_joins_base() {
+        let cfg = Some(DirConfig::Global("sub".to_string()));
+        let got = resolve_working_dir(&cfg, "bash", "/work");
+        assert!(got.ends_with("sub"), "got: {got}");
+        assert!(got.starts_with("/work"), "got: {got}");
+    }
+
+    #[test]
+    fn resolve_working_dir_per_language() {
+        let mut map = HashMap::new();
+        map.insert("python".to_string(), "src".to_string());
+        let cfg = Some(DirConfig::PerLanguage(map));
+        let got = resolve_working_dir(&cfg, "python", "/work");
+        assert!(got.contains("src"), "got: {got}");
+        // A language not in the map gets the base.
+        assert_eq!(resolve_working_dir(&cfg, "bash", "/work"), "/work");
+    }
+
+    // ─── build_command ───────────────────────────────────────────────
+
+    #[test]
+    fn build_command_none_uses_program() {
+        let cmd = build_command(None, "bash");
+        assert_eq!(cmd.get_program(), "bash");
+        assert_eq!(cmd.get_args().count(), 0);
+    }
+
+    #[test]
+    fn build_command_prefix_appends_program() {
+        let exec = ExecMode::Prefix(vec!["docker".into(), "exec".into(), "c".into()]);
+        let cmd = build_command(Some(&exec), "python3");
+        assert_eq!(cmd.get_program(), "docker");
+        let args: Vec<_> = cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().to_string())
+            .collect();
+        assert_eq!(args, vec!["exec", "c", "python3"]);
+    }
+
+    #[test]
+    fn build_command_replace_drops_program() {
+        let exec = ExecMode::Replace(vec!["uv".into(), "run".into(), "python".into()]);
+        let cmd = build_command(Some(&exec), "python3");
+        assert_eq!(cmd.get_program(), "uv");
+        let args: Vec<_> = cmd
+            .get_args()
+            .map(|a| a.to_string_lossy().to_string())
+            .collect();
+        assert_eq!(args, vec!["run", "python"]);
+    }
+
+    // ─── spawn_error_message ─────────────────────────────────────────
+
+    #[test]
+    fn spawn_error_message_notfound_has_install_hint() {
+        let e = std::io::Error::from(std::io::ErrorKind::NotFound);
+        let msg = spawn_error_message("python3", "python", &e);
+        assert!(msg.contains("not found on PATH"), "got: {msg}");
+        assert!(msg.contains("install Python"), "got: {msg}");
+    }
+
+    #[test]
+    fn spawn_error_message_notfound_unknown_lang_generic_hint() {
+        let e = std::io::Error::from(std::io::ErrorKind::NotFound);
+        let msg = spawn_error_message("cobolc", "cobol", &e);
+        assert!(msg.contains("exec:"), "got: {msg}");
+    }
+
+    #[test]
+    fn spawn_error_message_other_kind() {
+        let e = std::io::Error::from(std::io::ErrorKind::PermissionDenied);
+        let msg = spawn_error_message("bash", "bash", &e);
+        assert!(msg.starts_with("Failed to spawn bash"), "got: {msg}");
+    }
+
+    // ─── resolve_runtime ─────────────────────────────────────────────
+
+    #[test]
+    fn resolve_runtime_known_languages() {
+        let ctx = ctx_bash();
+        let (p, a, _c) = resolve_runtime("python", "print(1)", &ctx);
+        assert_eq!(p, "python3");
+        assert_eq!(a, vec!["-"]);
+
+        let (p, a, _c) = resolve_runtime("node", "x", &ctx);
+        assert_eq!(p, "node");
+        assert_eq!(a[0], "-e");
+
+        let (p, _a, _c) = resolve_runtime("ruby", "x", &ctx);
+        assert_eq!(p, "ruby");
+        let (p, _a, _c) = resolve_runtime("perl", "x", &ctx);
+        assert_eq!(p, "perl");
+        let (p, _a, _c) = resolve_runtime("php", "x", &ctx);
+        assert_eq!(p, "php");
+        let (p, _a, _c) = resolve_runtime("lua", "x", &ctx);
+        assert_eq!(p, "lua");
+        let (p, _a, _c) = resolve_runtime("r", "x", &ctx);
+        assert_eq!(p, "Rscript");
+        let (p, _a, _c) = resolve_runtime("swift", "x", &ctx);
+        assert_eq!(p, "swift");
+
+        let (p, a, _c) = resolve_runtime("sh", "x", &ctx);
+        assert_eq!(p, "sh");
+        assert_eq!(a, vec!["-s"]);
+        let (p, _a, _c) = resolve_runtime("zsh", "x", &ctx);
+        assert_eq!(p, "zsh");
+        let (p, a, code) = resolve_runtime("bash", "echo hi", &ctx);
+        assert_eq!(p, "bash");
+        assert_eq!(a, vec!["-s"]);
+        assert_eq!(code, "echo hi");
+    }
+
+    #[test]
+    fn resolve_runtime_go_writes_tmpfile() {
+        let ctx = ctx_bash();
+        let (p, a, _c) = resolve_runtime("go", "package main\nfunc main(){}", &ctx);
+        assert_eq!(p, "go");
+        assert_eq!(a[0], "run");
+        assert!(a[1].ends_with("wb_block.go"), "got: {:?}", a);
+    }
+
+    #[test]
+    fn resolve_runtime_unknown_with_default_recurses() {
+        let mut ctx = ctx_bash();
+        ctx.default_runtime = Some("python".to_string());
+        let (p, a, _c) = resolve_runtime("cobol", "x", &ctx);
+        assert_eq!(p, "python3");
+        assert_eq!(a, vec!["-"]);
+    }
+
+    #[test]
+    fn resolve_runtime_unknown_without_default_is_bash() {
+        let mut ctx = ctx_bash();
+        ctx.default_runtime = None;
+        let (p, a, code) = resolve_runtime("cobol", "echo hi", &ctx);
+        assert_eq!(p, "bash");
+        assert_eq!(a, vec!["-s"]);
+        assert_eq!(code, "echo hi");
+    }
+
+    // ─── ExecutionContext::from_frontmatter ──────────────────────────
+
+    #[test]
+    fn from_frontmatter_derives_working_dir_from_parent() {
+        let mut fm = Frontmatter::default();
+        let mut env = HashMap::new();
+        env.insert("K".to_string(), "v".to_string());
+        fm.env = Some(env);
+        fm.runtime = Some("python".to_string());
+        let ctx = ExecutionContext::from_frontmatter(&fm, "/a/b/run.md");
+        assert_eq!(ctx.working_dir, "/a/b");
+        assert_eq!(ctx.default_runtime.as_deref(), Some("python"));
+        assert_eq!(ctx.env.get("K").map(String::as_str), Some("v"));
+    }
+
+    #[test]
+    fn from_frontmatter_bare_filename_is_dot() {
+        let fm = Frontmatter::default();
+        let ctx = ExecutionContext::from_frontmatter(&fm, "run.md");
+        assert_eq!(ctx.working_dir, ".");
+    }
+
+    // ─── execute_block_oneshot (bash always present) ─────────────────
+
+    #[test]
+    fn oneshot_bash_success_captures_stdout() {
+        let ctx = ctx_bash();
+        let r = execute_block_oneshot(&block("bash", "echo hello-oneshot"), 7, &ctx);
+        assert_eq!(r.exit_code, 0);
+        assert_eq!(r.block_index, 7);
+        assert_eq!(r.stdout.trim(), "hello-oneshot");
+        assert!(r.error_type.is_none());
+    }
+
+    #[test]
+    fn oneshot_bash_nonzero_exit_classified() {
+        let ctx = ctx_bash();
+        let r = execute_block_oneshot(&block("bash", "exit 4"), 0, &ctx);
+        assert_eq!(r.exit_code, 4);
+        assert_eq!(r.error_type.as_deref(), Some("nonzero_exit"));
+    }
+
+    #[test]
+    fn oneshot_bash_stderr_captured() {
+        let ctx = ctx_bash();
+        let r = execute_block_oneshot(&block("bash", "echo oops >&2; exit 1"), 0, &ctx);
+        assert_eq!(r.exit_code, 1);
+        assert!(r.stderr.contains("oops"), "got: {:?}", r.stderr);
+    }
+
+    #[test]
+    fn oneshot_env_injection() {
+        let mut ctx = ctx_bash();
+        ctx.env
+            .insert("WB_INJECTED".to_string(), "yes-here".to_string());
+        let r = execute_block_oneshot(&block("bash", "echo \"$WB_INJECTED\""), 0, &ctx);
+        assert_eq!(r.stdout.trim(), "yes-here");
+    }
+
+    #[test]
+    fn oneshot_redacts_secret_in_stdout() {
+        let mut ctx = ctx_bash();
+        ctx.redact_values = vec!["topsecret".to_string()];
+        let r = execute_block_oneshot(&block("bash", "echo topsecret"), 0, &ctx);
+        assert_eq!(r.stdout.trim(), "***");
+    }
+
+    #[test]
+    fn oneshot_var_substitution() {
+        let mut ctx = ctx_bash();
+        ctx.vars.insert("name".to_string(), "world".to_string());
+        let r = execute_block_oneshot(&block("bash", "echo hi {{name}}"), 0, &ctx);
+        assert_eq!(r.stdout.trim(), "hi world");
+    }
+
+    #[test]
+    fn oneshot_spawn_not_found_via_exec_replace() {
+        // Force an ENOENT by replacing the program with a binary that cannot
+        // exist on PATH. Exercises the spawn-error / spawn_not_found path.
+        let mut ctx = ctx_bash();
+        let mut map = HashMap::new();
+        map.insert("bash".to_string(), "wb_nonexistent_binary_zzz".to_string());
+        ctx.exec_config = Some(ExecConfig::PerLanguage(map));
+        let r = execute_block_oneshot(&block("bash", "echo hi"), 0, &ctx);
+        assert_eq!(r.exit_code, 127);
+        assert_eq!(r.error_type.as_deref(), Some("spawn_not_found"));
+        assert!(
+            r.stderr.contains("not found on PATH"),
+            "got: {:?}",
+            r.stderr
+        );
+    }
+
+    // ─── Session::execute_block dispatch ─────────────────────────────
+
+    #[test]
+    fn session_bash_exit_code_and_capture() {
+        let mut s = Session::new(ctx_bash());
+        let r = s.execute_block(&block("bash", "echo line1; echo line2"), 0);
+        assert_eq!(r.exit_code, 0);
+        assert!(r.stdout.contains("line1"));
+        assert!(r.stdout.contains("line2"));
+    }
+
+    #[test]
+    fn session_bash_env_via_set_env() {
+        let mut s = Session::new(ctx_bash());
+        s.set_env("WB_SESSION_ENV".to_string(), "abc".to_string());
+        assert_eq!(
+            s.env().get("WB_SESSION_ENV").map(String::as_str),
+            Some("abc")
+        );
+        let r = s.execute_block(&block("bash", "echo \"$WB_SESSION_ENV\""), 0);
+        assert_eq!(r.stdout.trim(), "abc");
+    }
+
+    #[test]
+    fn session_redacts_block_output() {
+        let mut ctx = ctx_bash();
+        ctx.redact_values = vec!["hunter2".to_string()];
+        let mut s = Session::new(ctx);
+        let r = s.execute_block(&block("bash", "echo hunter2"), 0);
+        assert_eq!(r.stdout.trim(), "***");
+        assert_eq!(s.redact_values(), &["hunter2".to_string()]);
+    }
+
+    #[test]
+    fn session_spawn_not_found_via_exec_replace() {
+        let mut ctx = ctx_bash();
+        let mut map = HashMap::new();
+        map.insert("bash".to_string(), "wb_nonexistent_binary_yyy".to_string());
+        ctx.exec_config = Some(ExecConfig::PerLanguage(map));
+        let mut s = Session::new(ctx);
+        let r = s.execute_block(&block("bash", "echo hi"), 0);
+        assert_eq!(r.exit_code, 127);
+        assert_eq!(r.error_type.as_deref(), Some("spawn_not_found"));
+    }
+
+    #[test]
+    fn session_set_block_timeout_then_unbounded() {
+        // Exercise set_block_timeout: arm a tight cap that fires, then clear it.
+        let mut s = Session::new(ctx_bash());
+        s.set_block_timeout(Some(Duration::from_millis(300)));
+        let r = s.execute_block(&block("bash", "echo pre; sleep 5"), 0);
+        assert!(
+            r.stdout_partial || r.stderr_partial,
+            "expected partial, got {r:?}"
+        );
+        assert_eq!(r.error_type.as_deref(), Some("timeout"));
+        // After a timeout the dead session is dropped; a fresh unbounded block runs.
+        s.set_block_timeout(None);
+        let r2 = s.execute_block(&block("bash", "echo recovered"), 1);
+        assert_eq!(r2.exit_code, 0);
+        assert_eq!(r2.stdout.trim(), "recovered");
+    }
+
+    #[test]
+    fn session_set_quiet_toggle() {
+        let mut s = Session::new(ctx_bash());
+        s.set_quiet(false);
+        s.set_quiet(true);
+        // Should still execute cleanly.
+        let r = s.execute_block(&block("bash", "echo ok"), 0);
+        assert_eq!(r.exit_code, 0);
+    }
+
+    #[test]
+    fn session_remove_env() {
+        let mut ctx = ctx_bash();
+        ctx.env.insert("WB_RM".to_string(), "v".to_string());
+        let mut s = Session::new(ctx);
+        s.remove_env("WB_RM");
+        assert!(s.env().get("WB_RM").is_none());
+    }
+
+    // ─── Native http runtime ─────────────────────────────────────────
+
+    #[test]
+    fn http_invalid_request_is_exit_2() {
+        let s = Session::new(ctx_bash());
+        // Empty body → parse error → http_invalid, exit 2.
+        let r = s.execute_http(&block("http", "\n# just a comment\n"), 0);
+        assert_eq!(r.exit_code, 2);
+        assert_eq!(r.error_type.as_deref(), Some("http_invalid"));
+        assert!(r.stderr.starts_with("http:"), "got: {:?}", r.stderr);
+    }
+
+    #[test]
+    fn http_dispatch_through_execute_block() {
+        let mut s = Session::new(ctx_bash());
+        let r = s.execute_block(&block("HTTP", "\n"), 0);
+        // Case-insensitive dispatch; empty body is invalid.
+        assert_eq!(r.error_type.as_deref(), Some("http_invalid"));
+    }
+
+    #[test]
+    fn http_connection_refused_fails_fast() {
+        if !have("curl") {
+            return;
+        }
+        let s = Session::new(ctx_bash());
+        // Port 1 refuses immediately on localhost; no network round-trip.
+        let r = s.execute_http(&block("http", "GET http://127.0.0.1:1/"), 0);
+        // Connection failure → status unparsed (0) → exit 1, error http_status.
+        assert_eq!(r.exit_code, 1);
+        assert_eq!(r.error_type.as_deref(), Some("http_status"));
+        assert!(
+            r.stdout.is_empty(),
+            "expected empty body, got {:?}",
+            r.stdout
+        );
+    }
+
+    // ─── Native sql runtime ──────────────────────────────────────────
+
+    #[test]
+    fn sql_no_connection() {
+        let s = Session::new(ctx_bash());
+        let r = s.execute_sql(&block("sql", "SELECT 1;"), 0);
+        assert_eq!(r.exit_code, 2);
+        assert_eq!(r.error_type.as_deref(), Some("sql_no_connection"));
+    }
+
+    #[test]
+    fn sql_empty_query() {
+        let mut ctx = ctx_bash();
+        ctx.env
+            .insert("WB_SQL_URL".to_string(), "sqlite::memory:".to_string());
+        let s = Session::new(ctx);
+        let r = s.execute_sql(&block("sql", "   \n  "), 0);
+        assert_eq!(r.exit_code, 2);
+        assert_eq!(r.error_type.as_deref(), Some("sql_invalid"));
+    }
+
+    #[test]
+    fn sql_dispatch_through_execute_block_no_connection() {
+        let mut s = Session::new(ctx_bash());
+        let r = s.execute_block(&block("SQL", "SELECT 1;"), 0);
+        assert_eq!(r.error_type.as_deref(), Some("sql_no_connection"));
+    }
+
+    #[test]
+    fn sql_sqlite_happy_path() {
+        if !have("sqlite3") {
+            return; // optional dependency; assert only when present.
+        }
+        let dbpath = unique_tmp("sql.db");
+        let mut ctx = ctx_bash();
+        // Bare path form → sqlite3.
+        ctx.env.insert(
+            "WB_SQL_URL".to_string(),
+            format!("sqlite:{}", dbpath.display()),
+        );
+        let s = Session::new(ctx);
+        let r = s.execute_sql(&block("sql", "SELECT 1+2;"), 0);
+        let _ = std::fs::remove_file(&dbpath);
+        assert_eq!(r.exit_code, 0, "stderr: {:?}", r.stderr);
+        assert!(r.stdout.contains('3'), "got stdout: {:?}", r.stdout);
+        assert!(r.error_type.is_none());
+    }
+
+    #[test]
+    fn sql_sqlite_query_error() {
+        if !have("sqlite3") {
+            return;
+        }
+        let dbpath = unique_tmp("sqlerr.db");
+        let mut ctx = ctx_bash();
+        ctx.env.insert(
+            "WB_SQL_URL".to_string(),
+            format!("sqlite://{}", dbpath.display()),
+        );
+        let s = Session::new(ctx);
+        let r = s.execute_sql(&block("sql", "SELECT * FROM no_such_table;"), 0);
+        let _ = std::fs::remove_file(&dbpath);
+        assert_ne!(r.exit_code, 0);
+        assert_eq!(r.error_type.as_deref(), Some("sql_error"));
+        assert!(!r.stderr.is_empty());
+    }
+
+    #[test]
+    fn sql_postgres_routes_to_psql() {
+        // We don't need a live server: either psql is absent (sql_failed) or it
+        // is present and the bogus connection fails (sql_error). Both exercise
+        // the postgres branch / program selection without real network success.
+        let mut ctx = ctx_bash();
+        ctx.env.insert(
+            "DATABASE_URL".to_string(),
+            "postgres://nouser@127.0.0.1:1/nodb".to_string(),
+        );
+        let s = Session::new(ctx);
+        let r = s.execute_sql(&block("sql", "SELECT 1;"), 0);
+        assert_ne!(r.exit_code, 0);
+        let kind = r.error_type.as_deref().unwrap_or("");
+        assert!(
+            kind == "sql_failed" || kind == "sql_error",
+            "unexpected error_type: {kind:?} (stderr {:?})",
+            r.stderr
+        );
+    }
+
+    // ─── unset_env_in_sessions (bash branch) ─────────────────────────
+
+    #[test]
+    fn unset_env_in_sessions_clears_running_bash() {
+        let mut ctx = ctx_bash();
+        ctx.env
+            .insert("WB_UNSET_ME".to_string(), "stillhere".to_string());
+        let mut s = Session::new(ctx);
+        // Start a bash session so processes map has a "bash" entry.
+        let r = s.execute_block(&block("bash", "echo \"$WB_UNSET_ME\""), 0);
+        assert_eq!(r.stdout.trim(), "stillhere");
+        s.unset_env_in_sessions("WB_UNSET_ME");
+        let r2 = s.execute_block(&block("bash", "echo \"[$WB_UNSET_ME]\""), 1);
+        assert_eq!(r2.stdout.trim(), "[]");
+    }
+
+    // ─── collect_until_sentinel via real sessions (timeout window) ───
+
+    #[test]
+    fn session_disconnected_when_child_exits() {
+        // `exit` ends the persistent bash session; the next block sees a fresh
+        // process spawned because the dead one was removed.
+        let mut s = Session::new(ctx_bash());
+        let r1 = s.execute_block(&block("bash", "echo a"), 0);
+        assert_eq!(r1.exit_code, 0);
+        let r2 = s.execute_block(&block("bash", "echo b"), 1);
+        assert_eq!(r2.exit_code, 0);
+        assert_eq!(r2.stdout.trim(), "b");
+    }
+
+    // ─── Optional interpreter coverage (gated) ───────────────────────
+
+    #[test]
+    fn python_session_when_available() {
+        if !have("python3") {
+            return;
+        }
+        let mut ctx = ctx_bash();
+        ctx.default_runtime = Some("python".to_string());
+        let mut s = Session::new(ctx);
+        let r1 = s.execute_block(&block("python", "x = 21"), 0);
+        assert_eq!(r1.exit_code, 0, "stderr: {:?}", r1.stderr);
+        let r2 = s.execute_block(&block("python", "print(x * 2)"), 1);
+        assert_eq!(r2.exit_code, 0);
+        assert_eq!(r2.stdout.trim(), "42");
+    }
+
+    #[test]
+    fn python_session_error_nonzero() {
+        if !have("python3") {
+            return;
+        }
+        let mut ctx = ctx_bash();
+        ctx.default_runtime = Some("python".to_string());
+        let mut s = Session::new(ctx);
+        let r = s.execute_block(&block("python", "raise ValueError('boom')"), 0);
+        assert_eq!(r.exit_code, 1);
+        assert!(r.stderr.contains("boom"), "got: {:?}", r.stderr);
+    }
+
+    #[test]
+    fn node_session_when_available() {
+        if !have("node") {
+            return;
+        }
+        let mut ctx = ctx_bash();
+        ctx.default_runtime = Some("node".to_string());
+        let mut s = Session::new(ctx);
+        let r = s.execute_block(&block("node", "console.log(1 + 1)"), 0);
+        assert_eq!(r.exit_code, 0, "stderr: {:?}", r.stderr);
+        assert_eq!(r.stdout.trim(), "2");
+    }
+
+    #[test]
+    fn ruby_session_when_available() {
+        if !have("ruby") {
+            return;
+        }
+        let mut ctx = ctx_bash();
+        ctx.default_runtime = Some("ruby".to_string());
+        let mut s = Session::new(ctx);
+        let r = s.execute_block(&block("ruby", "puts 3 + 4"), 0);
+        assert_eq!(r.exit_code, 0, "stderr: {:?}", r.stderr);
+        assert_eq!(r.stdout.trim(), "7");
+    }
+}
