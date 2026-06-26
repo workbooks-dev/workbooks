@@ -1,14 +1,14 @@
 //! Inline assertions (#16/#31) — the `expect` / `assert` fence DSL.
 //!
 //! An `expect` (or `assert`) fence holds one assertion per line, evaluated at
-//! run time against the result of the immediately preceding executable block:
+//! run time against the result of the immediately preceding executable block.
+//! In a workbook it is written as an `expect`-tagged fence; the body holds the
+//! assertions:
 //!
 //! ```text
-//! ```expect
 //! exit 0
 //! stdout contains "deployed"
 //! stderr empty
-//! ```
 //! ```
 //!
 //! Grammar (one per line; `#` comments and blank lines ignored):
