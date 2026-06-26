@@ -707,6 +707,7 @@ fn check_workflow_nodes(wb: &Workbook, path: &Path, out: &mut Vec<Diagnostic>) {
     let Some(workflow) = wb.frontmatter.workflow.as_ref() else {
         return;
     };
+    let workflow = &workflow.0;
     let Some(workflow_obj) = workflow.as_object() else {
         out.push(Diagnostic::error(
             "wb-workflow-002",

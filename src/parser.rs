@@ -29,7 +29,7 @@ pub struct Frontmatter {
     /// Optional compiled-workflow manifest. `wb` treats it as metadata: it
     /// validates declared node ids and passes compact fragments through
     /// callbacks/checkpoints, but does not interpret the workflow graph.
-    pub workflow: Option<serde_json::Value>,
+    pub workflow: Option<WorkflowManifest>,
     /// Per-block timeout map. Numeric keys (1-based block numbers) set a
     /// per-block cap; the special `_default` key sets a runbook-wide default
     /// applied to every block that doesn't have its own override. Values are
@@ -317,6 +317,15 @@ pub fn reserved_bind_name<'a>(names: impl IntoIterator<Item = &'a str>) -> Optio
     }
     None
 }
+
+/// The opaque compiled-workflow manifest (#26). `wb` validates declared node
+/// ids and forwards compact fragments through callbacks/checkpoints, but does
+/// not interpret the graph — a named newtype rather than a bare
+/// `serde_json::Value` in `Frontmatter`/`Checkpoint`. `#[serde(transparent)]`
+/// keeps the JSON shape byte-identical.
+#[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(transparent)]
+pub struct WorkflowManifest(pub serde_json::Value);
 
 /// Opaque, resolver-defined match criteria for a `wait` fence (#26). `wb` is
 /// protocol-agnostic — `kind`/`match` are metadata external resolvers interpret,

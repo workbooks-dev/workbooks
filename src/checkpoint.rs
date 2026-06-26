@@ -43,7 +43,7 @@ pub struct Checkpoint {
     pub skipped: Vec<SavedSkip>,
     /// Optional compiled workflow manifest from root frontmatter.
     #[serde(default)]
-    pub workflow: Option<serde_json::Value>,
+    pub workflow: Option<crate::parser::WorkflowManifest>,
     /// Digest of the resolved parameter set (`crate::params`). Part of the
     /// checkpoint identity: if it differs from the current run's params, the
     /// run starts fresh instead of resuming stale state. `None` for runs
