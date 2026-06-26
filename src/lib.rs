@@ -4492,6 +4492,10 @@ fn run_single(cfg: RunConfig) {
     // is skipped; new successes are recorded and the store is saved at run end.
     let mut cache_store = cache_id.as_ref().map(|id| cache::CacheStore::load(id));
     let cache_now = chrono::Utc::now().to_rfc3339();
+    // Env/secret identity for the cache key (#18) — wb-managed env minus the
+    // run-specific WB_* internals. Snapshotted before the loop so WB_OUT_*
+    // exports during the run don't bust it (they're WB_*-prefixed anyway).
+    let cache_env_hash = cache::env_identity(session.env());
 
     if !quiet {
         let title = workbook.frontmatter.title.as_deref().unwrap_or(file);
@@ -4861,7 +4865,12 @@ fn run_single(cfg: RunConfig) {
                 if block.no_cache {
                     return None;
                 }
-                let key = cache::cache_key(&block.language, &block.code, param_hash.as_deref());
+                let key = cache::cache_key(
+                    &block.language,
+                    &block.code,
+                    param_hash.as_deref(),
+                    &cache_env_hash,
+                );
                 store.is_cached_success(&key).then(cache_skip_decision)
             });
             if let Some(skip) = live_skip {
@@ -4985,7 +4994,12 @@ fn run_single(cfg: RunConfig) {
             // future `--cache` run can skip it when unchanged.
             if let Some(ref mut store) = cache_store {
                 if !block.no_cache {
-                    let key = cache::cache_key(&block.language, &block.code, param_hash.as_deref());
+                    let key = cache::cache_key(
+                        &block.language,
+                        &block.code,
+                        param_hash.as_deref(),
+                        &cache_env_hash,
+                    );
                     store.record(key, result.success(), result.exit_code, &cache_now);
                 }
             }
