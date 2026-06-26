@@ -26,6 +26,9 @@
 //! - `WB_RECORDING_UPLOAD_SECRET` — reused for Bearer auth; required when
 //!   upload URL is set.
 
+use chrono::Utc;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -49,6 +52,95 @@ pub struct ArtifactRecord {
     pub content_type: &'static str,
     pub label: Option<String>,
     pub description: Option<String>,
+}
+
+/// Filename of the per-run artifact manifest written into the artifacts dir.
+pub const MANIFEST_FILENAME: &str = "manifest.json";
+
+/// One artifact's persisted provenance — keyed by run/step (#36).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ManifestEntry {
+    pub filename: String,
+    pub bytes: u64,
+    pub content_type: String,
+    pub sha256: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// Stable id of the step that produced this artifact, when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step_id: Option<String>,
+    pub updated_at: String,
+}
+
+/// Per-run artifact manifest. Persisted as `manifest.json` in the artifacts
+/// dir and read back by `wb artifacts` / `wb runs`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Manifest {
+    pub run_id: String,
+    pub artifacts: Vec<ManifestEntry>,
+}
+
+/// Path to the manifest file inside an artifacts dir.
+pub fn manifest_path(dir: &Path) -> PathBuf {
+    dir.join(MANIFEST_FILENAME)
+}
+
+/// Load a run's manifest, or `None` if absent/unreadable/invalid.
+pub fn load_manifest(dir: &Path) -> Option<Manifest> {
+    let bytes = fs::read(manifest_path(dir)).ok()?;
+    serde_json::from_slice(&bytes).ok()
+}
+
+fn write_manifest(dir: &Path, manifest: &Manifest) -> std::io::Result<()> {
+    let json = serde_json::to_string_pretty(manifest).map_err(std::io::Error::other)?;
+    fs::write(manifest_path(dir), json)
+}
+
+/// sha256 of a file's contents, hex. `None` on read error.
+pub fn sha256_file(path: &Path) -> Option<String> {
+    let bytes = fs::read(path).ok()?;
+    let mut hasher = Sha256::new();
+    hasher.update(&bytes);
+    Some(format!("{:x}", hasher.finalize()))
+}
+
+/// The artifacts dir for a run id under `~/.wb/runs/<id>/artifacts`.
+pub fn run_artifacts_dir(run_id: &str) -> PathBuf {
+    default_dir(run_id)
+}
+
+/// `~/.wb/runs` — the root holding per-run directories.
+pub fn runs_root() -> Option<PathBuf> {
+    std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".wb").join("runs"))
+}
+
+/// List known runs (run_id + artifacts dir), newest first by directory mtime.
+pub fn list_runs() -> Vec<(String, PathBuf)> {
+    let Some(root) = runs_root() else {
+        return Vec::new();
+    };
+    let mut runs: Vec<(String, PathBuf, u128)> = Vec::new();
+    if let Ok(entries) = fs::read_dir(&root) {
+        for e in entries.flatten() {
+            let p = e.path();
+            if !p.is_dir() {
+                continue;
+            }
+            let Some(name) = p.file_name().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            let mtime = e
+                .metadata()
+                .and_then(|m| m.modified())
+                .map(system_time_to_nanos)
+                .unwrap_or(0);
+            runs.push((name.to_string(), p.join("artifacts"), mtime));
+        }
+    }
+    runs.sort_by(|a, b| b.2.cmp(&a.2));
+    runs.into_iter().map(|(id, dir, _)| (id, dir)).collect()
 }
 
 pub struct Artifacts {
@@ -117,6 +209,45 @@ impl Artifacts {
     /// reaching into the env var, which might not be propagated yet.
     pub fn dir(&self) -> &Path {
         &self.dir
+    }
+
+    /// Record newly-synced artifacts into the persistent `manifest.json`,
+    /// keyed by run/step (#36). Upserts by filename (a rewrite updates the
+    /// entry's checksum/size/label and step provenance). Best-effort: a write
+    /// failure is logged, never fatal.
+    pub fn record(&mut self, step_id: Option<&str>, records: &[ArtifactRecord]) {
+        if records.is_empty() {
+            return;
+        }
+        let mut manifest = load_manifest(&self.dir).unwrap_or_else(|| Manifest {
+            run_id: self.run_id.clone(),
+            artifacts: Vec::new(),
+        });
+        let now = Utc::now().to_rfc3339();
+        for r in records {
+            let entry = ManifestEntry {
+                filename: r.filename.clone(),
+                bytes: r.bytes,
+                content_type: r.content_type.to_string(),
+                sha256: sha256_file(&r.path).unwrap_or_default(),
+                label: r.label.clone(),
+                description: r.description.clone(),
+                step_id: step_id.map(|s| s.to_string()),
+                updated_at: now.clone(),
+            };
+            if let Some(existing) = manifest
+                .artifacts
+                .iter_mut()
+                .find(|e| e.filename == entry.filename)
+            {
+                *existing = entry;
+            } else {
+                manifest.artifacts.push(entry);
+            }
+        }
+        if let Err(e) = write_manifest(&self.dir, &manifest) {
+            crate::log_warn!("warning: could not write artifact manifest: {}", e);
+        }
     }
 
     /// Scan the artifacts dir for files that are new (or have a newer mtime
@@ -368,7 +499,7 @@ fn guess_content_type(filename: &str) -> &'static str {
 /// uploaded (so first-party storage sees them) but they don't fire
 /// `step.artifact_saved`.
 fn is_sidecar_filename(filename: &str) -> bool {
-    if filename == "pause_result.json" {
+    if filename == "pause_result.json" || filename == MANIFEST_FILENAME {
         return true;
     }
     if filename.ends_with(".meta.json") || filename.ends_with(".wb.json") {

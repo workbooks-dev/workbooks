@@ -316,3 +316,69 @@ fn tag_selection_runs_only_tagged_blocks() {
     assert_eq!(out.status.code(), Some(2), "unknown tag should exit 2");
     std::fs::remove_dir_all(md.parent().unwrap()).ok();
 }
+
+#[test]
+fn artifacts_manifest_list_and_open() {
+    let dir = std::env::temp_dir().join(format!("wb-art-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let md = dir.join("a.md");
+    std::fs::write(
+        &md,
+        "---\nruntime: bash\n---\n```bash {#gen}\necho hi > \"$WB_ARTIFACTS_DIR/out.txt\"\n```\n",
+    )
+    .unwrap();
+    let run_id = format!("wb-test-art-{}", std::process::id());
+
+    let run = Command::new(wb_binary())
+        .args([md.to_str().unwrap(), "-q"])
+        .env("WB_RECORDING_RUN_ID", &run_id)
+        .output()
+        .expect("spawn wb");
+    assert_eq!(run.status.code(), Some(0));
+
+    // list --format json should include the artifact with a checksum + step id.
+    let list = Command::new(wb_binary())
+        .args(["artifacts", "list", "--run", &run_id, "--format", "json"])
+        .output()
+        .expect("spawn wb");
+    let v: serde_json::Value = serde_json::from_slice(&list.stdout).expect("json");
+    let arts = v["artifacts"].as_array().expect("array");
+    assert_eq!(arts.len(), 1, "one artifact expected: {v}");
+    assert_eq!(arts[0]["filename"], "out.txt");
+    assert_eq!(arts[0]["step_id"], "gen");
+    assert!(arts[0]["sha256"].as_str().unwrap().len() == 64);
+
+    // open prints the absolute path.
+    let open = Command::new(wb_binary())
+        .args(["artifacts", "open", "out.txt", "--run", &run_id])
+        .output()
+        .expect("spawn wb");
+    assert_eq!(open.status.code(), Some(0));
+    assert!(String::from_utf8_lossy(&open.stdout)
+        .trim()
+        .ends_with("out.txt"));
+
+    // Unknown artifact is an error.
+    let missing = Command::new(wb_binary())
+        .args(["artifacts", "open", "nope.txt", "--run", &run_id])
+        .output()
+        .expect("spawn wb");
+    assert_eq!(missing.status.code(), Some(1));
+
+    // runs show works.
+    let show = Command::new(wb_binary())
+        .args(["runs", "show", &run_id, "--format", "json"])
+        .output()
+        .expect("spawn wb");
+    let sv: serde_json::Value = serde_json::from_slice(&show.stdout).expect("json");
+    assert_eq!(sv["run_id"], run_id.as_str());
+    assert_eq!(sv["artifacts"], serde_json::json!(1));
+
+    std::fs::remove_dir_all(&dir).ok();
+    std::fs::remove_dir_all(format!(
+        "{}/.wb/runs/{}",
+        std::env::var("HOME").unwrap(),
+        run_id
+    ))
+    .ok();
+}

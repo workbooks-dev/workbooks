@@ -429,6 +429,11 @@ wb run file.md --tag smoke                  # Run only blocks with the .smoke fe
 wb run file.md --dry-run                    # Print the execution plan without running
 wb test file.md                       # Run + evaluate expect/assert fences (CI exit codes)
 wb test some/ --format json           # Test every *.md in a folder, machine-readable
+wb artifacts list --run <id>          # List a run's captured artifacts (manifest)
+wb artifacts open <name> --run <id>   # Print an artifact's absolute path
+wb artifacts export <name> --to <dst> # Copy an artifact out of the run dir
+wb runs list                          # List known runs (newest first)
+wb runs show <id>                     # Show a run's artifacts + checkpoint state
 wb inspect file.md                    # Show structure without running
 wb pending                            # List paused workbooks (auto-reaps expired abort-mode descriptors)
 wb pending --no-reap                  # List without reaping — safe for automation/inspection
@@ -567,6 +572,28 @@ When `WB_ARTIFACTS_UPLOAD_URL` is set (template supports `{run_id}` and
 wrote it completes, with `Authorization: Bearer $WB_RECORDING_UPLOAD_SECRET`.
 
 See `examples/artifacts-demo.md`.
+
+### Artifact manifest + `wb artifacts` / `wb runs`
+
+Every run writes a `manifest.json` into its artifacts dir recording each
+artifact with its size, content type, **sha256 checksum**, label/description
+(from the `.meta.json` sidecar), the **step id that produced it**, and an
+`updated_at` timestamp. Inspect captured artifacts after a run:
+
+```bash
+wb runs list                          # known runs, newest first, with counts
+wb runs show <run-id>                 # a run's artifacts + checkpoint state
+wb artifacts list --run <run-id>      # the run's manifest (--format json too)
+wb artifacts open report.csv --run <run-id>      # prints the absolute path
+wb artifacts export report.csv --to ./out.csv --run <run-id>
+```
+
+Runs live under `~/.wb/runs/<run-id>/artifacts` (a run id comes from
+`WB_RECORDING_RUN_ID` / `TRIGGER_RUN_ID`). Omitting `--run` targets the most
+recent run. For runs without a persisted manifest (older runs or external
+tooling), the commands fall back to scanning the directory (no step
+provenance). JSON output is available on `list`/`runs list`/`runs show` via
+`--format json`.
 
 ### Browser-runtime auto-capture
 

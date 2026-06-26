@@ -563,6 +563,59 @@ struct TestArgs {
 }
 
 #[derive(clap::Args)]
+struct ArtifactsArgs {
+    #[command(subcommand)]
+    sub: ArtifactsSub,
+}
+
+#[derive(Subcommand)]
+enum ArtifactsSub {
+    /// List artifacts recorded for a run (defaults to the most recent run).
+    List {
+        /// Run id (defaults to the latest run under ~/.wb/runs).
+        #[arg(long)]
+        run: Option<String>,
+        #[command(flatten)]
+        fmt: FormatArg,
+    },
+    /// Print the absolute path of one artifact (use in `$(wb artifacts open x)`).
+    Open {
+        name: String,
+        #[arg(long)]
+        run: Option<String>,
+    },
+    /// Copy an artifact out to a destination path (file or directory).
+    Export {
+        name: String,
+        #[arg(long = "to", value_name = "DEST")]
+        to: String,
+        #[arg(long)]
+        run: Option<String>,
+    },
+}
+
+#[derive(clap::Args)]
+struct RunsArgs {
+    #[command(subcommand)]
+    sub: RunsSub,
+}
+
+#[derive(Subcommand)]
+enum RunsSub {
+    /// List known runs (newest first) with artifact counts.
+    List {
+        #[command(flatten)]
+        fmt: FormatArg,
+    },
+    /// Show a run's artifacts and (if present) its checkpoint state.
+    Show {
+        id: String,
+        #[command(flatten)]
+        fmt: FormatArg,
+    },
+}
+
+#[derive(clap::Args)]
 struct DoctorArgs {
     /// Run optional deep checks that probe Docker/Redis/sidecar
     #[arg(long)]
@@ -737,6 +790,10 @@ enum Command {
     Validate(ValidateArgs),
     /// Run a workbook (or folder) and evaluate its `expect`/`assert` fences.
     Test(TestArgs),
+    /// Inspect artifacts captured by runs (list / open / export).
+    Artifacts(ArtifactsArgs),
+    /// Inspect past runs and their artifacts/checkpoint state.
+    Runs(RunsArgs),
     Doctor(DoctorArgs),
     Pending(PendingArgs),
     Resume(ResumeArgs),
@@ -864,6 +921,8 @@ fn main() -> std::process::ExitCode {
         Some(Command::Inspect(args)) => cmd_inspect(args),
         Some(Command::Validate(args)) => cmd_validate(args),
         Some(Command::Test(args)) => cmd_test(args),
+        Some(Command::Artifacts(args)) => cmd_artifacts(args),
+        Some(Command::Runs(args)) => cmd_runs(args),
         Some(Command::Doctor(args)) => cmd_doctor(args),
         Some(Command::Pending(args)) => cmd_pending_cmd(args),
         Some(Command::Resume(args)) => cmd_resume_cmd(args),
@@ -1037,6 +1096,227 @@ fn cmd_run(args: RunArgs) -> WbExit {
         });
     }
     WbExit::Success
+}
+
+/// Resolve a run's artifacts directory from an optional run id. With an id,
+/// `~/.wb/runs/<id>/artifacts`. Without one, the most recent run. `None` if no
+/// runs exist or the named run has no artifacts dir.
+fn resolve_run_dir(run: Option<&str>) -> Option<(String, std::path::PathBuf)> {
+    match run {
+        Some(id) => {
+            let dir = artifacts::run_artifacts_dir(id);
+            Some((id.to_string(), dir))
+        }
+        None => artifacts::list_runs().into_iter().next(),
+    }
+}
+
+/// Build a manifest for a run dir — preferring the persisted `manifest.json`,
+/// falling back to a live scan of the directory (no step provenance).
+fn manifest_for(run_id: &str, dir: &std::path::Path) -> artifacts::Manifest {
+    if let Some(m) = artifacts::load_manifest(dir) {
+        return m;
+    }
+    // Fallback: scan the directory directly so artifacts written before the
+    // manifest feature (or by external tooling) still list.
+    let mut entries = Vec::new();
+    if let Ok(rd) = std::fs::read_dir(dir) {
+        for e in rd.flatten() {
+            let p = e.path();
+            if !p.is_file() {
+                continue;
+            }
+            let Some(name) = p.file_name().and_then(|s| s.to_str()) else {
+                continue;
+            };
+            if name.ends_with(".meta.json")
+                || name.ends_with(".wb.json")
+                || name == artifacts::MANIFEST_FILENAME
+                || name == "pause_result.json"
+            {
+                continue;
+            }
+            entries.push(artifacts::ManifestEntry {
+                filename: name.to_string(),
+                bytes: e.metadata().map(|m| m.len()).unwrap_or(0),
+                content_type: "application/octet-stream".to_string(),
+                sha256: artifacts::sha256_file(&p).unwrap_or_default(),
+                label: None,
+                description: None,
+                step_id: None,
+                updated_at: String::new(),
+            });
+        }
+    }
+    entries.sort_by(|a, b| a.filename.cmp(&b.filename));
+    artifacts::Manifest {
+        run_id: run_id.to_string(),
+        artifacts: entries,
+    }
+}
+
+fn cmd_artifacts(args: ArtifactsArgs) -> WbExit {
+    match args.sub {
+        ArtifactsSub::List { run, fmt } => {
+            let json = match want_json(&fmt.format) {
+                Ok(b) => b,
+                Err(e) => return e,
+            };
+            let Some((run_id, dir)) = resolve_run_dir(run.as_deref()) else {
+                eprintln!("wb: no runs found under ~/.wb/runs");
+                return WbExit::Usage("no runs found".to_string());
+            };
+            let manifest = manifest_for(&run_id, &dir);
+            if json {
+                print_json(&serde_json::json!({
+                    "run_id": manifest.run_id,
+                    "dir": dir.to_string_lossy(),
+                    "artifacts": manifest.artifacts.iter().map(|e| serde_json::json!({
+                        "filename": e.filename,
+                        "bytes": e.bytes,
+                        "content_type": e.content_type,
+                        "sha256": e.sha256,
+                        "label": e.label,
+                        "description": e.description,
+                        "step_id": e.step_id,
+                        "updated_at": e.updated_at,
+                    })).collect::<Vec<_>>(),
+                }));
+            } else {
+                println!("{} ({})", output::style_bold(&run_id), dir.display());
+                if manifest.artifacts.is_empty() {
+                    println!("  (no artifacts)");
+                }
+                for e in &manifest.artifacts {
+                    let label = e
+                        .label
+                        .as_deref()
+                        .map(|l| format!("  {l}"))
+                        .unwrap_or_default();
+                    let step = e
+                        .step_id
+                        .as_deref()
+                        .map(|s| format!(" #{s}"))
+                        .unwrap_or_default();
+                    println!(
+                        "  {} ({}, {} B){}{}",
+                        e.filename, e.content_type, e.bytes, step, label
+                    );
+                }
+            }
+            WbExit::Success
+        }
+        ArtifactsSub::Open { name, run } => {
+            let Some((_run_id, dir)) = resolve_run_dir(run.as_deref()) else {
+                eprintln!("wb: no runs found under ~/.wb/runs");
+                return WbExit::Usage("no runs found".to_string());
+            };
+            let path = dir.join(&name);
+            if !path.is_file() {
+                eprintln!("wb: artifact '{}' not found in {}", name, dir.display());
+                return WbExit::BlockFailed;
+            }
+            println!("{}", path.display());
+            WbExit::Success
+        }
+        ArtifactsSub::Export { name, to, run } => {
+            let Some((_run_id, dir)) = resolve_run_dir(run.as_deref()) else {
+                eprintln!("wb: no runs found under ~/.wb/runs");
+                return WbExit::Usage("no runs found".to_string());
+            };
+            let src = dir.join(&name);
+            if !src.is_file() {
+                eprintln!("wb: artifact '{}' not found in {}", name, dir.display());
+                return WbExit::BlockFailed;
+            }
+            let dest = std::path::Path::new(&to);
+            let dest = if dest.is_dir() {
+                dest.join(&name)
+            } else {
+                dest.to_path_buf()
+            };
+            match std::fs::copy(&src, &dest) {
+                Ok(_) => {
+                    eprintln!("wb: exported {} → {}", name, dest.display());
+                    WbExit::Success
+                }
+                Err(e) => {
+                    eprintln!("error: export {}: {}", name, e);
+                    WbExit::BlockFailed
+                }
+            }
+        }
+    }
+}
+
+fn cmd_runs(args: RunsArgs) -> WbExit {
+    match args.sub {
+        RunsSub::List { fmt } => {
+            let json = match want_json(&fmt.format) {
+                Ok(b) => b,
+                Err(e) => return e,
+            };
+            let runs = artifacts::list_runs();
+            if json {
+                let arr: Vec<serde_json::Value> = runs
+                    .iter()
+                    .map(|(id, dir)| {
+                        let count = manifest_for(id, dir).artifacts.len();
+                        serde_json::json!({ "run_id": id, "dir": dir.to_string_lossy(), "artifacts": count })
+                    })
+                    .collect();
+                print_json(&serde_json::json!({ "runs": arr }));
+            } else if runs.is_empty() {
+                println!("(no runs under ~/.wb/runs)");
+            } else {
+                for (id, dir) in &runs {
+                    let count = manifest_for(id, dir).artifacts.len();
+                    println!("{}  {} artifact(s)", output::style_bold(id), count);
+                }
+            }
+            WbExit::Success
+        }
+        RunsSub::Show { id, fmt } => {
+            let json = match want_json(&fmt.format) {
+                Ok(b) => b,
+                Err(e) => return e,
+            };
+            let dir = artifacts::run_artifacts_dir(&id);
+            let manifest = manifest_for(&id, &dir);
+            // Surface checkpoint state too, if a checkpoint shares this id.
+            let ckpt = checkpoint::load(&id).ok().flatten();
+            if json {
+                print_json(&serde_json::json!({
+                    "run_id": id,
+                    "dir": dir.to_string_lossy(),
+                    "exists": dir.exists(),
+                    "artifacts": manifest.artifacts.len(),
+                    "checkpoint": ckpt.as_ref().map(|c| serde_json::json!({
+                        "status": format!("{:?}", c.status),
+                        "next_block": c.next_block,
+                        "total_blocks": c.total_blocks,
+                    })),
+                }));
+            } else {
+                println!("{}", output::style_bold(&format!("run {id}")));
+                println!("  artifacts dir: {}", dir.display());
+                println!("  artifacts: {}", manifest.artifacts.len());
+                for e in &manifest.artifacts {
+                    println!("    - {} ({} B)", e.filename, e.bytes);
+                }
+                match ckpt {
+                    Some(c) => println!(
+                        "  checkpoint: {:?}, next block {}/{}",
+                        c.status,
+                        c.next_block + 1,
+                        c.total_blocks
+                    ),
+                    None => println!("  checkpoint: none"),
+                }
+            }
+            WbExit::Success
+        }
+    }
 }
 
 fn cmd_inspect(args: InspectArgs) -> WbExit {
@@ -1897,8 +2177,10 @@ fn run_single_collect(
                     }
                 }
                 // Folder mode has no callback, so artifact records are
-                // discarded — no step.artifact_saved is emitted here.
-                let _ = artifacts.sync();
+                // discarded — no step.artifact_saved is emitted here. The
+                // manifest is still recorded so `wb artifacts`/`wb runs` work.
+                let synced = artifacts.sync();
+                artifacts.record(step_id, &synced);
                 results.push(result);
                 block_idx += 1;
             }
@@ -1959,8 +2241,10 @@ fn run_single_collect(
                     }
                 }
                 // Folder mode: no callback, so we don't emit
-                // step.artifact_saved for anything this slice produced.
-                let _ = artifacts.sync();
+                // step.artifact_saved for anything this slice produced. Record
+                // the manifest anyway for `wb artifacts`/`wb runs`.
+                let synced = artifacts.sync();
+                artifacts.record(step_id, &synced);
                 if pause.is_some() {
                     // Folder mode: no --checkpoint, no way to resume. Fail loudly
                     // rather than leak a half-run browser slice.
@@ -3633,6 +3917,7 @@ fn run_single(cfg: RunConfig) {
                 Some(step_outputs::callback_outputs(&current_outputs))
             };
             let new_artifacts = artifacts.sync();
+            artifacts.record(step_id, &new_artifacts);
 
             // Emit step.artifact_saved for each new artifact produced by this
             // block, before step.complete — ordering groups artifacts under
@@ -3984,6 +4269,7 @@ fn run_single(cfg: RunConfig) {
                 Some(step_outputs::callback_outputs(&current_outputs))
             };
             let new_artifacts = artifacts.sync();
+            artifacts.record(step_id, &new_artifacts);
 
             // Emit step.artifact_saved for each artifact this slice produced,
             // before step.complete (or before the pause path exits). Silent
