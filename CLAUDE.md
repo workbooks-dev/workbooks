@@ -516,7 +516,8 @@ wb runs list                          # List known runs (newest first)
 wb runs show <id>                     # Show a run's artifacts + checkpoint state
 wb watch <checkpoint-id>              # Live local viewer for a checkpointed run
 wb run file.md --events run.jsonl     # Append each run event as a JSONL line (local stream)
-wb capture --assert -o run.md         # Turn a command sequence (stdin) into a workbook
+wb capture --assert -o run.md         # Command sequence (stdin) → workbook
+wb capture -i -o run.md               # Interactive REPL session recorder → workbook
 wb trust add file.md                  # Record a reviewed workbook as trusted (TOFU)
 wb run file.md --require-trust        # Refuse to run an untrusted/changed workbook
 wb run gh:org/repo/path.md            # Fetch a remote workbook (always trust-gated)

@@ -770,6 +770,10 @@ struct CaptureArgs {
     /// Working directory to run the captured commands in.
     #[arg(short = 'C', long)]
     dir: Option<String>,
+    /// Interactive: read one command at a time, run it live (showing output),
+    /// and record it — a REPL-style session recorder. End with Ctrl-D.
+    #[arg(short = 'i', long)]
+    interactive: bool,
 }
 
 #[derive(clap::Args)]
@@ -1799,15 +1803,53 @@ fn cmd_runs(args: RunsArgs) -> WbExit {
 /// a stdout substring). One command per line; `#`-prefixed lines become
 /// Markdown headings. Turns an ad-hoc session into a checked-in, re-runnable
 /// runbook. PTY/interactive recording is a future extension.
-fn cmd_capture(args: CaptureArgs) -> WbExit {
-    use std::io::Read;
-    let mut input = String::new();
-    if std::io::stdin().read_to_string(&mut input).is_err() {
-        eprintln!("error: capture reads commands from stdin");
-        return WbExit::Usage("capture: no stdin".to_string());
+/// Process one captured line: prose for `# …`, else run the command in the
+/// session and append the block (+ optional `expect`) to `md`. Returns whether
+/// a command was executed (so the caller can count).
+fn capture_one_line(
+    session: &mut executor::Session,
+    md: &mut String,
+    idx: usize,
+    line: &str,
+    runtime: &str,
+    assert: bool,
+) -> bool {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return false;
     }
+    if let Some(comment) = trimmed.strip_prefix("# ") {
+        md.push_str(&format!("## {comment}\n\n"));
+        return false;
+    }
+    let block = parser::CodeBlock {
+        language: runtime.to_string(),
+        code: line.to_string(),
+        line_number: 0,
+        skip_execution: false,
+        silent: false,
+        when: None,
+        skip_if: None,
+        no_cache: false,
+        attrs: Default::default(),
+    };
+    let result = session.execute_block(&block, idx);
+    md.push_str(&format!("```{runtime}\n{line}\n```\n\n"));
+    if assert {
+        let mut asserts = format!("exit {}\n", result.exit_code);
+        if let Some(sub) = capture_stdout_assertion(&result.stdout) {
+            asserts.push_str(&format!("stdout contains \"{sub}\"\n"));
+        }
+        md.push_str(&format!("```expect\n{asserts}```\n\n"));
+    }
+    true
+}
 
-    // Build a minimal execution session for the chosen runtime.
+fn cmd_capture(args: CaptureArgs) -> WbExit {
+    use std::io::{BufRead, Read, Write};
+
+    // Build a minimal execution session for the chosen runtime. Interactive
+    // mode shows command output live; batch mode stays quiet.
     let fm = parser::Frontmatter {
         runtime: Some(args.runtime.clone()),
         ..Default::default()
@@ -1816,7 +1858,7 @@ fn cmd_capture(args: CaptureArgs) -> WbExit {
     if let Some(ref d) = args.dir {
         ctx.working_dir = d.clone();
     }
-    ctx.quiet = true;
+    ctx.quiet = !args.interactive;
     let mut session = executor::Session::new(ctx);
 
     let mut md = String::new();
@@ -1831,40 +1873,44 @@ fn cmd_capture(args: CaptureArgs) -> WbExit {
     }
 
     let mut idx = 0usize;
-    for raw in input.lines() {
-        let line = raw.trim_end();
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        // `#` lines become Markdown prose rather than commands.
-        if let Some(comment) = trimmed.strip_prefix("# ") {
-            md.push_str(&format!("## {comment}\n\n"));
-            continue;
-        }
-
-        let block = parser::CodeBlock {
-            language: args.runtime.clone(),
-            code: line.to_string(),
-            line_number: 0,
-            skip_execution: false,
-            silent: false,
-            when: None,
-            skip_if: None,
-            no_cache: false,
-            attrs: Default::default(),
-        };
-        let result = session.execute_block(&block, idx);
-        idx += 1;
-
-        md.push_str(&format!("```{}\n{}\n```\n\n", args.runtime, line));
-
-        if args.assert {
-            let mut asserts = format!("exit {}\n", result.exit_code);
-            if let Some(sub) = capture_stdout_assertion(&result.stdout) {
-                asserts.push_str(&format!("stdout contains \"{sub}\"\n"));
+    if args.interactive {
+        // REPL: prompt, read a line, run it live, record — until Ctrl-D.
+        eprintln!("wb capture (interactive) — type commands, Ctrl-D to finish.");
+        let stdin = std::io::stdin();
+        loop {
+            eprint!("wb» ");
+            let _ = std::io::stderr().flush();
+            let mut line = String::new();
+            match stdin.lock().read_line(&mut line) {
+                Ok(0) => break, // EOF (Ctrl-D)
+                Ok(_) => {
+                    let line = line.trim_end_matches(['\n', '\r']);
+                    if capture_one_line(
+                        &mut session,
+                        &mut md,
+                        idx,
+                        line,
+                        &args.runtime,
+                        args.assert,
+                    ) {
+                        idx += 1;
+                    }
+                }
+                Err(_) => break,
             }
-            md.push_str(&format!("```expect\n{asserts}```\n\n"));
+        }
+        eprintln!();
+    } else {
+        let mut input = String::new();
+        if std::io::stdin().read_to_string(&mut input).is_err() {
+            eprintln!("error: capture reads commands from stdin (or pass --interactive)");
+            return WbExit::Usage("capture: no stdin".to_string());
+        }
+        for raw in input.lines() {
+            let line = raw.trim_end();
+            if capture_one_line(&mut session, &mut md, idx, line, &args.runtime, args.assert) {
+                idx += 1;
+            }
         }
     }
 
