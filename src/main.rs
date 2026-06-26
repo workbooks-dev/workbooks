@@ -808,6 +808,9 @@ enum Command {
     Validate(ValidateArgs),
     /// Run a workbook (or folder) and evaluate its `expect`/`assert` fences.
     Test(TestArgs),
+    /// Docs-as-tests: run a doc's code blocks and fail if any block errors (or
+    /// any `expect` assertion fails). Like `wb test` but assertions are optional.
+    Verify(TestArgs),
     /// Inspect artifacts captured by runs (list / open / export).
     Artifacts(ArtifactsArgs),
     /// Inspect past runs and their artifacts/checkpoint state.
@@ -943,6 +946,7 @@ fn main() -> std::process::ExitCode {
         Some(Command::Inspect(args)) => cmd_inspect(args),
         Some(Command::Validate(args)) => cmd_validate(args),
         Some(Command::Test(args)) => cmd_test(args),
+        Some(Command::Verify(args)) => cmd_verify(args),
         Some(Command::Artifacts(args)) => cmd_artifacts(args),
         Some(Command::Runs(args)) => cmd_runs(args),
         Some(Command::Doctor(args)) => cmd_doctor(args),
@@ -1567,8 +1571,200 @@ fn test_one_file(file: &str, args: &TestArgs) -> FileReport {
         resolved.values.into_iter().collect(),
     );
 
+    let (assertions, passed, failed) = walk_expects(&workbook, &summary, args.bail);
+    report.assertions = assertions;
+    report.passed = passed;
+    report.failed = failed;
+    report
+}
+
+/// `wb verify` — docs-as-tests (#43). Runs a doc's code blocks and fails if any
+/// block errors or any `expect` assertion fails. Unlike `wb test`, assertions
+/// are optional: a plain doc with only runnable code blocks passes when they all
+/// exit 0. Exit 0 if every file passes, 1 otherwise.
+fn cmd_verify(args: TestArgs) -> WbExit {
+    let json = match want_json(&args.format) {
+        Ok(b) => b,
+        Err(e) => return e,
+    };
+
+    let path = Path::new(&args.file);
+    let files: Vec<std::path::PathBuf> = if path.is_dir() {
+        let mut v: Vec<std::path::PathBuf> = match std::fs::read_dir(path) {
+            Ok(rd) => rd
+                .filter_map(|e| e.ok().map(|e| e.path()))
+                .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("md"))
+                .collect(),
+            Err(e) => {
+                eprintln!("error: {}: {}", args.file, e);
+                return WbExit::Usage(format!("cannot read directory {}", args.file));
+            }
+        };
+        v.sort();
+        v
+    } else {
+        vec![path.to_path_buf()]
+    };
+
+    let reports: Vec<FileReport> = files
+        .iter()
+        .map(|f| verify_one_file(&f.to_string_lossy(), &args))
+        .collect();
+
+    let total_failed: usize = reports.iter().map(|r| r.failed).sum();
+    let any_error = reports.iter().any(|r| r.error.is_some());
+
+    if json {
+        let files_json: Vec<serde_json::Value> = reports
+            .iter()
+            .map(|r| {
+                serde_json::json!({
+                    "file": r.file,
+                    "ok": r.failed == 0 && r.error.is_none(),
+                    "checks": r.passed,
+                    "failures": r.failed,
+                    "error": r.error,
+                    "details": r.assertions.iter().map(|a| serde_json::json!({
+                        "source": a.source, "ok": a.ok, "detail": a.detail,
+                    })).collect::<Vec<_>>(),
+                })
+            })
+            .collect();
+        print_json(&serde_json::json!({
+            "ok": total_failed == 0 && !any_error,
+            "files": files_json,
+        }));
+    } else {
+        for r in &reports {
+            let ok = r.failed == 0 && r.error.is_none();
+            let mark = if ok {
+                output::style_ok("ok  ")
+            } else {
+                output::style_fail("FAIL")
+            };
+            println!("{} {}", mark, r.file);
+            if let Some(ref e) = r.error {
+                println!("     {}", e);
+            }
+            for a in r.assertions.iter().filter(|a| !a.ok) {
+                println!("     {} — {}", a.source, a.detail);
+            }
+        }
+        let ok_files = reports
+            .iter()
+            .filter(|r| r.failed == 0 && r.error.is_none())
+            .count();
+        println!("\nverify: {}/{} file(s) ok", ok_files, reports.len());
+    }
+
+    if total_failed > 0 || any_error {
+        WbExit::BlockFailed
+    } else {
+        WbExit::Success
+    }
+}
+
+/// Verify one doc: run it, count failed blocks + failed assertions.
+fn verify_one_file(file: &str, args: &TestArgs) -> FileReport {
+    let mut report = FileReport {
+        file: file.to_string(),
+        passed: 0,
+        failed: 0,
+        assertions: Vec::new(),
+        error: None,
+    };
+
+    let content = match std::fs::read_to_string(file) {
+        Ok(c) => c,
+        Err(e) => {
+            report.error = Some(format!("read: {e}"));
+            return report;
+        }
+    };
+    let workbook = parse_and_resolve(&content, file);
+
+    let resolved = match params::resolve(
+        workbook.frontmatter.params.as_ref(),
+        workbook.frontmatter.profiles.as_ref(),
+        args.profile.as_deref(),
+        args.param_file.as_deref(),
+        &args.param,
+    ) {
+        Ok(r) => r,
+        Err(e) => {
+            report.error = Some(e);
+            return report;
+        }
+    };
+
+    let cli_default_timeout = match args.default_block_timeout.as_deref() {
+        Some(s) => match parser::parse_duration_secs(s) {
+            Ok(n) => Some(Duration::from_secs(n)),
+            Err(e) => {
+                report.error = Some(format!("--default-block-timeout: {e}"));
+                return report;
+            }
+        },
+        None => None,
+    };
+
+    let cli_vars: std::collections::HashMap<String, String> = args
+        .set_vars
+        .iter()
+        .filter_map(|s| {
+            s.split_once('=')
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+        })
+        .collect();
+
+    let summary = run_single_collect(
+        file,
+        args.secrets.clone(),
+        args.project.clone(),
+        args.secrets_cmd.clone(),
+        args.dir.clone(),
+        args.quiet,
+        args.no_setup,
+        cli_vars,
+        args.redact.clone(),
+        args.env_files.clone(),
+        args.env_file_relative,
+        cli_default_timeout,
+        resolved.values.into_iter().collect(),
+    );
+
+    // Every failed block is a verify failure (docs-as-tests: code must run).
+    for r in summary.results.iter().filter(|r| !r.success()) {
+        report.failed += 1;
+        report.assertions.push(AssertionReport {
+            source: format!("block {} ({})", r.block_index + 1, r.language),
+            ok: false,
+            detail: format!("exited {}", r.exit_code),
+        });
+    }
+    // Plus any expect-fence assertions.
+    let (asserts, passed, failed) = walk_expects(&workbook, &summary, args.bail);
+    report.passed += passed + summary.results.iter().filter(|r| r.success()).count();
+    report.failed += failed;
+    report
+        .assertions
+        .extend(asserts.into_iter().filter(|a| !a.ok));
+    report
+}
+
+/// Evaluate every `expect`/`assert` fence in a workbook against a run's
+/// results. Returns the per-assertion reports plus pass/fail counts. Shared by
+/// `wb test` and `wb verify`.
+fn walk_expects(
+    workbook: &parser::Workbook,
+    summary: &output::RunSummary,
+    bail: bool,
+) -> (Vec<AssertionReport>, usize, usize) {
     let by_index: std::collections::HashMap<usize, &executor::BlockResult> =
         summary.results.iter().map(|r| (r.block_index, r)).collect();
+    let mut reports = Vec::new();
+    let mut passed = 0usize;
+    let mut failed = 0usize;
 
     // Walk sections, tracking the block index exactly as run_single_collect
     // assigns it (Code/Browser/Wait each consume one index). An `expect` fence
@@ -1581,20 +1777,20 @@ fn test_one_file(file: &str, args: &TestArgs) -> FileReport {
             }
             parser::Section::Expect(spec) => {
                 for err in &spec.errors {
-                    report.failed += 1;
-                    report.assertions.push(AssertionReport {
+                    failed += 1;
+                    reports.push(AssertionReport {
                         source: err.clone(),
                         ok: false,
                         detail: "malformed assertion".to_string(),
                     });
-                    if args.bail {
+                    if bail {
                         break 'outer;
                     }
                 }
                 if block_counter == 0 {
                     for (src, _) in &spec.assertions {
-                        report.failed += 1;
-                        report.assertions.push(AssertionReport {
+                        failed += 1;
+                        reports.push(AssertionReport {
                             source: src.clone(),
                             ok: false,
                             detail: "no preceding block to assert against".to_string(),
@@ -1614,25 +1810,25 @@ fn test_one_file(file: &str, args: &TestArgs) -> FileReport {
                                 &res.stderr,
                             );
                             if o.ok {
-                                report.passed += 1;
+                                passed += 1;
                             } else {
-                                report.failed += 1;
+                                failed += 1;
                             }
                             let ok = o.ok;
-                            report.assertions.push(AssertionReport {
+                            reports.push(AssertionReport {
                                 source: o.source,
                                 ok,
                                 detail: o.detail,
                             });
-                            if !ok && args.bail {
+                            if !ok && bail {
                                 break 'outer;
                             }
                         }
                     }
                     None => {
                         for (src, _) in &spec.assertions {
-                            report.failed += 1;
-                            report.assertions.push(AssertionReport {
+                            failed += 1;
+                            reports.push(AssertionReport {
                                 source: src.clone(),
                                 ok: false,
                                 detail: "preceding block did not run (skipped)".to_string(),
@@ -1644,8 +1840,7 @@ fn test_one_file(file: &str, args: &TestArgs) -> FileReport {
             _ => {}
         }
     }
-
-    report
+    (reports, passed, failed)
 }
 
 fn cmd_doctor(args: DoctorArgs) -> WbExit {

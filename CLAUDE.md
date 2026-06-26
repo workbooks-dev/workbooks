@@ -369,6 +369,24 @@ browser selector assertions, and JUnit/GitHub-annotation output are deferred.
 
 See `examples/test-demo.md`.
 
+### Docs-as-tests: `wb verify` + GitHub Action
+
+`wb verify <file|dir>` runs every executable code block in ordinary Markdown
+docs and fails if any block errors — or if any `expect`/`assert` fence fails.
+Unlike `wb test`, assertions are *optional*: a plain README whose commands all
+exit 0 passes. Exit `0` if every file passes, `1` otherwise; `--format json`
+available.
+
+```bash
+wb verify README.md          # one doc
+wb verify docs/              # every *.md in a folder
+```
+
+A reusable composite GitHub Action lives at `verify-action/` (published as
+`workbooks-dev/workbooks/verify-action`): it installs `wb` and runs
+`wb verify` so a repo can keep its docs' commands honest in CI. See
+`verify-action/README.md`.
+
 ## Composing workbooks with `include:`
 
 Factor out repeated setup (logins, env priming, health pre-flights) into its own
@@ -453,6 +471,7 @@ wb run file.md --dry-run                    # Print the execution plan without r
 wb run file.md --cache <id>                 # Skip unchanged blocks (source-hash cache)
 wb test file.md                       # Run + evaluate expect/assert fences (CI exit codes)
 wb test some/ --format json           # Test every *.md in a folder, machine-readable
+wb verify README.md                   # Docs-as-tests: run a doc's code blocks, fail on error
 wb artifacts list --run <id>          # List a run's captured artifacts (manifest)
 wb artifacts open <name> --run <id>   # Print an artifact's absolute path
 wb artifacts export <name> --to <dst> # Copy an artifact out of the run dir

@@ -1,0 +1,37 @@
+name: "wb verify (docs-as-tests)"
+description: "Run the code blocks in your Markdown docs and fail if any block errors or an expect assertion fails."
+branding:
+  icon: check-circle
+  color: green
+inputs:
+  path:
+    description: "File or folder of Markdown docs to verify."
+    required: false
+    default: "."
+  args:
+    description: "Extra flags passed to `wb verify` (e.g. --format json, --bail)."
+    required: false
+    default: ""
+  version:
+    description: "wb version to install (default: latest via the installer)."
+    required: false
+    default: "latest"
+runs:
+  using: "composite"
+  steps:
+    - name: Install wb
+      shell: bash
+      run: |
+        set -euo pipefail
+        if ! command -v wb >/dev/null 2>&1; then
+          curl -fsSL https://get.workbooks.dev | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          # The installer's default location; fall back to PATH if it differs.
+          export PATH="$HOME/.local/bin:$PATH"
+        fi
+        wb version || true
+    - name: Run wb verify
+      shell: bash
+      run: |
+        set -euo pipefail
+        wb verify "${{ inputs.path }}" ${{ inputs.args }}

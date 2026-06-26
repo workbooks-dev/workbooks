@@ -131,6 +131,16 @@ the cache (#18/#33) remain future waves.
   versions are not yet in the key. Covered by `cache.rs` unit tests + a
   `cli_smoke.rs` integration test.
 
+## 2e. Follow-on increment — docs-as-tests + Action (#43)
+
+- `wb verify <file|dir>` runs a doc's code blocks and fails if any block errors
+  or any `expect`/`assert` fence fails (assertions optional). Shares the
+  assertion engine with `wb test` via the extracted `walk_expects` helper. Text
+  + `--format json`, exit 0 all-pass / 1 any-fail.
+- Reusable composite GitHub Action at `verify-action/action.yml` (+ README) that
+  installs `wb` and runs `wb verify`. Covered by a `cli_smoke.rs` integration
+  test.
+
 ## 5. Deferred (next steps)
 
 - #18/#33 source-hash execution cache (param hash is ready to feed cache keys).

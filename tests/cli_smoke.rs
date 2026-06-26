@@ -434,3 +434,32 @@ fn cache_skips_unchanged_blocks() {
     std::fs::remove_dir_all(&dir).ok();
     std::fs::remove_file(&cache_file).ok();
 }
+
+#[test]
+fn verify_passes_clean_doc_and_fails_broken_block() {
+    // A doc whose blocks all succeed passes (assertions optional).
+    let ok = write_temp_md(
+        "verok",
+        "---\nruntime: bash\n---\n# Doc\n```bash\necho works\n```\n",
+    );
+    let out = Command::new(wb_binary())
+        .args(["verify", ok.to_str().unwrap(), "-q"])
+        .output()
+        .expect("spawn wb");
+    assert_eq!(out.status.code(), Some(0), "clean doc should verify");
+
+    // A failing block fails verification.
+    let bad = write_temp_md("verbad", "---\nruntime: bash\n---\n```bash\nfalse\n```\n");
+    let out = Command::new(wb_binary())
+        .args(["verify", bad.to_str().unwrap(), "-q"])
+        .output()
+        .expect("spawn wb");
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "failing block should fail verify"
+    );
+
+    std::fs::remove_dir_all(ok.parent().unwrap()).ok();
+    std::fs::remove_dir_all(bad.parent().unwrap()).ok();
+}
