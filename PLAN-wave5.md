@@ -106,6 +106,18 @@ Both covered by new `cli_smoke.rs` integration tests (15 total in that file).
 Signed/trusted workbooks, sandbox-by-default, and allowlists (#37 remainder) and
 the cache (#18/#33) remain future waves.
 
+## 2c. Follow-on increment — artifact manifest + commands (#36)
+
+- `Artifacts::record(step_id, &records)` writes a per-run `manifest.json` into
+  the artifacts dir: each entry carries filename, bytes, content type, sha256
+  checksum, label/description (from the `.meta.json` sidecar), producing step
+  id, and `updated_at`. Called at all four `sync()` sites (run live + browser,
+  folder/test code + browser).
+- New subcommands: `wb artifacts list|open|export` and `wb runs list|show`.
+  Runs resolve under `~/.wb/runs/<id>/artifacts`; no `--run` targets the latest;
+  manifest-less runs fall back to a directory scan. `--format json` on the read
+  commands. Covered by a new `cli_smoke.rs` integration test.
+
 ## 5. Deferred (next steps)
 
 - #18/#33 source-hash execution cache (param hash is ready to feed cache keys).
