@@ -674,3 +674,34 @@ fn lock_and_run_locked_gate_drift() {
 
     std::fs::remove_dir_all(&dir).ok();
 }
+
+#[test]
+fn repair_unreachable_endpoint_aborts_safely() {
+    // --repair with an unreachable endpoint must fail safe (abort): the failing
+    // block bails and the next block does NOT run.
+    let md = write_temp_md(
+        "repair",
+        "---\nruntime: bash\n---\n```bash\n( exit 1 )\n```\n```bash\necho SECOND_BLOCK\n```\n",
+    );
+    let out = Command::new(wb_binary())
+        .args([
+            md.to_str().unwrap(),
+            "--bail",
+            "--repair",
+            "http://127.0.0.1:9", // discard port — refuses connections
+            "--repair-max",
+            "1",
+        ])
+        .output()
+        .expect("spawn wb");
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        !combined.contains("SECOND_BLOCK"),
+        "repair abort should bail before the second block: {combined}"
+    );
+    std::fs::remove_dir_all(md.parent().unwrap()).ok();
+}

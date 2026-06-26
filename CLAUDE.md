@@ -515,6 +515,7 @@ wb run file.md --require-trust        # Refuse to run an untrusted/changed workb
 wb run gh:org/repo/path.md            # Fetch a remote workbook (always trust-gated)
 wb lock file.md                       # Write file.md.lock (input identity, for reproducibility)
 wb run file.md --locked               # Refuse to run if the workbook drifted from its lockfile
+wb run file.md --repair <url>         # On a block failure, ask an endpoint: rerun/skip/abort
 wb inspect file.md                    # Show structure without running
 wb pending                            # List paused workbooks (auto-reaps expired abort-mode descriptors)
 wb pending --no-reap                  # List without reaping — safe for automation/inspection

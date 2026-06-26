@@ -457,6 +457,12 @@ impl Session {
         &self.ctx.env
     }
 
+    /// Secret values to mask before sending block output off-box (e.g. the
+    /// `--repair` endpoint, #42).
+    pub fn redact_values(&self) -> &[String] {
+        &self.ctx.redact_values
+    }
+
     /// Native `http` runtime (#45): execute a REST call described by an `http`
     /// fence via `curl`. Body grammar:
     ///   line 1: `METHOD URL` (METHOD optional → defaults to GET)

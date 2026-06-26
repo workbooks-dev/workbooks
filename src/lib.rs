@@ -534,6 +534,14 @@ struct RunArgs {
     /// Lockfile path for `--locked` (default: <file>.lock).
     #[arg(long = "lockfile", value_name = "PATH")]
     lockfile: Option<String>,
+    /// On a block failure, POST the (redacted) failure to this endpoint and
+    /// apply the returned `{"action":"rerun"|"skip"|"abort"}` — self-healing
+    /// runs (#42). `patch` (code injection) is intentionally not supported.
+    #[arg(long = "repair", value_name = "URL")]
+    repair: Option<String>,
+    /// Max repair reruns per failed block (default 3) — bounds repair loops.
+    #[arg(long = "repair-max", value_name = "N", default_value = "3")]
+    repair_max: u32,
     /// Enable the source-hash execution cache under this id (`~/.wb/cache/<id>`):
     /// skip blocks whose source + params are unchanged since a prior success.
     #[arg(long = "cache", value_name = "ID")]
@@ -1022,6 +1030,10 @@ struct BareRunArgs {
     locked: bool,
     #[arg(long = "lockfile", value_name = "PATH")]
     lockfile: Option<String>,
+    #[arg(long = "repair", value_name = "URL")]
+    repair: Option<String>,
+    #[arg(long = "repair-max", value_name = "N", default_value = "3")]
+    repair_max: u32,
     #[arg(long = "cache", value_name = "ID")]
     cache: Option<String>,
     #[arg(long = "no-cache")]
@@ -1139,6 +1151,8 @@ pub fn run() -> std::process::ExitCode {
                     require_trust: bare.require_trust,
                     locked: bare.locked,
                     lockfile: bare.lockfile,
+                    repair: bare.repair,
+                    repair_max: bare.repair_max,
                     cache: bare.cache,
                     no_cache: bare.no_cache,
                 })
@@ -1156,6 +1170,63 @@ fn print_short_usage() {
     eprintln!("       wb run <folder/> -o report.json");
     eprintln!("       wb <file.md> --json");
     eprintln!("       wb update");
+}
+
+/// The action an agent endpoint returns for a failed block (#42). `patch`
+/// (code injection) is deliberately not modeled — it needs the signing/trust
+/// story (#37/#40) and would be remote code execution.
+enum RepairAction {
+    Rerun,
+    Skip,
+    Abort,
+}
+
+/// POST a failed block to the `--repair` endpoint and parse the returned
+/// `{"action": "rerun"|"skip"|"abort"}`. Secret values are redacted from the
+/// block output before it leaves the box. Any network/parse error → `Abort`
+/// (fail safe: don't silently skip or loop).
+fn repair_consult(
+    url: &str,
+    result: &executor::BlockResult,
+    block_idx: usize,
+    language: &str,
+    session: &executor::Session,
+) -> RepairAction {
+    let redact = session.redact_values();
+    let payload = serde_json::json!({
+        "event": "block.failed",
+        "block_index": block_idx,
+        "language": language,
+        "exit_code": result.exit_code,
+        "error_type": result.error_type,
+        "stdout": executor::redact_output(&result.stdout, redact),
+        "stderr": executor::redact_output(&result.stderr, redact),
+    })
+    .to_string();
+
+    let out = std::process::Command::new("curl")
+        .args(["-sS", "--max-time", "30", "-X", "POST", "-H"])
+        .arg("Content-Type: application/json")
+        .arg("-d")
+        .arg(&payload)
+        .arg(url)
+        .output();
+    let body = match out {
+        Ok(o) if o.status.success() => o.stdout,
+        Ok(_) | Err(_) => {
+            log_warn!("warning: --repair endpoint unreachable; aborting");
+            return RepairAction::Abort;
+        }
+    };
+    match serde_json::from_slice::<serde_json::Value>(&body)
+        .ok()
+        .and_then(|v| v.get("action").and_then(|a| a.as_str()).map(str::to_string))
+        .as_deref()
+    {
+        Some("rerun") => RepairAction::Rerun,
+        Some("skip") => RepairAction::Skip,
+        _ => RepairAction::Abort,
+    }
 }
 
 /// Resolve a remote workbook ref to an `https://` URL, or `None` for a local
@@ -1384,6 +1455,8 @@ fn cmd_run_inner(args: RunArgs, remote_forced_trust: bool) -> WbExit {
             profile: args.profile,
             dry_run: args.dry_run,
             cache_id: if args.no_cache { None } else { args.cache },
+            repair_url: args.repair,
+            repair_max: args.repair_max,
         });
     }
     WbExit::Success
@@ -3227,6 +3300,10 @@ struct RunConfig {
     /// Resolved cache id (`Some` only when `--cache <id>` is set and `--no-cache`
     /// is not). Enables the source-hash execution cache (#18).
     cache_id: Option<String>,
+    /// `--repair <url>`: consult this endpoint on a block failure (#42).
+    repair_url: Option<String>,
+    /// Max repair reruns per failed block.
+    repair_max: u32,
 }
 
 /// CLI-side selection inputs before resolution. Names mirror the flag
@@ -4304,6 +4381,8 @@ fn run_single(cfg: RunConfig) {
         profile: _,
         dry_run: _,
         cache_id,
+        repair_url,
+        repair_max,
     } = cfg;
     let file = file.as_str();
     // Resolve the run-wide default block timeout once. Precedence:
@@ -4861,6 +4940,47 @@ fn run_single(cfg: RunConfig) {
                 effective_default_source,
                 quiet,
             );
+
+            // Self-healing (#42): on failure, consult the repair endpoint and
+            // apply rerun/skip/abort. `patch` (code injection) is intentionally
+            // unsupported. Bounded by repair_max to prevent loops.
+            let mut repair_skip = false;
+            if let Some(ref url) = repair_url {
+                let mut budget = repair_max;
+                while !result.success() && !policy.continue_on_error {
+                    match repair_consult(url, &result, block_idx, &block.language, &session) {
+                        RepairAction::Rerun if budget > 0 => {
+                            budget -= 1;
+                            if !quiet {
+                                eprintln!(
+                                    "  ↻ repair: re-running block {} ({} left)",
+                                    block_idx + 1,
+                                    budget
+                                );
+                            }
+                            result = execute_block_with_policy(
+                                &mut session,
+                                block,
+                                block_idx,
+                                policy,
+                                effective_default_timeout,
+                                effective_default_source,
+                                quiet,
+                            );
+                        }
+                        RepairAction::Skip => {
+                            if !quiet {
+                                eprintln!("  ⤼ repair: skipping failed block {}", block_idx + 1);
+                            }
+                            repair_skip = true;
+                            break;
+                        }
+                        // Abort, unknown, or rerun-budget-exhausted: stop repairing.
+                        _ => break,
+                    }
+                }
+            }
+
             // Record this block's outcome in the source-hash cache (#18) so a
             // future `--cache` run can skip it when unchanged.
             if let Some(ref mut store) = cache_store {
@@ -4958,7 +5078,7 @@ fn run_single(cfg: RunConfig) {
                 }
             }
 
-            if bail && !success && !policy.continue_on_error {
+            if bail && !success && !policy.continue_on_error && !repair_skip {
                 // Callback: checkpoint failed (when checkpointing is active).
                 // `{silent}` only gates step.complete/step.failed — a failed
                 // silent block still produces a checkpoint.failed event so
@@ -6836,6 +6956,8 @@ fn cmd_resume_cmd(cli: ResumeArgs) -> WbExit {
             profile: None,
             dry_run: false,
             cache_id: None,
+            repair_url: None,
+            repair_max: 0,
         });
         return WbExit::Success;
     }
@@ -7088,6 +7210,8 @@ fn cmd_resume_cmd(cli: ResumeArgs) -> WbExit {
         profile: None,
         dry_run: false,
         cache_id: None,
+        repair_url: None,
+        repair_max: 0,
     });
     WbExit::Success
 }
