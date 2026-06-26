@@ -241,4 +241,108 @@ mod tests {
         assert!(!is_wb_cli_tag("release"));
         assert!(!is_wb_cli_tag("0.11.0"));
     }
+
+    #[test]
+    fn detect_os_returns_known_value() {
+        // Pure: derived from cfg!, no I/O. Must be one of the three known
+        // strings on every supported build target.
+        let os = detect_os();
+        assert!(
+            matches!(os, "linux" | "macos" | "unknown"),
+            "unexpected os string: {os}"
+        );
+        // On the two CI/dev targets we actually build for, it's never "unknown".
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        assert_ne!(os, "unknown");
+    }
+
+    #[test]
+    fn detect_arch_returns_known_value() {
+        let arch = detect_arch();
+        assert!(
+            matches!(arch, "x86_64" | "aarch64" | "unknown"),
+            "unexpected arch string: {arch}"
+        );
+        #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+        assert_ne!(arch, "unknown");
+    }
+
+    #[test]
+    fn asset_and_url_construction_match_release_layout() {
+        // Mirrors the inline asset/url format in `cmd_update` (which is
+        // network-gated and can't be exercised directly). Guards the naming
+        // convention the release pipeline must match.
+        let os = detect_os();
+        let arch = detect_arch();
+        let asset = format!("wb-{}-{}", os, arch);
+        assert_eq!(asset, format!("wb-{os}-{arch}"));
+        let url = format!(
+            "https://github.com/{}/releases/download/{}/{}",
+            REPO, "v0.12.0", asset
+        );
+        assert_eq!(
+            url,
+            format!("https://github.com/workbooks-dev/workbooks/releases/download/v0.12.0/{asset}")
+        );
+        // tag is stripped of its leading `v` for the human-facing version.
+        assert_eq!("v0.12.0".trim_start_matches('v'), "0.12.0");
+    }
+
+    #[test]
+    fn replace_binary_swaps_contents_on_success() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("new-wb");
+        let dest = dir.path().join("wb");
+        fs::write(&src, b"NEW BINARY").unwrap();
+        fs::write(&dest, b"OLD BINARY").unwrap();
+
+        replace_binary(&src, &dest).expect("replace should succeed");
+
+        // dest now holds the new content, the backup is cleaned up, and the
+        // source has been consumed by the rename.
+        assert_eq!(fs::read(&dest).unwrap(), b"NEW BINARY");
+        assert!(!src.exists(), "src should be consumed by rename");
+        assert!(
+            !dest.with_extension("old").exists(),
+            "backup should be removed on success"
+        );
+    }
+
+    #[test]
+    fn replace_binary_errors_and_restores_when_src_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("does-not-exist");
+        let dest = dir.path().join("wb");
+        fs::write(&dest, b"OLD BINARY").unwrap();
+
+        // The second rename (src -> dest) fails because src doesn't exist;
+        // replace_binary must restore the original dest from its backup.
+        let err = replace_binary(&src, &dest);
+        assert!(err.is_err(), "missing src should produce an error");
+        assert_eq!(
+            fs::read(&dest).unwrap(),
+            b"OLD BINARY",
+            "original binary must be restored after a failed swap"
+        );
+        assert!(
+            !dest.with_extension("old").exists(),
+            "backup should not linger after restore"
+        );
+    }
+
+    #[test]
+    fn replace_binary_overwrites_preexisting_backup() {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("new-wb");
+        let dest = dir.path().join("wb");
+        let backup = dest.with_extension("old");
+        fs::write(&src, b"NEW").unwrap();
+        fs::write(&dest, b"OLD").unwrap();
+        // A stale backup from a prior failed update must not block the swap.
+        fs::write(&backup, b"STALE BACKUP").unwrap();
+
+        replace_binary(&src, &dest).expect("replace should succeed past a stale backup");
+        assert_eq!(fs::read(&dest).unwrap(), b"NEW");
+        assert!(!backup.exists());
+    }
 }

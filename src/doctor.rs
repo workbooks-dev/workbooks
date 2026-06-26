@@ -417,4 +417,326 @@ mod tests {
         assert!(text.contains('⚠'), "missing warn glyph");
         assert!(text.contains("Warn: 1"), "missing warn count");
     }
+
+    // ─── CheckResult constructors ────────────────────────────────────────────
+
+    #[test]
+    fn pass_constructor_sets_status_detail_and_no_diagnostic() {
+        let r = CheckResult::pass("n", "all good");
+        assert_eq!(r.name, "n");
+        assert_eq!(r.status, CheckStatus::Pass);
+        assert_eq!(r.detail.as_deref(), Some("all good"));
+        assert!(r.diagnostic.is_none());
+    }
+
+    #[test]
+    fn warn_constructor_carries_diagnostic_with_same_message() {
+        let r = CheckResult::warn("n", "be careful");
+        assert_eq!(r.status, CheckStatus::Warn);
+        assert_eq!(r.detail.as_deref(), Some("be careful"));
+        let d = r.diagnostic.expect("warn should carry a diagnostic");
+        assert_eq!(d.message, "be careful");
+    }
+
+    #[test]
+    fn fail_constructor_carries_error_diagnostic() {
+        let r = CheckResult::fail("n", "broke");
+        assert_eq!(r.status, CheckStatus::Fail);
+        assert_eq!(r.detail.as_deref(), Some("broke"));
+        let d = r.diagnostic.expect("fail should carry a diagnostic");
+        assert_eq!(d.message, "broke");
+    }
+
+    #[test]
+    fn skipped_constructor_has_reason_and_no_diagnostic() {
+        let r = CheckResult::skipped("n", "not relevant");
+        assert_eq!(r.status, CheckStatus::Skipped);
+        assert_eq!(r.detail.as_deref(), Some("not relevant"));
+        assert!(r.diagnostic.is_none());
+    }
+
+    // ─── run() aggregation + exit code ───────────────────────────────────────
+
+    #[test]
+    fn run_shallow_returns_success_or_fail_code_consistent_with_results() {
+        let opts = DoctorOptions {
+            deep: false,
+            json: false,
+        };
+        let (results, code) = run(&opts);
+        assert!(!results.is_empty(), "shallow run should produce checks");
+        // Shallow run does not push deep checks.
+        assert!(
+            !results.iter().any(|r| r.name == "docker_build_smoke"),
+            "shallow run must not include deep checks"
+        );
+        // Exit code must agree with whether any check failed.
+        let has_fail = results.iter().any(|r| r.status == CheckStatus::Fail);
+        let expected = if has_fail {
+            crate::exit_codes::EXIT_WORKBOOK_INVALID
+        } else {
+            crate::exit_codes::EXIT_SUCCESS
+        };
+        assert_eq!(code, expected);
+        // wb_version is always a pass.
+        assert!(results
+            .iter()
+            .any(|r| r.name == "wb_version" && r.status == CheckStatus::Pass));
+    }
+
+    #[test]
+    fn run_deep_appends_deep_checks() {
+        let opts = DoctorOptions {
+            deep: true,
+            json: true,
+        };
+        let (results, _code) = run(&opts);
+        for name in ["docker_build_smoke", "sidecar_handshake", "redis_ping"] {
+            assert!(
+                results.iter().any(|r| r.name == name),
+                "deep run should include {name}"
+            );
+        }
+    }
+
+    // ─── individual checks (invariants only — environment-dependent) ─────────
+
+    #[test]
+    fn check_wb_version_always_passes() {
+        let r = check_wb_version();
+        assert_eq!(r.name, "wb_version");
+        assert_eq!(r.status, CheckStatus::Pass);
+        assert!(r.detail.unwrap().contains("wb v"));
+    }
+
+    #[test]
+    fn check_binary_present_passes() {
+        // bash is present on test machines.
+        let r = check_binary("bash", "bash");
+        assert_eq!(r.status, CheckStatus::Pass);
+    }
+
+    #[test]
+    fn check_binary_missing_fails() {
+        let r = check_binary("nope", "wb-nonexistent-binary-xyz");
+        assert_eq!(r.status, CheckStatus::Fail);
+        assert!(r.detail.unwrap().contains("not found on PATH"));
+    }
+
+    #[test]
+    fn check_binary_warn_missing_warns() {
+        let r = check_binary_warn("nope", "wb-nonexistent-binary-xyz");
+        assert_eq!(r.status, CheckStatus::Warn);
+    }
+
+    #[test]
+    fn check_binary_warn_present_passes() {
+        let r = check_binary_warn("bash", "bash");
+        assert_eq!(r.status, CheckStatus::Pass);
+    }
+
+    #[test]
+    fn resolve_binary_version_missing_is_none() {
+        assert!(resolve_binary_version("wb-nonexistent-binary-xyz").is_none());
+    }
+
+    #[test]
+    fn check_docker_returns_a_docker_present_result() {
+        // Environment-dependent: may pass/warn/fail. Assert invariants only.
+        let r = check_docker();
+        assert_eq!(r.name, "docker_present");
+        assert!(matches!(
+            r.status,
+            CheckStatus::Pass | CheckStatus::Warn | CheckStatus::Fail
+        ));
+        assert!(r.detail.is_some());
+    }
+
+    #[test]
+    fn check_home_dir_runs_and_names_correctly() {
+        let r = check_home_dir();
+        assert_eq!(r.name, "home_dir_writable");
+        // On a normal test machine HOME is set and ~/.wb is writable.
+        assert!(matches!(r.status, CheckStatus::Pass | CheckStatus::Fail));
+        assert!(r.detail.is_some());
+    }
+
+    #[test]
+    fn check_browser_runtime_runs_and_names_correctly() {
+        let r = check_browser_runtime();
+        assert_eq!(r.name, "wb_browser_runtime_present");
+        assert!(matches!(r.status, CheckStatus::Pass | CheckStatus::Warn));
+        assert!(r.detail.is_some());
+    }
+
+    // ─── deep-check gating ───────────────────────────────────────────────────
+
+    #[test]
+    fn docker_build_smoke_skips_when_docker_not_passing() {
+        let prior = vec![CheckResult::fail("docker_present", "not found")];
+        let r = check_docker_build_smoke(&prior);
+        assert_eq!(r.name, "docker_build_smoke");
+        assert_eq!(r.status, CheckStatus::Skipped);
+        assert!(r.detail.unwrap().contains("docker daemon not available"));
+    }
+
+    #[test]
+    fn sidecar_handshake_skips_when_runtime_missing() {
+        let prior = vec![CheckResult::warn(
+            "wb_browser_runtime_present",
+            "not installed",
+        )];
+        let r = check_sidecar_handshake(&prior);
+        assert_eq!(r.status, CheckStatus::Skipped);
+        assert!(r
+            .detail
+            .unwrap()
+            .contains("wb-browser-runtime not installed"));
+    }
+
+    #[test]
+    fn sidecar_handshake_runs_when_runtime_present() {
+        // Force the gate open with a synthetic passing prior result. The probe
+        // then shells out to wb-browser-runtime, which is environment-dependent;
+        // assert only on invariants (name + a non-skipped-by-gate result).
+        let prior = vec![CheckResult::pass("wb_browser_runtime_present", "found")];
+        let r = check_sidecar_handshake(&prior);
+        assert_eq!(r.name, "sidecar_handshake");
+        // Could be pass/warn (responded/non-zero) or fail (spawn failed) — never
+        // the gate's "skipped (runtime not installed)" path.
+        assert!(matches!(
+            r.status,
+            CheckStatus::Pass | CheckStatus::Warn | CheckStatus::Fail
+        ));
+    }
+
+    // Both redis_ping branches mutate the same process-global env vars, so they
+    // live in one test to avoid racing with each other under the parallel test
+    // runner.
+    #[test]
+    fn redis_ping_gating_on_url() {
+        let saved_signal = std::env::var("WB_SIGNAL_URL").ok();
+        let saved_cb = std::env::var("WB_CALLBACK_URL").ok();
+
+        // (1) No redis:// URL → gate skips.
+        std::env::remove_var("WB_SIGNAL_URL");
+        std::env::remove_var("WB_CALLBACK_URL");
+        let r = check_redis_ping(&[]);
+        assert_eq!(r.name, "redis_ping");
+        assert_eq!(r.status, CheckStatus::Skipped);
+        assert!(r.detail.unwrap().contains("not set to a redis:// URL"));
+
+        // (2) redis:// URL set → gate opens, probe is attempted.
+        std::env::set_var("WB_SIGNAL_URL", "redis://127.0.0.1:6399/0");
+        let r = check_redis_ping(&[]);
+        assert_eq!(r.name, "redis_ping");
+        // redis-cli may be absent (Skipped) or present but unable to connect
+        // (Warn) or, improbably, connect (Pass). Never the "no redis URL" skip.
+        assert!(matches!(
+            r.status,
+            CheckStatus::Pass | CheckStatus::Warn | CheckStatus::Skipped
+        ));
+        assert!(!r.detail.unwrap().contains("not set to a redis:// URL"));
+
+        // Restore.
+        match saved_signal {
+            Some(v) => std::env::set_var("WB_SIGNAL_URL", v),
+            None => std::env::remove_var("WB_SIGNAL_URL"),
+        }
+        match saved_cb {
+            Some(v) => std::env::set_var("WB_CALLBACK_URL", v),
+            None => std::env::remove_var("WB_CALLBACK_URL"),
+        }
+    }
+
+    // ─── rendering ───────────────────────────────────────────────────────────
+
+    #[test]
+    fn render_text_includes_all_glyphs_and_counts() {
+        let results = vec![
+            CheckResult::pass("a", "ok"),
+            CheckResult::warn("b", "careful"),
+            CheckResult::fail("c", "broke"),
+            CheckResult::skipped("d", "n/a"),
+        ];
+        let text = render_text(&results);
+        assert!(text.contains('✓'));
+        assert!(text.contains('⚠'));
+        assert!(text.contains('✗'));
+        assert!(text.contains('·'));
+        assert!(text.contains("Pass: 1  Warn: 1  Fail: 1"));
+    }
+
+    #[test]
+    fn render_text_handles_missing_detail() {
+        let results = vec![CheckResult {
+            name: "x",
+            status: CheckStatus::Pass,
+            detail: None,
+            diagnostic: None,
+        }];
+        let text = render_text(&results);
+        // Empty detail still renders the glyph + a newline + summary.
+        assert!(text.contains('✓'));
+        assert!(text.contains("Pass: 1  Warn: 0  Fail: 0"));
+    }
+
+    #[test]
+    fn render_text_empty_results_just_summary() {
+        let text = render_text(&[]);
+        assert_eq!(text, "Pass: 0  Warn: 0  Fail: 0\n");
+    }
+
+    #[test]
+    fn render_json_is_valid_and_has_expected_shape() {
+        let results = vec![
+            CheckResult::pass("a", "ok"),
+            CheckResult::warn("b", "careful"),
+            CheckResult::fail("c", "broke"),
+            CheckResult::skipped("d", "n/a"),
+        ];
+        let json = render_json(&results);
+        let v: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+        let checks = v["checks"].as_array().expect("checks array");
+        assert_eq!(checks.len(), 4);
+        assert_eq!(checks[0]["name"], "a");
+        assert_eq!(checks[0]["status"], "pass");
+        assert_eq!(checks[1]["status"], "warn");
+        assert_eq!(checks[2]["status"], "fail");
+        assert_eq!(checks[3]["status"], "skipped");
+        assert_eq!(v["summary"]["pass"], 1);
+        assert_eq!(v["summary"]["warn"], 1);
+        assert_eq!(v["summary"]["fail"], 1);
+    }
+
+    #[test]
+    fn render_json_empty_results() {
+        let json = render_json(&[]);
+        let v: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+        assert_eq!(v["checks"].as_array().unwrap().len(), 0);
+        assert_eq!(v["summary"]["pass"], 0);
+    }
+
+    #[test]
+    fn check_status_equality() {
+        assert_eq!(CheckStatus::Pass, CheckStatus::Pass);
+        assert_ne!(CheckStatus::Pass, CheckStatus::Warn);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_binary_version_nonzero_empty_output_is_none() {
+        // A binary that runs but exits non-zero with empty stdout for both
+        // `--version` and `-v` takes the `else { None }` arm (line 125), which
+        // is distinct from the binary-not-found `?` early return.
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("wb-doctor-resolve-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("always-fail");
+        std::fs::write(&script, "#!/bin/sh\nexit 1\n").unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let got = resolve_binary_version(script.to_str().unwrap());
+        assert!(got.is_none(), "expected None, got {got:?}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
 }

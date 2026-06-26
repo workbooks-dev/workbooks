@@ -2807,4 +2807,160 @@ echo after-include
             .any(|s| matches!(s, Section::IncludeEnter(_))));
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    // ---- StringOrVec / SetupConfig accessors (lines 186, 215) ----
+
+    #[test]
+    fn string_or_vec_single_as_vec() {
+        let s = StringOrVec::Single("only".to_string());
+        assert_eq!(s.as_vec(), vec!["only"]);
+        let m = StringOrVec::Multiple(vec!["a".into(), "b".into()]);
+        assert_eq!(m.as_vec(), vec!["a", "b"]);
+    }
+
+    #[test]
+    fn setup_config_dir_is_none_for_non_structured() {
+        assert_eq!(SetupConfig::Single("x".into()).dir(), None);
+        assert_eq!(
+            SetupConfig::Multiple(vec!["a".into(), "b".into()]).dir(),
+            None
+        );
+        let structured = SetupConfig::Structured {
+            run: StringOrVec::Single("cmd".into()),
+            dir: Some("/work".into()),
+        };
+        assert_eq!(structured.dir(), Some("/work"));
+        assert_eq!(structured.commands(), vec!["cmd"]);
+    }
+
+    // ---- extract_frontmatter edge cases (lines 744-753) ----
+
+    #[test]
+    fn frontmatter_without_closing_delimiter_yields_default() {
+        // Opens with `---` but never closes: whole input is treated as body,
+        // frontmatter falls back to default.
+        let wb = parse("---\ntitle: Unclosed\nstill: yaml\n\n```bash\necho hi\n```\n");
+        assert!(wb.frontmatter.title.is_none());
+        assert_eq!(wb.code_block_count(), 1);
+    }
+
+    #[test]
+    fn malformed_frontmatter_yaml_falls_back_to_default() {
+        // Valid open/close delimiters but the YAML body is not a mapping wb can
+        // deserialize into Frontmatter — warns and uses the default.
+        let wb = parse("---\n: : : not valid yaml : :\n---\n\n```bash\necho hi\n```\n");
+        assert!(wb.frontmatter.title.is_none());
+        assert_eq!(wb.code_block_count(), 1);
+    }
+
+    // ---- malformed fence bodies (lines 959-961, 1001-1003, 1028-1030) ----
+
+    #[test]
+    fn malformed_wait_block_yields_default_spec() {
+        // Bad YAML in a wait fence: warns and produces a default WaitSpec
+        // rather than dropping the section.
+        let wb = parse("```wait\n: : bad : yaml :\n```\n");
+        let has_wait = wb.sections.iter().any(|s| matches!(s, Section::Wait(_)));
+        assert!(has_wait, "wait section should still be created");
+    }
+
+    #[test]
+    fn malformed_include_block_yields_default_spec() {
+        let wb = parse("```include\n: : bad : yaml :\n```\n");
+        let has_include = wb.sections.iter().any(|s| matches!(s, Section::Include(_)));
+        assert!(has_include, "include section should still be created");
+    }
+
+    #[test]
+    fn malformed_browser_block_yields_default_spec() {
+        let wb = parse("```browser\n: : bad : yaml :\n```\n");
+        let has_browser = wb.sections.iter().any(|s| matches!(s, Section::Browser(_)));
+        assert!(has_browser, "browser section should still be created");
+    }
+
+    // ---- resolve_includes failure paths (lines 593-598, 693-700) ----
+
+    #[test]
+    fn resolve_includes_unresolvable_parent_path_errors() {
+        let wb = parse("```bash\necho hi\n```\n");
+        let missing = Path::new("/no/such/dir/definitely-missing-workbook.md");
+        let err = resolve_includes(wb, missing).unwrap_err();
+        let msg = format!("{err:?}");
+        assert!(msg.contains("cannot resolve workbook path"), "{msg}");
+    }
+
+    #[test]
+    fn resolve_includes_target_is_directory_errors() {
+        let dir = fresh_tempdir("include_is_dir");
+        // The include target points at a directory, which canonicalizes fine
+        // but fails to read as a file.
+        std::fs::create_dir_all(dir.join("subdir")).unwrap();
+        let parent = write_temp(&dir, "main.md", "```include\npath: ./subdir\n```\n");
+        let wb = parse(&std::fs::read_to_string(&parent).unwrap());
+        let err = resolve_includes(wb, &parent).unwrap_err();
+        let msg = format!("{err:?}");
+        // Either "cannot read" or "cannot resolve" depending on platform; both
+        // are the include-failure path we want to exercise.
+        assert!(
+            msg.contains("cannot read") || msg.contains("cannot resolve path"),
+            "{msg}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ---- parse_duration_secs unknown unit (line 1218) ----
+
+    #[test]
+    fn parse_duration_unknown_unit_errors() {
+        // num_part parses but the unit char is not s/m/h/d.
+        let err = parse_duration_secs("5x").unwrap_err();
+        assert!(
+            format!("{err:?}").contains("unknown duration unit"),
+            "{err:?}"
+        );
+        // Uppercase units are accepted (case-insensitive).
+        assert_eq!(parse_duration_secs("2H").unwrap(), 7200);
+        assert_eq!(parse_duration_secs("3M").unwrap(), 180);
+    }
+
+    // ---- TimeoutsConfig custom Deserialize key-branch coverage (lines 95-130) ----
+
+    #[test]
+    fn timeouts_deser_key_branches() {
+        // Quoted numeric string key → parsed via the String→u32 branch.
+        let t: TimeoutsConfig = serde_yaml::from_str("\"3\": 2m\n").unwrap();
+        assert_eq!(t.blocks.get(&3).map(String::as_str), Some("2m"));
+
+        // `_default` string key sets the runbook-wide cap.
+        let t: TimeoutsConfig = serde_yaml::from_str("_default: 1m\n").unwrap();
+        assert_eq!(t.default.as_deref(), Some("1m"));
+
+        // Unknown non-numeric string key → ignored (warns), dropped.
+        let t: TimeoutsConfig = serde_yaml::from_str("nope: 5s\n").unwrap();
+        assert!(t.blocks.is_empty());
+        assert!(t.default.is_none());
+
+        // Bare integer key in range → Number branch.
+        let t: TimeoutsConfig = serde_yaml::from_str("4: 30s\n").unwrap();
+        assert_eq!(t.blocks.get(&4).map(String::as_str), Some("30s"));
+
+        // Out-of-range integer key → ignored.
+        let t: TimeoutsConfig = serde_yaml::from_str("99999999999: 1m\n").unwrap();
+        assert!(t.blocks.is_empty());
+
+        // Non-scalar/unsupported key type (bool) → `other` branch, ignored.
+        let t: TimeoutsConfig = serde_yaml::from_str("true: 1m\n").unwrap();
+        assert!(t.blocks.is_empty());
+    }
+
+    #[test]
+    fn timeouts_deser_non_map_errors_via_expecting() {
+        // Deserializing a non-map value drives the Visitor's `expecting`.
+        let err = serde_yaml::from_str::<TimeoutsConfig>("\"just-a-string\"").unwrap_err();
+        let msg = err.to_string();
+        assert!(
+            msg.contains("map of block id") || msg.contains("_default"),
+            "{msg}"
+        );
+    }
 }

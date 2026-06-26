@@ -495,6 +495,94 @@ mod tests {
         delete(&id).expect("cleanup");
     }
 
+    fn skip(block_index: usize) -> SavedSkip {
+        SavedSkip {
+            block_index,
+            step_id: Some(format!("s{block_index}")),
+            language: "bash".into(),
+            line_number: 1,
+            heading: None,
+            kind: "selection".into(),
+            expression: None,
+            reason: "skipped".into(),
+            code_hash: None,
+        }
+    }
+
+    #[test]
+    fn test_add_outputs_empty_is_noop_then_merges() {
+        let mut ckpt = Checkpoint::new("t.md", 1);
+        ckpt.add_outputs("step1", &BTreeMap::new());
+        assert!(ckpt.outputs.is_empty(), "empty outputs should be skipped");
+
+        let mut vals = BTreeMap::new();
+        vals.insert("a".to_string(), serde_json::json!(1));
+        ckpt.add_outputs("step1", &vals);
+        assert_eq!(
+            ckpt.outputs.get("step1").unwrap().get("a").unwrap(),
+            &serde_json::json!(1)
+        );
+
+        // A second call merges (extend) into the same step key.
+        let mut more = BTreeMap::new();
+        more.insert("b".to_string(), serde_json::json!("x"));
+        ckpt.add_outputs("step1", &more);
+        let step = ckpt.outputs.get("step1").unwrap();
+        assert_eq!(step.len(), 2);
+    }
+
+    #[test]
+    fn test_add_skip_insert_replace_sort_and_next_block() {
+        let mut ckpt = Checkpoint::new("t.md", 5);
+        ckpt.add_skip(skip(3));
+        ckpt.add_skip(skip(1));
+        // Sorted by block_index.
+        assert_eq!(
+            ckpt.skipped
+                .iter()
+                .map(|s| s.block_index)
+                .collect::<Vec<_>>(),
+            vec![1, 3]
+        );
+        // next_block advanced past the highest skip.
+        assert_eq!(ckpt.next_block, 4);
+
+        // Replacing an existing skip updates in place (no duplicate).
+        let mut replacement = skip(3);
+        replacement.reason = "different".into();
+        ckpt.add_skip(replacement);
+        assert_eq!(ckpt.skipped.len(), 2);
+        assert_eq!(ckpt.skipped_step(3).unwrap().reason, "different");
+
+        // skipped_step returns None for an absent index.
+        assert!(ckpt.skipped_step(99).is_none());
+    }
+
+    #[test]
+    fn test_block_results_roundtrips_saved_results() {
+        let mut ckpt = Checkpoint::new("t.md", 1);
+        let r = BlockResult {
+            block_index: 0,
+            language: "python".into(),
+            stdout: "out".into(),
+            stderr: "err".into(),
+            exit_code: 2,
+            duration: Duration::from_millis(42),
+            error_type: None,
+            stdout_partial: false,
+            stderr_partial: false,
+        };
+        ckpt.add_result(&r, 7, Some("Heading"), "code", Some("id1"));
+        let results = ckpt.block_results();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].exit_code, 2);
+        assert_eq!(results[0].language, "python");
+        assert_eq!(results[0].duration, Duration::from_millis(42));
+        // add_result stored code_hash + heading on the SavedResult.
+        assert_eq!(ckpt.results[0].heading.as_deref(), Some("Heading"));
+        assert_eq!(ckpt.results[0].code_hash, Some(hash_code("code")));
+    }
+
     #[test]
     fn test_legacy_checkpoint_json_parses_without_step_id_fields() {
         // Checkpoints written by older `wb` versions don't have the

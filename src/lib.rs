@@ -7771,6 +7771,19 @@ fn json_scalar_to_string(v: &serde_json::Value) -> Option<String> {
 mod tests {
     use super::*;
     use std::collections::HashMap;
+    use std::path::PathBuf;
+
+    struct CheckpointDirGuard(Option<PathBuf>);
+
+    impl Drop for CheckpointDirGuard {
+        fn drop(&mut self) {
+            checkpoint::set_test_checkpoint_dir(self.0.take());
+        }
+    }
+
+    fn isolate_checkpoints(dir: PathBuf) -> CheckpointDirGuard {
+        CheckpointDirGuard(checkpoint::set_test_checkpoint_dir(Some(dir)))
+    }
 
     #[test]
     fn synthesized_sandbox_requires_picks_runtime() {
@@ -8348,11 +8361,12 @@ echo "after $result"
             .join("debug")
             .join("wb");
 
-        let tmp = std::env::temp_dir().join("wb-test-wait-cycle");
-        let _ = std::fs::remove_dir_all(&tmp);
-        std::fs::create_dir_all(&tmp).unwrap();
+        let tmp = tempfile::Builder::new()
+            .prefix("wb-test-wait-cycle-")
+            .tempdir()
+            .unwrap();
 
-        let workbook_path = tmp.join("wait-test.md");
+        let workbook_path = tmp.path().join("wait-test.md");
         std::fs::write(
             &workbook_path,
             r#"# Wait Test
@@ -8375,7 +8389,8 @@ echo "step-2-got: $my_var"
         .unwrap();
 
         let ckpt_id = "integration-wait-test";
-        let checkpoint_dir = checkpoint::checkpoint_dir();
+        let checkpoint_dir = tmp.path().join("checkpoints");
+        let _checkpoint_guard = isolate_checkpoints(checkpoint_dir.clone());
         let _ = checkpoint::delete(ckpt_id);
         let _ = pending::delete(ckpt_id);
 
@@ -8418,7 +8433,7 @@ echo "step-2-got: $my_var"
         }
 
         // Create a signal payload and resume
-        let signal_path = tmp.join("signal.json");
+        let signal_path = tmp.path().join("signal.json");
         std::fs::write(&signal_path, r#"{"my_var": "hello-from-signal"}"#).unwrap();
 
         let resume_output = std::process::Command::new(&wb_bin)
@@ -8460,7 +8475,6 @@ echo "step-2-got: $my_var"
 
         // Clean up
         let _ = checkpoint::delete(ckpt_id);
-        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     #[test]
@@ -8477,11 +8491,12 @@ echo "step-2-got: $my_var"
             .join("debug")
             .join("wb");
 
-        let tmp = std::env::temp_dir().join("wb-test-value-shorthand");
-        let _ = std::fs::remove_dir_all(&tmp);
-        std::fs::create_dir_all(&tmp).unwrap();
+        let tmp = tempfile::Builder::new()
+            .prefix("wb-test-value-shorthand-")
+            .tempdir()
+            .unwrap();
 
-        let workbook_path = tmp.join("value-test.md");
+        let workbook_path = tmp.path().join("value-test.md");
         std::fs::write(
             &workbook_path,
             r#"```bash
@@ -8502,7 +8517,8 @@ echo "pin=$pin"
         .unwrap();
 
         let ckpt_id = "integration-value-test";
-        let checkpoint_dir = checkpoint::checkpoint_dir();
+        let checkpoint_dir = tmp.path().join("checkpoints");
+        let _checkpoint_guard = isolate_checkpoints(checkpoint_dir.clone());
         let _ = checkpoint::delete(ckpt_id);
         let _ = pending::delete(ckpt_id);
 
@@ -8541,7 +8557,6 @@ echo "pin=$pin"
         );
 
         let _ = checkpoint::delete(ckpt_id);
-        let _ = std::fs::remove_dir_all(&tmp);
     }
 
     // ─── per-block policy: timeouts, retries, continue_on_error ──────

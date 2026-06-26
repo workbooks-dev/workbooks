@@ -147,8 +147,107 @@ mod tests {
     }
 
     #[test]
+    fn load_read_error_non_notfound_is_error() {
+        // Point the config path at a *directory*: read_to_string fails with a
+        // non-NotFound error → the `Err(e) => return Err(...)` arm (line 61).
+        let _guard = ENV_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        std::env::set_var("WB_CONFIG_PATH", dir.path());
+        let err = Config::load().unwrap_err();
+        std::env::remove_var("WB_CONFIG_PATH");
+        assert!(err.contains("cannot read"), "{err}");
+    }
+
+    #[test]
+    fn save_create_dir_all_failure_is_error() {
+        // A path whose parent can't be created (a file stands where a dir is
+        // needed) makes save's create_dir_all fail (line 92-93 error arm).
+        let _guard = ENV_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let blocker = dir.path().join("blocker");
+        std::fs::write(&blocker, b"i am a file").unwrap();
+        let path = blocker.join("nested").join("config.yaml");
+        std::env::set_var("WB_CONFIG_PATH", &path);
+        let err = Config::default().save().unwrap_err();
+        std::env::remove_var("WB_CONFIG_PATH");
+        assert!(err.contains("cannot create"), "{err}");
+    }
+
+    #[test]
+    fn save_with_parentless_path_skips_create_dir() {
+        // A path with no parent ("/") takes the `if let Some(parent)` false
+        // arm (line 93), skipping create_dir_all; the subsequent write to the
+        // root then fails. Exercises the no-parent branch.
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::set_var("WB_CONFIG_PATH", "/");
+        let res = Config::default().save();
+        std::env::remove_var("WB_CONFIG_PATH");
+        assert!(res.is_err(), "writing config to / should fail");
+    }
+
+    #[test]
     fn known_key_allowlist() {
         assert!(is_known_key("callback.url"));
+        assert!(is_known_key("callback.secret"));
+        assert!(is_known_key("callback.key"));
         assert!(!is_known_key("callback.nonsense"));
+    }
+
+    #[test]
+    fn empty_file_loads_as_empty_config() {
+        with_temp_config(|p| {
+            std::fs::write(p, "   \n  \n").unwrap();
+            let c = Config::load().unwrap();
+            assert!(c.values.is_empty());
+            // load_lenient also fine on empty.
+            assert!(Config::load_lenient().values.is_empty());
+        });
+    }
+
+    #[test]
+    fn get_missing_key_returns_none() {
+        let mut c = Config::default();
+        assert_eq!(c.get("callback.url"), None);
+        c.values.insert("callback.url".into(), "u".into());
+        assert_eq!(c.get("callback.url"), Some("u"));
+        assert_eq!(c.get("not.set"), None);
+    }
+
+    #[test]
+    fn save_creates_parent_directories() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        // Nested, non-existent parent dirs.
+        let path = dir.path().join("a").join("b").join("config.yaml");
+        std::env::set_var("WB_CONFIG_PATH", &path);
+        let mut c = Config::default();
+        c.values.insert("callback.key".into(), "stream".into());
+        c.save().unwrap();
+        assert!(path.exists());
+        let loaded = Config::load().unwrap();
+        std::env::remove_var("WB_CONFIG_PATH");
+        assert_eq!(loaded.get("callback.key"), Some("stream"));
+    }
+
+    #[test]
+    fn config_path_honors_wb_config_path_and_home_fallback() {
+        let _guard = ENV_LOCK.lock().unwrap();
+        std::env::set_var("WB_CONFIG_PATH", "/custom/path/config.yaml");
+        assert_eq!(config_path(), PathBuf::from("/custom/path/config.yaml"));
+        std::env::remove_var("WB_CONFIG_PATH");
+
+        // Fallback to $HOME/.wb/config.yaml when override is absent.
+        let prev_home = std::env::var("HOME").ok();
+        std::env::set_var("HOME", "/home/tester");
+        assert_eq!(
+            config_path(),
+            PathBuf::from("/home/tester")
+                .join(".wb")
+                .join("config.yaml")
+        );
+        match prev_home {
+            Some(h) => std::env::set_var("HOME", h),
+            None => std::env::remove_var("HOME"),
+        }
     }
 }

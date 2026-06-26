@@ -269,4 +269,74 @@ output-json: nested={"ok":true}
         assert_eq!(v["steps"]["balance"]["outputs"]["count"], 2);
         let _ = fs::remove_file(tmp);
     }
+
+    #[test]
+    fn output_kind_as_str_covers_both_variants() {
+        // Line 29 (String) is exercised elsewhere; line 30 (Json) here.
+        assert_eq!(OutputKind::String.as_str(), "string");
+        assert_eq!(OutputKind::Json.as_str(), "json");
+    }
+
+    #[test]
+    fn merge_step_outputs_noop_on_empty() {
+        // Covers the early `return` (line 102).
+        let mut all = RawOutputsByStep::new();
+        let empty = StepOutputMap::new();
+        merge_step_outputs(&mut all, "step", &empty);
+        assert!(all.is_empty());
+    }
+
+    #[test]
+    fn parse_assignment_missing_equals_errors() {
+        // Covers the no-`=` branch in parse_assignment (lines 169-172).
+        let err = parse_outputs("output: noequalshere\n").unwrap_err();
+        assert!(format!("{err}").contains("name=value"), "got: {err}");
+    }
+
+    #[test]
+    fn parse_assignment_empty_name_errors() {
+        // `=value` yields an empty name -> valid_output_name's empty branch
+        // (line 187) returns false, surfaced as an invalid-name error.
+        let err = parse_outputs("output: =value\n").unwrap_err();
+        assert!(format!("{err}").contains("invalid"), "got: {err}");
+    }
+
+    #[test]
+    fn init_outputs_path_sets_env_and_writes() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut env = std::collections::HashMap::new();
+        let mut all = RawOutputsByStep::new();
+        let parsed = parse_outputs("output: k=v\n").unwrap();
+        merge_step_outputs(&mut all, "s", &parsed);
+        let path = init_outputs_path(&mut env, dir.path(), &all);
+        assert_eq!(env.get(ENV_OUTPUTS_PATH).map(String::as_str), path.to_str());
+        assert!(path.exists());
+    }
+
+    #[test]
+    fn init_outputs_path_warns_when_write_fails() {
+        // Covers the write-error branch (line 60) and write_outputs_file's
+        // create_dir_all error branch (line 153): a regular file blocks the
+        // artifacts dir, so `<file>/.wb/outputs.json`'s parent can't be made.
+        let dir = tempfile::tempdir().unwrap();
+        let blocker = dir.path().join("blocker");
+        fs::write(&blocker, b"i am a file").unwrap();
+        let mut env = std::collections::HashMap::new();
+        let all = RawOutputsByStep::new();
+        // Returns the path (env still set) even though the write fails + warns.
+        let path = init_outputs_path(&mut env, &blocker, &all);
+        assert!(env.contains_key(ENV_OUTPUTS_PATH));
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn write_outputs_file_errors_under_a_file_path() {
+        // Direct hit on write_outputs_file's create_dir_all error (line 153).
+        let dir = tempfile::tempdir().unwrap();
+        let blocker = dir.path().join("blocker");
+        fs::write(&blocker, b"file").unwrap();
+        let path = blocker.join("nested").join("outputs.json");
+        let all = RawOutputsByStep::new();
+        assert!(write_outputs_file(&path, &all).is_err());
+    }
 }

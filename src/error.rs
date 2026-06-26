@@ -135,4 +135,30 @@ mod tests {
         assert_eq!(e.message(), "missing include: foo.md");
         assert_eq!(WbExit::from(e).message(), Some("missing include: foo.md"));
     }
+
+    #[test]
+    fn display_and_message_for_every_variant() {
+        let variants = [
+            WbError::Io("io-msg".into()),
+            WbError::Parse("parse-msg".into()),
+            WbError::Secret("secret-msg".into()),
+            WbError::Workbook("workbook-msg".into()),
+            WbError::Sandbox("sandbox-msg".into()),
+            WbError::Sidecar("sidecar-msg".into()),
+        ];
+        let expected = [
+            "io-msg",
+            "parse-msg",
+            "secret-msg",
+            "workbook-msg",
+            "sandbox-msg",
+            "sidecar-msg",
+        ];
+        for (e, want) in variants.into_iter().zip(expected) {
+            // `message()` borrows the inner string for each arm.
+            assert_eq!(e.message(), want);
+            // Display via thiserror `#[error("{0}")]`.
+            assert_eq!(e.to_string(), want);
+        }
+    }
 }

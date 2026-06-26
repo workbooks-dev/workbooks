@@ -1201,4 +1201,475 @@ echo ok
             .expect("expected wb-attr-001");
         assert_eq!(d.severity, Severity::Error);
     }
+
+    // ── validate_dir ──────────────────────────────────────────────────────
+
+    #[test]
+    fn validate_dir_walks_md_files() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("clean.md"),
+            "---\ntitle: OK\n---\n\n```bash\necho ok\n```\n",
+        )
+        .unwrap();
+        // A file with a bad secret provider → guaranteed error diagnostic.
+        std::fs::write(
+            dir.path().join("bad.md"),
+            "---\nsecrets:\n  provider: nope\n---\n",
+        )
+        .unwrap();
+        // A non-markdown file should be ignored.
+        std::fs::write(dir.path().join("notes.txt"), "ignored").unwrap();
+        // A .markdown extension should be included.
+        std::fs::write(dir.path().join("also.markdown"), "```bash\necho hi\n```\n").unwrap();
+
+        let diags = validate_dir(dir.path(), &ValidateOptions { strict: false });
+        assert!(
+            diags.iter().any(|d| d.code == "wb-secret-001"),
+            "expected the bad.md secret error, got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn validate_dir_missing_returns_error() {
+        let diags = validate_dir(
+            Path::new("/nonexistent/dir/xyz"),
+            &ValidateOptions { strict: false },
+        );
+        assert!(
+            diags.iter().any(|d| d.code == "wb-yaml-001"),
+            "expected a read error, got: {diags:?}"
+        );
+    }
+
+    // ── timeouts._default / retries / continue_on_error ranges ─────────────
+
+    #[test]
+    fn bad_default_duration_emits_wb_fm_003() {
+        let content = "---\ntimeouts:\n  _default: 5bananas\n---\n\n```bash\necho hi\n```\n";
+        let diags = validate_content(
+            content,
+            Path::new("t.md"),
+            &ValidateOptions { strict: false },
+        );
+        assert!(
+            diags
+                .iter()
+                .any(|d| d.code == "wb-fm-003" && d.message.contains("_default")),
+            "expected wb-fm-003 for _default, got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn retries_out_of_range_emits_wb_fm_006() {
+        let content = "---\nretries:\n  9: 2\n---\n\n```bash\necho hi\n```\n";
+        let diags = validate_content(
+            content,
+            Path::new("t.md"),
+            &ValidateOptions { strict: false },
+        );
+        assert!(
+            diags
+                .iter()
+                .any(|d| d.code == "wb-fm-006" && d.message.contains("retries")),
+            "expected wb-fm-006 for retries, got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn continue_on_error_out_of_range_emits_wb_fm_006() {
+        let content = "---\ncontinue_on_error: [9]\n---\n\n```bash\necho hi\n```\n";
+        let diags = validate_content(
+            content,
+            Path::new("t.md"),
+            &ValidateOptions { strict: false },
+        );
+        assert!(
+            diags
+                .iter()
+                .any(|d| d.code == "wb-fm-006" && d.message.contains("continue_on_error")),
+            "expected wb-fm-006 for continue_on_error, got: {diags:?}"
+        );
+    }
+
+    // ── include resolution ─────────────────────────────────────────────────
+
+    #[test]
+    fn required_missing_target_emits_wb_inc_001() {
+        let content = "---\nrequired:\n  - ./nope.md\n---\n\n```bash\necho hi\n```\n";
+        let diags = validate_content(
+            content,
+            Path::new("t.md"),
+            &ValidateOptions { strict: false },
+        );
+        assert!(
+            diags
+                .iter()
+                .any(|d| d.code == "wb-inc-001" && d.message.contains("required")),
+            "expected wb-inc-001 for required, got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn circular_include_emits_wb_inc_002() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.md"), "```include\npath: ./b.md\n```\n").unwrap();
+        std::fs::write(dir.path().join("b.md"), "```include\npath: ./a.md\n```\n").unwrap();
+        let diags = validate_file(&dir.path().join("a.md"), &ValidateOptions { strict: false });
+        assert!(
+            diags.iter().any(|d| d.code == "wb-inc-002"),
+            "expected wb-inc-002 for circular include, got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn unreadable_include_target_emits_wb_inc_003() {
+        let dir = tempfile::tempdir().unwrap();
+        // An include whose target is a directory: exists (so no wb-inc-001) but
+        // cannot be read as a file → wb-inc-003.
+        std::fs::create_dir(dir.path().join("sub")).unwrap();
+        std::fs::write(dir.path().join("main.md"), "```include\npath: ./sub\n```\n").unwrap();
+        let diags = validate_file(
+            &dir.path().join("main.md"),
+            &ValidateOptions { strict: false },
+        );
+        assert!(
+            diags.iter().any(|d| d.code == "wb-inc-003"),
+            "expected wb-inc-003 for unreadable target, got: {diags:?}"
+        );
+    }
+
+    // ── secret providers ───────────────────────────────────────────────────
+
+    #[test]
+    fn multiple_secret_providers_flag_unknown() {
+        let content =
+            "---\nsecrets:\n  - provider: env\n  - provider: bogus\n---\n\n```bash\necho hi\n```\n";
+        let diags = validate_content(
+            content,
+            Path::new("t.md"),
+            &ValidateOptions { strict: false },
+        );
+        let secret: Vec<_> = diags.iter().filter(|d| d.code == "wb-secret-001").collect();
+        assert_eq!(
+            secret.len(),
+            1,
+            "expected one unknown provider, got: {diags:?}"
+        );
+        assert!(secret[0].message.contains("bogus"));
+    }
+
+    // ── params (wb-param-001 / wb-param-002) ───────────────────────────────
+
+    #[test]
+    fn param_unknown_type_emits_wb_param_001() {
+        let content = "---\nparams:\n  x:\n    type: blob\n---\n\n```bash\necho hi\n```\n";
+        let diags = validate_content(
+            content,
+            Path::new("t.md"),
+            &ValidateOptions { strict: false },
+        );
+        assert!(
+            diags
+                .iter()
+                .any(|d| d.code == "wb-param-001" && d.message.contains("unknown type")),
+            "expected wb-param-001 unknown type, got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn param_default_not_in_one_of_emits_wb_param_001() {
+        let content = "---\nparams:\n  region:\n    type: enum\n    one_of: [a, b]\n    default: c\n---\n\n```bash\necho hi\n```\n";
+        let diags = validate_content(
+            content,
+            Path::new("t.md"),
+            &ValidateOptions { strict: false },
+        );
+        assert!(
+            diags
+                .iter()
+                .any(|d| d.code == "wb-param-001" && d.message.contains("not one of")),
+            "expected wb-param-001 one_of violation, got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn param_default_bad_int_emits_wb_param_001() {
+        let content = "---\nparams:\n  n:\n    type: int\n    default: notnum\n---\n\n```bash\necho hi\n```\n";
+        let diags = validate_content(
+            content,
+            Path::new("t.md"),
+            &ValidateOptions { strict: false },
+        );
+        assert!(
+            diags
+                .iter()
+                .any(|d| d.code == "wb-param-001" && d.message.contains("valid int")),
+            "expected wb-param-001 int violation, got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn param_default_bad_bool_emits_wb_param_001() {
+        let content = "---\nparams:\n  flag:\n    type: bool\n    default: maybe\n---\n\n```bash\necho hi\n```\n";
+        let diags = validate_content(
+            content,
+            Path::new("t.md"),
+            &ValidateOptions { strict: false },
+        );
+        assert!(
+            diags
+                .iter()
+                .any(|d| d.code == "wb-param-001" && d.message.contains("valid bool")),
+            "expected wb-param-001 bool violation, got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn enum_without_one_of_warns_wb_param_001() {
+        let content = "---\nparams:\n  region:\n    type: enum\n---\n\n```bash\necho hi\n```\n";
+        let diags = validate_content(
+            content,
+            Path::new("t.md"),
+            &ValidateOptions { strict: false },
+        );
+        assert!(
+            diags.iter().any(|d| d.code == "wb-param-001"
+                && d.severity == Severity::Warning
+                && d.message.contains("no one_of")),
+            "expected wb-param-001 warning, got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn valid_params_no_diags() {
+        let content = "---\nparams:\n  region:\n    type: enum\n    one_of: [us, eu]\n    default: us\n  replicas:\n    type: int\n    default: 2\n  dry:\n    type: bool\n    default: true\n  service: api\n---\n\n```bash\necho hi\n```\n";
+        let diags = validate_content(
+            content,
+            Path::new("t.md"),
+            &ValidateOptions { strict: false },
+        );
+        assert!(
+            !diags.iter().any(|d| d.code.starts_with("wb-param")),
+            "expected no param diags, got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn profile_without_params_warns_wb_param_002() {
+        let content = "---\nprofiles:\n  prod:\n    region: eu\n---\n\n```bash\necho hi\n```\n";
+        let diags = validate_content(
+            content,
+            Path::new("t.md"),
+            &ValidateOptions { strict: false },
+        );
+        assert!(
+            diags
+                .iter()
+                .any(|d| d.code == "wb-param-002" && d.message.contains("no params are declared")),
+            "expected wb-param-002 (no params), got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn profile_undeclared_key_warns_wb_param_002() {
+        let content = "---\nparams:\n  region:\n    type: string\n    default: us\nprofiles:\n  prod:\n    bogus: x\n---\n\n```bash\necho hi\n```\n";
+        let diags = validate_content(
+            content,
+            Path::new("t.md"),
+            &ValidateOptions { strict: false },
+        );
+        assert!(
+            diags.iter().any(|d| d.code == "wb-param-002"
+                && d.message.contains("not a declared parameter")),
+            "expected wb-param-002 (undeclared), got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn profile_value_violates_type_emits_wb_param_002() {
+        let content = "---\nparams:\n  replicas:\n    type: int\n    default: 1\nprofiles:\n  prod:\n    replicas: lots\n---\n\n```bash\necho hi\n```\n";
+        let diags = validate_content(
+            content,
+            Path::new("t.md"),
+            &ValidateOptions { strict: false },
+        );
+        assert!(
+            diags.iter().any(|d| d.code == "wb-param-002"
+                && d.message.contains("valid int")
+                && d.message.contains("prod")),
+            "expected wb-param-002 profile type violation, got: {diags:?}"
+        );
+    }
+
+    // ── expect fences (wb-expect-001) ──────────────────────────────────────
+
+    #[test]
+    fn malformed_expect_emits_wb_expect_001() {
+        let content =
+            "```bash\necho hi\n```\n\n```expect\nthis is not a valid assertion line\n```\n";
+        let diags = validate_content(
+            content,
+            Path::new("t.md"),
+            &ValidateOptions { strict: false },
+        );
+        assert!(
+            diags.iter().any(|d| d.code == "wb-expect-001"),
+            "expected wb-expect-001, got: {diags:?}"
+        );
+    }
+
+    // ── wb-step-002 with a non-timeout field (field_to_legacy_key default) ──
+
+    #[test]
+    fn retries_fence_attr_shadows_legacy_wb_step_002() {
+        let content = "---\nretries:\n  1: 2\n---\n\n```bash {retries=3}\necho hi\n```\n";
+        let diags = validate_content(
+            content,
+            Path::new("t.md"),
+            &ValidateOptions { strict: false },
+        );
+        assert!(
+            diags
+                .iter()
+                .any(|d| d.code == "wb-step-002" && d.message.contains("retries")),
+            "expected wb-step-002 for retries shadowing, got: {diags:?}"
+        );
+    }
+
+    // ── workflow node shape checks ─────────────────────────────────────────
+
+    #[test]
+    fn workflow_node_not_object_emits_wb_workflow_002() {
+        let content = r#"---
+workflow:
+  slug: demo
+  nodes:
+    bad: just-a-string
+---
+```bash {#bad}
+echo hi
+```
+"#;
+        let diags = validate_content(
+            content,
+            Path::new("wf.md"),
+            &ValidateOptions { strict: false },
+        );
+        assert!(
+            diags
+                .iter()
+                .any(|d| d.code == "wb-workflow-002" && d.message.contains("bad")),
+            "expected wb-workflow-002 for non-object node, got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn workflow_without_nodes_is_clean() {
+        // workflow object present but no `nodes` key → early return, no diags.
+        let content = "---\nworkflow:\n  slug: demo\n---\n\n```bash\necho hi\n```\n";
+        let diags = validate_content(
+            content,
+            Path::new("wf.md"),
+            &ValidateOptions { strict: false },
+        );
+        assert!(
+            !diags.iter().any(|d| d.code.starts_with("wb-workflow")),
+            "expected no workflow diags, got: {diags:?}"
+        );
+    }
+
+    #[test]
+    fn workflow_empty_nodes_is_clean() {
+        let content = "---\nworkflow:\n  slug: demo\n  nodes: {}\n---\n\n```bash\necho hi\n```\n";
+        let diags = validate_content(
+            content,
+            Path::new("wf.md"),
+            &ValidateOptions { strict: false },
+        );
+        assert!(
+            !diags.iter().any(|d| d.code.starts_with("wb-workflow")),
+            "expected no workflow diags for empty nodes, got: {diags:?}"
+        );
+    }
+
+    // ── extract_yaml_region: opening `---` not followed by a newline ───────
+
+    #[test]
+    fn frontmatter_without_newline_after_open_dashes() {
+        // "---title: x" — the opening dashes are immediately followed by content,
+        // exercising the no-leading-newline branch of extract_yaml_region.
+        let content = "---title: x\n---\n\n```bash\necho hi\n```\n";
+        let diags = validate_content(
+            content,
+            Path::new("t.md"),
+            &ValidateOptions { strict: false },
+        );
+        // Should not panic; region is extracted and parsed. (Behavior asserted
+        // loosely — the point is the code path executes.)
+        let _ = diags;
+    }
+
+    // ── yaml region: a deserialize error that may lack a location ───────────
+
+    #[test]
+    fn frontmatter_type_error_emits_wb_yaml_001() {
+        // `secrets: 123` fails the tolerant Frontmatter parse (wrong shape).
+        let content = "---\nsecrets: 123\n---\n";
+        let diags = validate_content(
+            content,
+            Path::new("t.md"),
+            &ValidateOptions { strict: false },
+        );
+        assert!(
+            diags.iter().any(|d| d.code == "wb-yaml-001"),
+            "expected wb-yaml-001 for type error, got: {diags:?}"
+        );
+    }
+
+    // ── exit_code_for mapping ──────────────────────────────────────────────
+
+    #[test]
+    fn exit_code_for_reflects_severity_and_strict() {
+        let clean: Vec<Diagnostic> = vec![];
+        assert_eq!(exit_code_for(&clean, false), exit_codes::EXIT_SUCCESS);
+
+        let warn = vec![Diagnostic::warning("wb-fm-006", Path::new("t.md"), "w")];
+        assert_eq!(exit_code_for(&warn, false), exit_codes::EXIT_SUCCESS);
+        assert_eq!(
+            exit_code_for(&warn, true),
+            exit_codes::EXIT_WORKBOOK_INVALID
+        );
+
+        let err = vec![Diagnostic::error("wb-secret-001", Path::new("t.md"), "e")];
+        assert_eq!(
+            exit_code_for(&err, false),
+            exit_codes::EXIT_WORKBOOK_INVALID
+        );
+    }
+
+    // ── check_fence_yaml: browser / include / wait sections traversed ──────
+
+    #[test]
+    fn fence_yaml_traverses_browser_include_wait_sections() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("inc.md"), "```bash\necho inc\n```\n").unwrap();
+        let main = format!(
+            "{}{}{}",
+            "```browser\nverbs:\n  - goto: https://example.com\n```\n\n",
+            "```include\npath: ./inc.md\n```\n\n",
+            "```wait\nkind: manual\nbind: ok\n```\n",
+        );
+        std::fs::write(dir.path().join("main.md"), &main).unwrap();
+        let diags = validate_file(
+            &dir.path().join("main.md"),
+            &ValidateOptions { strict: false },
+        );
+        // include target exists, so no inc-001; the point is no panic across
+        // the browser/include/wait section arms.
+        assert!(
+            !diags.iter().any(|d| d.code == "wb-inc-001"),
+            "include resolves; got: {diags:?}"
+        );
+    }
 }

@@ -123,6 +123,52 @@ mod tests {
     }
 
     #[test]
+    fn lock_path_default_and_explicit() {
+        assert_eq!(
+            lock_path("deploy.md", None),
+            PathBuf::from("deploy.md.lock")
+        );
+        assert_eq!(
+            lock_path("deploy.md", Some("/tmp/custom.lock")),
+            PathBuf::from("/tmp/custom.lock")
+        );
+    }
+
+    #[test]
+    fn save_then_load_roundtrip_on_disk() {
+        let md = "---\nruntime: bash\n---\n```bash\necho a\n```\n";
+        let lock = build("w.md", &steps(md));
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("w.md.lock");
+        save(&path, &lock).unwrap();
+        let loaded = load(&path).unwrap();
+        assert!(verify(&loaded, &steps(md)).is_ok());
+    }
+
+    #[test]
+    fn load_missing_and_malformed_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("absent.lock");
+        let err = load(&missing).unwrap_err();
+        assert!(err.contains("read lockfile"));
+
+        let bad = dir.path().join("bad.lock");
+        std::fs::write(&bad, b"{not json").unwrap();
+        let err = load(&bad).unwrap_err();
+        assert!(err.contains("parse lockfile"));
+    }
+
+    #[test]
+    fn verify_detects_language_change() {
+        // Same body, different language: hits the `l.language != c.language`
+        // (and sha) drift branch.
+        let bash = "---\nruntime: bash\n---\n```bash\nprint(1)\n```\n";
+        let py = "---\nruntime: bash\n---\n```python\nprint(1)\n```\n";
+        let lock = build("w.md", &steps(bash));
+        assert!(verify(&lock, &steps(py)).is_err());
+    }
+
+    #[test]
     fn roundtrip() {
         let lock = Lockfile {
             version: 1,

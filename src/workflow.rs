@@ -109,6 +109,56 @@ mod tests {
     }
 
     #[test]
+    fn from_frontmatter_none_without_workflow() {
+        let fm = Frontmatter::default();
+        assert!(WorkflowContext::from_frontmatter(&fm).is_none());
+    }
+
+    #[test]
+    fn payload_none_for_missing_id_and_unknown_step() {
+        let fm = Frontmatter {
+            workflow: Some(crate::parser::WorkflowManifest(json!({
+                "nodes": {"balance": {"primitive": "p", "title": "t"}}
+            }))),
+            ..Default::default()
+        };
+        let ctx = WorkflowContext::from_frontmatter(&fm).unwrap();
+        // No step id → None (the `step_id?` early return).
+        assert!(ctx.payload_for_step(None).is_none());
+        // Step id not present among nodes → None.
+        assert!(ctx.payload_for_step(Some("nope")).is_none());
+    }
+
+    #[test]
+    fn non_object_workflow_summary_is_passed_through() {
+        // A scalar/array workflow (not an object) hits the `other => clone`
+        // arm of workflow_summary and yields no nodes.
+        let fm = Frontmatter {
+            workflow: Some(crate::parser::WorkflowManifest(json!("just-a-string"))),
+            ..Default::default()
+        };
+        let ctx = WorkflowContext::from_frontmatter(&fm).unwrap();
+        assert_eq!(ctx.workflow, json!("just-a-string"));
+        assert!(ctx.payload_for_step(Some("anything")).is_none());
+    }
+
+    #[test]
+    fn compact_node_defaults_missing_fields_to_null() {
+        // A node lacking primitive/title produces nulls for them.
+        let fm = Frontmatter {
+            workflow: Some(crate::parser::WorkflowManifest(json!({
+                "nodes": {"bare": {}}
+            }))),
+            ..Default::default()
+        };
+        let ctx = WorkflowContext::from_frontmatter(&fm).unwrap();
+        let payload = ctx.payload_for_step(Some("bare")).unwrap();
+        assert_eq!(payload.workflow_node["id"], "bare");
+        assert!(payload.workflow_node["primitive"].is_null());
+        assert!(payload.workflow_node["title"].is_null());
+    }
+
+    #[test]
     fn declared_node_ids_extracts_nodes() {
         let fm = Frontmatter {
             workflow: Some(crate::parser::WorkflowManifest(

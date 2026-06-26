@@ -836,6 +836,344 @@ mod tests {
         );
     }
 
+    // ── JSON-RPC framing envelopes ──────────────────────────────────────────
+
+    #[test]
+    fn success_response_shape() {
+        let r = success_response(json!(7), json!({ "ok": true }));
+        assert_eq!(r["jsonrpc"], "2.0");
+        assert_eq!(r["id"], 7);
+        assert_eq!(r["result"]["ok"], true);
+        assert!(r.get("error").is_none());
+    }
+
+    #[test]
+    fn success_response_echoes_id_types() {
+        // String ids and null ids must both round-trip verbatim.
+        assert_eq!(success_response(json!("abc"), json!({}))["id"], "abc");
+        assert_eq!(success_response(Value::Null, json!({}))["id"], Value::Null);
+    }
+
+    #[test]
+    fn error_response_shape() {
+        let r = error_response(json!(3), -32601, "method not found: foo");
+        assert_eq!(r["jsonrpc"], "2.0");
+        assert_eq!(r["id"], 3);
+        assert_eq!(r["error"]["code"], -32601);
+        assert_eq!(r["error"]["message"], "method not found: foo");
+        assert!(r.get("result").is_none());
+    }
+
+    #[test]
+    fn write_message_is_newline_delimited_compact() {
+        let mut buf: Vec<u8> = Vec::new();
+        write_message(&mut buf, &success_response(json!(1), json!({ "a": 1 })));
+        let s = String::from_utf8(buf).unwrap();
+        // Exactly one trailing newline, no embedded newlines in the body.
+        assert!(s.ends_with('\n'));
+        assert_eq!(s.matches('\n').count(), 1);
+        // Re-parseable as one JSON object.
+        let v: Value = serde_json::from_str(s.trim()).unwrap();
+        assert_eq!(v["result"]["a"], 1);
+    }
+
+    // ── initialize handshake ────────────────────────────────────────────────
+
+    #[test]
+    fn initialize_with_no_version_uses_default() {
+        let res = initialize_result(&json!({}));
+        assert_eq!(res["protocolVersion"], PROTOCOL_VERSION);
+        // Server metadata + human instructions are always present.
+        assert_eq!(res["serverInfo"]["version"], env!("CARGO_PKG_VERSION"));
+        assert!(res["instructions"]
+            .as_str()
+            .unwrap()
+            .contains("run_workbook"));
+        assert_eq!(res["capabilities"]["tools"]["listChanged"], false);
+    }
+
+    #[test]
+    fn initialize_accepts_every_known_version() {
+        for v in KNOWN_PROTOCOL_VERSIONS {
+            let res = initialize_result(&json!({ "protocolVersion": v }));
+            assert_eq!(res["protocolVersion"], *v);
+        }
+    }
+
+    // ── tools/list schema details ───────────────────────────────────────────
+
+    #[test]
+    fn tools_list_required_args_declared() {
+        let tools = tool_definitions();
+        let by_name: std::collections::HashMap<&str, &Value> = tools
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| (t["name"].as_str().unwrap(), t))
+            .collect();
+        // Spot-check the required arrays that the tool bodies enforce.
+        let req = |t: &Value| -> Vec<String> {
+            t["inputSchema"]["required"]
+                .as_array()
+                .map(|a| a.iter().map(|x| x.as_str().unwrap().to_string()).collect())
+                .unwrap_or_default()
+        };
+        assert_eq!(req(by_name["author_workbook"]), vec!["path", "content"]);
+        assert_eq!(req(by_name["run_workbook"]), vec!["file"]);
+        assert_eq!(req(by_name["resume_workbook"]), vec!["run_id"]);
+        assert_eq!(req(by_name["inspect_workbook"]), vec!["file"]);
+        assert_eq!(req(by_name["validate_workbook"]), vec!["file"]);
+        assert_eq!(req(by_name["get_run_events"]), vec!["run_id"]);
+        // list_pending takes no args -> no "required" key.
+        assert!(by_name["list_pending"]["inputSchema"]
+            .get("required")
+            .is_none());
+        // Every tool has a non-empty description.
+        for t in tools.as_array().unwrap() {
+            assert!(!t["description"].as_str().unwrap().is_empty());
+        }
+    }
+
+    // ── tools/call dispatch + tool result envelopes ─────────────────────────
+
+    #[test]
+    fn tool_ok_wraps_text_and_structured() {
+        let r = tool_ok(json!({ "n": 5 }));
+        assert_eq!(r["isError"], false);
+        assert_eq!(r["structuredContent"]["n"], 5);
+        assert_eq!(r["content"][0]["type"], "text");
+        // The text block is the pretty-printed value.
+        let text = r["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("\"n\": 5"));
+    }
+
+    #[test]
+    fn tool_err_marks_is_error() {
+        let r = tool_err("boom");
+        assert_eq!(r["isError"], true);
+        assert_eq!(r["content"][0]["text"], "boom");
+        assert_eq!(r["content"][0]["type"], "text");
+    }
+
+    #[test]
+    fn tools_call_unknown_tool_is_error() {
+        let r = handle_tools_call(&json!({ "name": "nope", "arguments": {} }));
+        assert_eq!(r["isError"], true);
+        assert!(r["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("unknown tool: nope"));
+    }
+
+    #[test]
+    fn tools_call_missing_name_is_unknown_tool() {
+        // No "name" → empty string → falls through to the unknown-tool arm.
+        let r = handle_tools_call(&json!({}));
+        assert_eq!(r["isError"], true);
+    }
+
+    #[test]
+    fn tools_call_missing_required_args_error_without_spawning() {
+        // Each of these returns Err from the tool body *before* spawn_wb, so the
+        // dispatch path is exercised without launching the wb binary.
+        let cases = [
+            ("run_workbook", "missing required arg: file"),
+            ("resume_workbook", "missing required arg: run_id"),
+            ("inspect_workbook", "missing required arg: file"),
+            ("validate_workbook", "missing required arg: file"),
+            ("get_run_events", "missing required arg: run_id"),
+            ("author_workbook", "missing required arg: path"),
+        ];
+        for (tool, want) in cases {
+            let r = handle_tools_call(&json!({ "name": tool, "arguments": {} }));
+            assert_eq!(r["isError"], true, "tool {tool}");
+            assert!(
+                r["content"][0]["text"].as_str().unwrap().contains(want),
+                "tool {tool} got: {}",
+                r["content"][0]["text"]
+            );
+        }
+    }
+
+    #[test]
+    fn author_missing_content_specifically() {
+        // path present but content absent → the second guard fires.
+        let r = tool_author(&json!({ "path": "/x/y.md" })).unwrap_err();
+        assert!(r.contains("missing required arg: content"), "got: {r}");
+    }
+
+    #[test]
+    fn author_writes_file_and_reports_bytes() {
+        let dir = std::env::temp_dir().join(format!(
+            "wb-mcp-author-write-{}-{}",
+            std::process::id(),
+            gen_run_id()
+        ));
+        let path = dir.join("nested/wb.md");
+        let body = "# hi\n";
+        let r = tool_author(&json!({
+            "path": path.to_str().unwrap(),
+            "content": body
+        }))
+        .unwrap();
+        assert_eq!(r["bytes_written"], body.len());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), body);
+        // overwrite=true replaces an existing file.
+        let r2 = tool_author(&json!({
+            "path": path.to_str().unwrap(),
+            "content": "new",
+            "overwrite": true
+        }))
+        .unwrap();
+        assert_eq!(r2["bytes_written"], 3);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn resume_rejects_non_object_signal() {
+        // signal present but not an object → pure validation error, no spawn.
+        let err = tool_resume(&json!({ "run_id": "r", "signal": "notobj" })).unwrap_err();
+        assert!(err.contains("signal must be a JSON object"), "got: {err}");
+    }
+
+    #[test]
+    fn get_run_events_unknown_id_errors() {
+        // A run id that cannot exist → checkpoint::load returns Ok(None) → Err.
+        let id = format!("wb-mcp-nonexistent-{}-{}", std::process::id(), gen_run_id());
+        let err = tool_get_run_events(&json!({ "run_id": id })).unwrap_err();
+        assert!(err.contains("no run found"), "got: {err}");
+    }
+
+    // ── exit-code → status mapping: the named-constant cases ─────────────────
+
+    #[test]
+    fn run_result_covers_named_exit_codes() {
+        use crate::exit_codes::*;
+        let cases = [
+            (EXIT_SUCCESS, "completed"),
+            (EXIT_PAUSED, "input_required"),
+            (EXIT_BLOCK_FAILED, "failed"),
+            (EXIT_SIGNAL_TIMEOUT, "timeout"),
+            (EXIT_USAGE, "usage_error"),
+            (EXIT_WORKBOOK_INVALID, "invalid"),
+            (EXIT_SANDBOX_UNAVAILABLE, "sandbox_unavailable"),
+            (EXIT_CHECKPOINT_BUSY, "busy"),
+            (-1, "error"),
+            (255, "error"),
+        ];
+        for (code, want) in cases {
+            let out = WbOutput {
+                code,
+                stdout: String::new(),
+                stderr: "  trailing  \n".to_string(),
+            };
+            let r = run_result("rid", &out);
+            assert_eq!(r["status"], want, "exit {code}");
+            // stderr is right-trimmed.
+            assert_eq!(r["stderr"], "  trailing");
+        }
+    }
+
+    #[test]
+    fn run_result_no_summary_when_stdout_blank_on_success() {
+        let out = WbOutput {
+            code: 0,
+            stdout: "   ".to_string(),
+            stderr: String::new(),
+        };
+        let r = run_result("rid", &out);
+        // Blank stdout parses to null → summary is not attached.
+        assert!(r.get("summary").is_none());
+    }
+
+    #[test]
+    fn run_result_paused_without_descriptor_has_no_elicitation() {
+        // EXIT_PAUSED but no pending file for this id → status set, but no
+        // elicitation key (pending::load returns Ok(None)).
+        let out = WbOutput {
+            code: exit_codes::EXIT_PAUSED,
+            stdout: String::new(),
+            stderr: String::new(),
+        };
+        let id = format!("wb-mcp-nopending-{}-{}", std::process::id(), gen_run_id());
+        let r = run_result(&id, &out);
+        assert_eq!(r["status"], "input_required");
+        assert!(r.get("elicitation").is_none());
+    }
+
+    // ── elicitation builder edge cases ──────────────────────────────────────
+
+    #[test]
+    fn elicitation_multiple_binds() {
+        use crate::parser::BindSpec;
+        let mut desc = bare_descriptor();
+        desc.bind = Some(BindSpec::Multiple(vec!["a".into(), "b".into()]));
+        let e = elicitation_from_pending(&desc);
+        assert!(e["requestedSchema"]["properties"]["a"].is_object());
+        assert!(e["requestedSchema"]["properties"]["b"].is_object());
+        assert_eq!(e["requestedSchema"]["required"], json!(["a", "b"]));
+    }
+
+    #[test]
+    fn elicitation_message_fallbacks() {
+        // Explicit message wins.
+        let mut desc = bare_descriptor();
+        desc.message = Some("please log in".into());
+        assert_eq!(elicitation_from_pending(&desc)["message"], "please log in");
+        // No message, but a kind → kind-flavored default.
+        let mut desc = bare_descriptor();
+        desc.kind = Some("email".into());
+        assert_eq!(
+            elicitation_from_pending(&desc)["message"],
+            "Run paused awaiting a `email` signal."
+        );
+        // No message, no kind → generic default.
+        let desc = bare_descriptor();
+        assert_eq!(
+            elicitation_from_pending(&desc)["message"],
+            "Run paused awaiting input."
+        );
+    }
+
+    // ── small pure helpers ──────────────────────────────────────────────────
+
+    #[test]
+    fn status_label_all_variants() {
+        assert_eq!(status_label(CheckpointStatus::InProgress), "in_progress");
+        assert_eq!(status_label(CheckpointStatus::Complete), "complete");
+        assert_eq!(status_label(CheckpointStatus::Failed), "failed");
+        assert_eq!(status_label(CheckpointStatus::Paused), "paused");
+    }
+
+    #[test]
+    fn str_arg_present_and_absent() {
+        let v = json!({ "a": "x", "n": 1 });
+        assert_eq!(str_arg(&v, "a"), Some("x".to_string()));
+        assert_eq!(str_arg(&v, "missing"), None);
+        // Non-string value → None (not coerced).
+        assert_eq!(str_arg(&v, "n"), None);
+    }
+
+    #[test]
+    fn object_str_map_stringifies_non_strings() {
+        let v = json!({ "vars": { "S": "hi", "N": 3, "B": true } });
+        let m = object_str_map(&v, "vars");
+        assert_eq!(m.get("S").unwrap(), "hi");
+        // Non-string values are JSON-stringified.
+        assert_eq!(m.get("N").unwrap(), "3");
+        assert_eq!(m.get("B").unwrap(), "true");
+        // Missing key → empty map.
+        assert!(object_str_map(&v, "nope").is_empty());
+    }
+
+    #[test]
+    fn gen_run_id_is_unique_and_prefixed() {
+        let a = gen_run_id();
+        let b = gen_run_id();
+        assert!(a.starts_with("mcp-"));
+        assert_ne!(a, b);
+    }
+
     fn bare_descriptor() -> pending::PendingDescriptor {
         pending::PendingDescriptor {
             checkpoint: "c".into(),

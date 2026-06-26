@@ -1681,4 +1681,96 @@ mod tests {
         assert!(load(&id).expect("load").is_none());
         let _ = checkpoint::delete(&id);
     }
+
+    #[test]
+    fn test_is_expired_invalid_timeout_at_is_false() {
+        // A malformed `timeout_at` can't be parsed as RFC3339 → treated as
+        // not expired (line 492 `Err(_) => false`).
+        let id = unique_id("test_is_expired_bad");
+        let mut desc = expired_desc(&id, "deploy.md", Some("abort"));
+        desc.timeout_at = Some("not-a-real-timestamp".to_string());
+        assert!(!is_expired(&desc));
+    }
+
+    #[test]
+    fn test_list_all_skips_unparseable_and_non_pending_files() {
+        // Point list_all at a private tempdir via the thread-local seam (no
+        // global env mutation) so we can drop in malformed/foreign files and
+        // assert they're skipped (lines 166-172 fall-through branches).
+        let dir = std::env::temp_dir().join(unique_id("wb_list_all_skip"));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let _guard = set_thread_checkpoint_dir(dir.clone());
+
+        // A valid descriptor (saved through the normal path).
+        let id = "valid-one";
+        let spec = WaitSpec {
+            kind: Some("manual".to_string()),
+            attrs: Default::default(),
+            ..WaitSpec::default()
+        };
+        let desc = build(id, "ok.md", 1, None, &spec, None);
+        save(id, &desc).expect("save valid");
+
+        // A `.pending.json` file with garbage content → serde_json fails,
+        // the entry is skipped silently.
+        std::fs::write(dir.join("broken.pending.json"), b"{not valid json").expect("write broken");
+        // A foreign file that does not end in `.pending.json` → ignored by
+        // the suffix strip.
+        std::fs::write(dir.join("notes.txt"), b"hello").expect("write foreign");
+        // A *directory* whose name ends in `.pending.json` → read_to_string
+        // fails (line 170 read-failure fall-through), entry skipped.
+        std::fs::create_dir(dir.join("adir.pending.json")).expect("mkdir entry");
+
+        let all = list_all();
+        assert_eq!(all.len(), 1, "only the valid descriptor should be returned");
+        assert_eq!(all[0].0, id);
+        assert_eq!(all[0].1.workbook, "ok.md");
+
+        drop(_guard);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_list_all_missing_dir_returns_empty() {
+        // When the checkpoint dir can't be read (does not exist), list_all
+        // returns an empty vec (line 160 `Err(_) => return out`).
+        let dir = std::env::temp_dir().join(unique_id("wb_list_all_missing"));
+        // Intentionally do NOT create `dir`.
+        let _guard = set_thread_checkpoint_dir(dir.clone());
+        assert!(list_all().is_empty());
+        drop(_guard);
+    }
+
+    #[test]
+    fn test_reap_already_failed_checkpoint_marks_true() {
+        // When the paired checkpoint is already in a terminal Failed state,
+        // the reaper records `checkpoint_marked_failed=true` without
+        // re-transitioning (lines 393-398). Use a private checkpoint dir so a
+        // parallel reaper can't claim our id first.
+        let dir = std::env::temp_dir().join(unique_id("wb_reap_failed"));
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        let _guard = set_thread_checkpoint_dir(dir.clone());
+
+        let id = "already-failed";
+        let mut ckpt = checkpoint::Checkpoint::new("deploy.md", 3);
+        ckpt.mark_failed();
+        checkpoint::save(id, &ckpt).expect("save failed ckpt");
+        let desc = expired_desc(id, "deploy.md", Some("abort"));
+        save(id, &desc).expect("save desc");
+
+        let reaped = reap_expired();
+
+        // Descriptor reaped; checkpoint left Failed; marked flag is true.
+        assert!(load(id).expect("load").is_none());
+        let final_ckpt = checkpoint::load(id).expect("load ckpt").expect("ckpt");
+        assert_eq!(final_ckpt.status, checkpoint::CheckpointStatus::Failed);
+        let ours = reaped
+            .iter()
+            .find(|r| r.id == id)
+            .expect("our id should be reaped in the private dir");
+        assert!(ours.checkpoint_marked_failed);
+
+        drop(_guard);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

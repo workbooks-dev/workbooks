@@ -315,4 +315,153 @@ mod tests {
         assert_eq!(parse_ttl("30m").unwrap(), 1800);
         assert_eq!(parse_ttl("3600").unwrap(), 3600);
     }
+
+    #[test]
+    fn parse_ttl_invalid_propagates_error() {
+        // A malformed duration bubbles up as an error from parse_ttl.
+        assert!(parse_ttl("not-a-duration").is_err());
+    }
+
+    // ---- config_from_env: bad TTL falls back to default ----
+
+    #[test]
+    fn config_from_env_bad_ttl_uses_default() {
+        let mut env = HashMap::new();
+        env.insert("WB_SIGNAL_URL".to_string(), "redis://localhost".to_string());
+        env.insert("WB_SIGNAL_KEY".to_string(), "test:signal".to_string());
+        // Unparseable TTL → parse_ttl(...).ok() is None → 7-day default.
+        env.insert("WB_SIGNAL_TTL".to_string(), "garbage".to_string());
+
+        let config = config_from_env(&env).unwrap();
+        assert_eq!(config.ttl_secs, 7 * 24 * 60 * 60);
+    }
+
+    // ---- bind_signal_vars: remaining branches ----
+
+    #[test]
+    fn bind_signal_single_scalar_returns_only_bound_name() {
+        // Single bind + "_value" scalar: takes the early-return branch and
+        // ignores everything else in the map.
+        let mut vars = HashMap::new();
+        vars.insert("_value".to_string(), "yes".to_string());
+        vars.insert("ignored".to_string(), "nope".to_string());
+        let bind = Some(parser::BindSpec::Single("approved".to_string()));
+        let result = bind_signal_vars(&vars, &bind);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result.get("approved").unwrap(), "yes");
+    }
+
+    #[test]
+    fn bind_signal_single_bind_without_value_falls_through() {
+        // Single bind but no "_value" key: skips the early return and matches
+        // by key name, dropping any "_value"-only entries (none here).
+        let mut vars = HashMap::new();
+        vars.insert("approved".to_string(), "true".to_string());
+        let bind = Some(parser::BindSpec::Single("approved".to_string()));
+        let result = bind_signal_vars(&vars, &bind);
+        assert_eq!(result.get("approved").unwrap(), "true");
+    }
+
+    #[test]
+    fn bind_signal_multi_bind_drops_value_key() {
+        // With >1 bind name, the "_value" early-return is skipped and the
+        // "_value" key itself is filtered out of the by-name copy.
+        let mut vars = HashMap::new();
+        vars.insert("_value".to_string(), "scalar".to_string());
+        vars.insert("a".to_string(), "1".to_string());
+        vars.insert("b".to_string(), "2".to_string());
+        let bind = Some(parser::BindSpec::Multiple(vec![
+            "a".to_string(),
+            "b".to_string(),
+        ]));
+        let result = bind_signal_vars(&vars, &bind);
+        assert_eq!(result.get("a").unwrap(), "1");
+        assert_eq!(result.get("b").unwrap(), "2");
+        assert!(!result.contains_key("_value"));
+    }
+
+    // ---- json_scalar_to_string: every match arm ----
+
+    #[test]
+    fn json_scalar_to_string_all_arms() {
+        use serde_json::json;
+        assert_eq!(
+            json_scalar_to_string(&json!("hello")),
+            Some("hello".to_string())
+        );
+        assert_eq!(json_scalar_to_string(&json!(42)), Some("42".to_string()));
+        assert_eq!(
+            json_scalar_to_string(&json!(true)),
+            Some("true".to_string())
+        );
+        assert_eq!(
+            json_scalar_to_string(&json!(false)),
+            Some("false".to_string())
+        );
+        // Null maps to an empty string (not None).
+        assert_eq!(
+            json_scalar_to_string(&serde_json::Value::Null),
+            Some(String::new())
+        );
+        // Composite values are not scalars → None.
+        assert_eq!(json_scalar_to_string(&json!([1, 2, 3])), None);
+        assert_eq!(json_scalar_to_string(&json!({"k": "v"})), None);
+    }
+
+    // ---- read_signal / archive_signal: offline-reachable paths ----
+
+    fn bad_url_config() -> SignalConfig {
+        // A URL with no recognizable scheme makes redis::Client::open fail
+        // immediately, with no network access.
+        SignalConfig {
+            url: "this is not a redis url".to_string(),
+            signal_key: "test:signal".to_string(),
+            complete_key: Some("test:runs".to_string()),
+            ttl_secs: 3600,
+        }
+    }
+
+    #[test]
+    fn read_signal_bad_url_is_io_error() {
+        let err = read_signal(&bad_url_config(), "ckpt").unwrap_err();
+        match err {
+            WbError::Io(m) => assert!(m.contains("signal: redis client")),
+            other => panic!("expected Io error, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn archive_signal_no_complete_key_is_noop() {
+        // No complete_key configured → returns Ok without touching redis.
+        let config = SignalConfig {
+            url: "this is not a redis url".to_string(),
+            signal_key: "test:signal".to_string(),
+            complete_key: None,
+            ttl_secs: 3600,
+        };
+        assert!(archive_signal(&config, "ckpt", "{}").is_ok());
+    }
+
+    #[test]
+    fn archive_signal_bad_url_is_io_error() {
+        // complete_key is set, so it proceeds to redis client open and fails.
+        let err = archive_signal(&bad_url_config(), "ckpt", "{}").unwrap_err();
+        match err {
+            WbError::Io(m) => assert!(m.contains("signal: redis client")),
+            other => panic!("expected Io error, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn find_ready_signal_empty_pending_returns_none() {
+        // Point pending::list_all() at an empty temp dir (per-thread override),
+        // so the loop body never runs and redis is never contacted.
+        let tmp = std::env::temp_dir().join(format!("wb-signal-test-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&tmp);
+        let prev = crate::checkpoint::set_test_checkpoint_dir(Some(tmp.clone()));
+        let result = find_ready_signal(&bad_url_config());
+        crate::checkpoint::set_test_checkpoint_dir(prev);
+        let _ = std::fs::remove_dir_all(&tmp);
+        assert!(result.unwrap().is_none());
+    }
 }

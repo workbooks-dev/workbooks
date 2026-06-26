@@ -240,11 +240,56 @@ mod tests {
     }
 
     #[test]
+    fn cache_path_sanitizes_unsafe_id_chars() {
+        // Non-alphanumeric (and not '-'/'_') chars collapse to '_', so an id
+        // like "a/b c.d" can't escape the cache dir or break the filename.
+        let p = cache_path("a/b c.d");
+        let name = p.file_name().unwrap().to_string_lossy();
+        assert_eq!(name, "a_b_c_d.json");
+        // Allowed chars survive unchanged.
+        let p2 = cache_path("clean-id_1");
+        assert_eq!(p2.file_name().unwrap().to_string_lossy(), "clean-id_1.json");
+        // Path lands under ~/.wb/cache.
+        assert!(p.to_string_lossy().contains(".wb"));
+        assert!(p.parent().unwrap().ends_with("cache"));
+    }
+
+    #[test]
+    fn load_absent_id_is_empty_store() {
+        // A never-written id loads as an empty store (the Err(_) arm of load).
+        let store = CacheStore::load("wb-cache-definitely-absent-xyz-99999");
+        assert!(store.entries.is_empty());
+    }
+
+    #[test]
     fn roundtrip_serialization() {
         let mut s = CacheStore::default();
         s.record(cache_key("bash", "x", None, "e0", "i0"), true, 0, "t");
         let json = serde_json::to_string(&s).unwrap();
         let back: CacheStore = serde_json::from_str(&json).unwrap();
         assert_eq!(back.entries.len(), 1);
+    }
+
+    #[test]
+    fn save_then_load_roundtrips_on_disk() {
+        // Exercises CacheStore::save (create_dir_all + write, line 81) and the
+        // load success arm. Uses a unique id in the real cache dir so no env
+        // mutation is needed; the single artifact file is removed afterwards.
+        let n = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let id = format!("wb-cache-save-test-{}-{}", std::process::id(), n);
+        let key = cache_key("bash", "echo hi", None, "e0", "i0");
+        let mut store = CacheStore::default();
+        store.record(key.clone(), true, 0, "t");
+        store.save(&id).expect("save should succeed");
+
+        let path = cache_path(&id);
+        assert!(path.exists(), "cache file should exist after save");
+        let loaded = CacheStore::load(&id);
+        assert!(loaded.is_cached_success(&key));
+
+        std::fs::remove_file(&path).ok();
     }
 }

@@ -495,6 +495,153 @@ mod tests {
     }
 
     #[test]
+    fn test_generate_unknown_sandbox_errors() {
+        // Line 21: unknown sandbox type branch.
+        let config = RequiresConfig {
+            sandbox: "rust".to_string(),
+            apt: vec![],
+            pip: vec![],
+            node: vec![],
+            dockerfile: None,
+        };
+        let err = generate_dockerfile(&config).unwrap_err();
+        let msg = format!("{}", err);
+        assert!(msg.contains("unknown sandbox type"), "got: {}", msg);
+        assert!(
+            msg.contains("rust"),
+            "should name the bad type, got: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn test_generate_node_no_npm_install_when_empty() {
+        // node branch with empty `node:` list omits the `npm install -g` line.
+        let config = RequiresConfig {
+            sandbox: "node".to_string(),
+            apt: vec![],
+            pip: vec![],
+            node: vec![],
+            dockerfile: None,
+        };
+        let df = generate_dockerfile(&config).unwrap();
+        assert!(df.contains("nodejs"));
+        assert!(df.contains("npm")); // base apt dep
+        assert!(!df.contains("npm install -g"));
+    }
+
+    #[test]
+    fn test_generate_python_no_pip_install_when_empty() {
+        // python branch with empty `pip:` list omits the `uv pip install` line.
+        let config = RequiresConfig {
+            sandbox: "python".to_string(),
+            apt: vec![],
+            pip: vec![],
+            node: vec![],
+            dockerfile: None,
+        };
+        let df = generate_dockerfile(&config).unwrap();
+        assert!(df.contains("python3"));
+        assert!(df.contains("astral.sh/uv")); // uv installer always present
+        assert!(!df.contains("uv pip install"));
+    }
+
+    #[test]
+    fn test_generate_node_dedups_base_apt() {
+        // A user apt that collides with a base dep (npm) is not duplicated.
+        let config = RequiresConfig {
+            sandbox: "node".to_string(),
+            apt: vec!["npm".to_string(), "git".to_string()],
+            pip: vec![],
+            node: vec![],
+            dockerfile: None,
+        };
+        let df = generate_dockerfile(&config).unwrap();
+        let apt_line = df
+            .lines()
+            .find(|l| l.contains("apt-get install"))
+            .expect("apt-get line present");
+        assert_eq!(
+            apt_line.matches(" npm").count(),
+            1,
+            "npm deduped: {}",
+            apt_line
+        );
+        assert!(apt_line.contains("git"));
+    }
+
+    #[test]
+    fn test_image_tag_folds_in_node_deps() {
+        // node deps participate in the hash (lines 117-120).
+        let mut config = node_config();
+        let tag1 = image_tag(&config);
+        config.node.push("playwright".to_string());
+        let tag2 = image_tag(&config);
+        assert_ne!(tag1, tag2);
+    }
+
+    #[test]
+    fn test_image_tag_custom_dockerfile_missing_file_uses_path_bytes() {
+        // Line 121-128 custom branch, read-fail path: a dockerfile path that
+        // does not exist falls back to hashing the path string itself.
+        let config = RequiresConfig {
+            sandbox: "custom".to_string(),
+            apt: vec![],
+            pip: vec![],
+            node: vec![],
+            dockerfile: Some("/nonexistent/Dockerfile.does-not-exist".to_string()),
+        };
+        let tag = image_tag(&config);
+        assert!(tag.starts_with("wb-sandbox:"));
+        // Stable for the same missing path.
+        assert_eq!(tag, image_tag(&config));
+        // A different missing path yields a different hash.
+        let other = RequiresConfig {
+            dockerfile: Some("/nonexistent/Other.file".to_string()),
+            ..config.clone()
+        };
+        assert_ne!(tag, image_tag(&other));
+    }
+
+    #[test]
+    fn test_image_tag_custom_dockerfile_hashes_contents() {
+        // Line 121-126 custom branch, read-Ok path: an existing dockerfile is
+        // hashed by its contents, so editing the file changes the tag.
+        let dir = std::env::temp_dir().join(format!("wb-sandbox-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let df_path = dir.join("Dockerfile.custom");
+
+        std::fs::write(&df_path, b"FROM alpine\nRUN echo one\n").unwrap();
+        let config = RequiresConfig {
+            sandbox: "custom".to_string(),
+            apt: vec![],
+            pip: vec![],
+            node: vec![],
+            dockerfile: Some(df_path.to_string_lossy().to_string()),
+        };
+        let tag1 = image_tag(&config);
+        assert!(tag1.starts_with("wb-sandbox:"));
+        // Same contents -> same tag.
+        assert_eq!(tag1, image_tag(&config));
+
+        // Editing the file changes the tag (contents are hashed, not the path).
+        std::fs::write(&df_path, b"FROM alpine\nRUN echo two\n").unwrap();
+        let tag2 = image_tag(&config);
+        assert_ne!(tag1, tag2);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_image_tag_format_is_prefix_colon_12hex() {
+        let tag = image_tag(&python_config());
+        let (prefix, short) = tag.split_once(':').expect("prefix:hash");
+        assert_eq!(prefix, "wb-sandbox");
+        assert_eq!(short.len(), 12);
+        assert!(short.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
     fn test_image_tag_same_deps_different_order() {
         let config1 = RequiresConfig {
             sandbox: "python".to_string(),
