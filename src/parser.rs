@@ -1244,6 +1244,9 @@ fn is_executable_language(lang: &str) -> bool {
             // `http` is a native runtime (REST calls via curl); executed by
             // the executor's `execute_http` path, not a language subprocess.
             | "http"
+            // `sql` is a native runtime (queries via sqlite3/psql); executed by
+            // the executor's `execute_sql` path.
+            | "sql"
     )
 }
 

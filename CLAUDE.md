@@ -415,8 +415,13 @@ Accept: application/json
 - Executed via `curl` (zero new dependency) with a built-in 60s timeout.
 - Secret-valued env (e.g. a redacted token) is masked in rendered output.
 
-See `examples/http-demo.md`. The `sql` runtime (#45) is still open (gated on
-trust/#37).
+See `examples/http-demo.md`.
+
+A sibling **`sql`** runtime runs a query block via the `sqlite3`/`psql` CLI
+(zero new deps): the connection comes from `$WB_SQL_URL` / `$DATABASE_URL`
+(`postgres(ql)://…` → `psql`, `sqlite:<path>` or a bare path → `sqlite3`),
+stdout is the result rows (secret-redacted), and the exit code reflects the
+query status — so it composes with `expect` / `wb test`.
 
 ## Composing workbooks with `include:`
 

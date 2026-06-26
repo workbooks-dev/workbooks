@@ -705,3 +705,32 @@ fn repair_unreachable_endpoint_aborts_safely() {
     );
     std::fs::remove_dir_all(md.parent().unwrap()).ok();
 }
+
+#[test]
+fn sql_runtime_runs_sqlite_query() {
+    // Skip gracefully when sqlite3 isn't on PATH (e.g. minimal CI).
+    if Command::new("sqlite3").arg("--version").output().is_err() {
+        return;
+    }
+    let dir = std::env::temp_dir().join(format!("wb-sql-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let db = dir.join("t.db");
+    let md = dir.join("q.md");
+    std::fs::write(
+        &md,
+        format!(
+            "---\nruntime: bash\nenv:\n  WB_SQL_URL: {}\n---\n```sql\nCREATE TABLE t(x);\n```\n```sql\nINSERT INTO t VALUES ('hello-sql');\n```\n```sql\nSELECT x FROM t;\n```\n",
+            db.display()
+        ),
+    )
+    .unwrap();
+    let out = Command::new(wb_binary())
+        .args([md.to_str().unwrap()])
+        .output()
+        .expect("spawn wb");
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("hello-sql"),
+        "sql SELECT should return the row"
+    );
+    std::fs::remove_dir_all(&dir).ok();
+}

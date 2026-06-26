@@ -647,12 +647,120 @@ impl Session {
         }
     }
 
+    /// Native `sql` runtime (#45): run the block body as a query via the
+    /// `sqlite3` or `psql` CLI (no driver dependency). The connection comes from
+    /// `$WB_SQL_URL` or `$DATABASE_URL` in the session env: `postgres(ql)://…`
+    /// → `psql`; `sqlite:<path>` or a bare path → `sqlite3`. stdout = result
+    /// rows; exit 0 on success, non-zero on a query/connection error.
+    fn execute_sql(&self, block: &CodeBlock, index: usize) -> BlockResult {
+        let start = Instant::now();
+        let fail = |stderr: String, kind: &str| BlockResult {
+            block_index: index,
+            language: "sql".to_string(),
+            stdout: String::new(),
+            stderr,
+            exit_code: 2,
+            duration: start.elapsed(),
+            error_type: Some(kind.to_string()),
+            stdout_partial: false,
+            stderr_partial: false,
+        };
+
+        let conn = match self
+            .ctx
+            .env
+            .get("WB_SQL_URL")
+            .or_else(|| self.ctx.env.get("DATABASE_URL"))
+            .filter(|s| !s.is_empty())
+        {
+            Some(c) => c.clone(),
+            None => {
+                return fail(
+                    "sql: no connection — set $WB_SQL_URL or $DATABASE_URL".to_string(),
+                    "sql_no_connection",
+                )
+            }
+        };
+        let query = block.code.trim();
+        if query.is_empty() {
+            return fail("sql: empty query".to_string(), "sql_invalid");
+        }
+
+        let lower = conn.to_ascii_lowercase();
+        let (program, args): (&str, Vec<String>) =
+            if lower.starts_with("postgres://") || lower.starts_with("postgresql://") {
+                (
+                    "psql",
+                    vec![
+                        conn.clone(),
+                        "-v".into(),
+                        "ON_ERROR_STOP=1".into(),
+                        "-c".into(),
+                        query.to_string(),
+                    ],
+                )
+            } else {
+                let path = conn
+                    .strip_prefix("sqlite://")
+                    .or_else(|| conn.strip_prefix("sqlite:"))
+                    .unwrap_or(&conn)
+                    .to_string();
+                ("sqlite3", vec![path, query.to_string()])
+            };
+
+        if !self.ctx.quiet {
+            println!("→ {} query", program);
+        }
+        let output = match Command::new(program).args(&args).output() {
+            Ok(o) => o,
+            Err(e) => {
+                return fail(
+                    format!("sql: failed to launch {program}: {e} (is it installed?)"),
+                    "sql_failed",
+                )
+            }
+        };
+        let stdout = redact_output(
+            &String::from_utf8_lossy(&output.stdout),
+            &self.ctx.redact_values,
+        );
+        let stderr = redact_output(
+            &String::from_utf8_lossy(&output.stderr),
+            &self.ctx.redact_values,
+        );
+        let code = output.status.code().unwrap_or(1);
+        if !self.ctx.quiet && !stdout.is_empty() {
+            println!("{stdout}");
+        }
+        BlockResult {
+            block_index: index,
+            language: "sql".to_string(),
+            stdout,
+            stderr: if code == 0 { String::new() } else { stderr },
+            exit_code: code,
+            duration: start.elapsed(),
+            error_type: if code == 0 {
+                None
+            } else {
+                Some("sql_error".to_string())
+            },
+            stdout_partial: false,
+            stderr_partial: false,
+        }
+    }
+
     pub fn execute_block(&mut self, block: &CodeBlock, index: usize) -> BlockResult {
         let start = Instant::now();
 
         // Native `http` runtime: REST calls via curl (no language subprocess).
         if block.language.eq_ignore_ascii_case("http") {
             let mut r = self.execute_http(block, index);
+            r.auto_classify();
+            return r;
+        }
+        // Native `sql` runtime: queries via the sqlite3/psql CLIs.
+        if block.language.eq_ignore_ascii_case("sql") {
+            let mut r = self.execute_sql(block, index);
             r.auto_classify();
             return r;
         }
