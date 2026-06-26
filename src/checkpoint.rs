@@ -44,6 +44,17 @@ pub struct Checkpoint {
     /// Optional compiled workflow manifest from root frontmatter.
     #[serde(default)]
     pub workflow: Option<serde_json::Value>,
+    /// Digest of the resolved parameter set (`crate::params`). Part of the
+    /// checkpoint identity: if it differs from the current run's params, the
+    /// run starts fresh instead of resuming stale state. `None` for runs
+    /// without params and for legacy checkpoints written before this field.
+    #[serde(default)]
+    pub param_hash: Option<String>,
+    /// Resolved parameter values (name → value) for this run. Persisted so
+    /// `wb resume` can re-apply the original params (a required param has no
+    /// default to fall back on, and resume carries no `--param` flags).
+    #[serde(default)]
+    pub params: BTreeMap<String, String>,
 }
 
 #[derive(Serialize, Deserialize, PartialEq, Clone, Copy, Debug)]
@@ -108,6 +119,8 @@ impl Checkpoint {
             outputs: BTreeMap::new(),
             skipped: Vec::new(),
             workflow: None,
+            param_hash: None,
+            params: BTreeMap::new(),
         }
     }
 

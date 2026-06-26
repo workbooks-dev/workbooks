@@ -46,6 +46,17 @@ pub struct Frontmatter {
     /// run. The block's failure is still recorded and emitted via
     /// callbacks; execution just continues to the next block.
     pub continue_on_error: Option<Vec<u32>>,
+    /// Declared typed parameters. Each entry is either a full map
+    /// (`type`/`default`/`required`/`one_of`/`secret`) or a scalar shorthand
+    /// that becomes the default. Resolved at run start from `--param`,
+    /// `--param-file`, the selected `--profile`, and declared defaults; the
+    /// resolved set is injected into every cell's env and hashed into the
+    /// checkpoint identity. See `crate::params`.
+    pub params: Option<HashMap<String, crate::params::ParamSpec>>,
+    /// Named parameter presets. `--profile <name>` selects one block of
+    /// name → value pairs, applied below `--param`/`--param-file` and above
+    /// declared defaults.
+    pub profiles: Option<HashMap<String, HashMap<String, serde_yaml::Value>>>,
 }
 
 /// `timeouts:` frontmatter map. Mixes a runbook-wide `_default` cap with
@@ -324,6 +335,19 @@ pub struct WaitSpec {
     pub attrs: crate::step_ir::FenceAttrs,
 }
 
+/// An `expect` / `assert` fence — a non-executable section holding assertions
+/// evaluated against the immediately preceding executable block's result.
+/// Parsed eagerly so `wb validate` can report malformed lines (`wb-expect-001`)
+/// without re-parsing. Does not consume a block index.
+#[derive(Debug, Default)]
+pub struct ExpectSpec {
+    /// Parsed assertions paired with their source lines.
+    pub assertions: Vec<(String, crate::assertion::Assertion)>,
+    /// Malformed lines (each with a reason) for diagnostics.
+    pub errors: Vec<String>,
+    pub line_number: usize,
+}
+
 /// Browser slice — body parsed into a structured envelope (`session`, `on_pause`)
 /// with an opaque `verbs` list forwarded verbatim to the sidecar. Verb vocabulary
 /// is sidecar-defined; `wb` does not interpret individual verbs.
@@ -405,6 +429,9 @@ pub enum Section {
     Code(CodeBlock),
     Wait(WaitSpec),
     Browser(BrowserSliceSpec),
+    /// `expect` / `assert` fence — non-executable, evaluated against the prior
+    /// block's result. Does not consume a block index.
+    Expect(ExpectSpec),
     Include(IncludeSpec),
     /// Inserted by `resolve_includes` to mark the start of an included
     /// workbook's spliced sections. Non-executable — skipped by block
@@ -988,6 +1015,30 @@ fn extract_sections(body: &str) -> Vec<Section> {
                 spec.skip_if = info.skip_if.clone();
                 spec.attrs = info.attrs.clone();
                 sections.push(Section::Browser(spec));
+                continue;
+            }
+
+            // Expect/assert fence: a non-executable assertion block evaluated
+            // against the previous executable block. Parsed eagerly into
+            // assertions + errors.
+            if language.eq_ignore_ascii_case("expect") || language.eq_ignore_ascii_case("assert") {
+                if !current_text.is_empty() {
+                    sections.push(Section::Text(current_text.clone()));
+                    current_text.clear();
+                }
+                let mut body_lines = Vec::new();
+                for (_ln, body_line) in lines.by_ref() {
+                    if body_line.trim() == "```" {
+                        break;
+                    }
+                    body_lines.push(body_line);
+                }
+                let parsed = crate::assertion::parse(&body_lines.join("\n"));
+                sections.push(Section::Expect(ExpectSpec {
+                    assertions: parsed.assertions,
+                    errors: parsed.errors,
+                    line_number: line_num + 1,
+                }));
                 continue;
             }
 

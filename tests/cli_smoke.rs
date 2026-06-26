@@ -139,3 +139,129 @@ fn config_set_get_roundtrip_via_cli() {
 
     std::fs::remove_dir_all(&dir).ok();
 }
+
+// ─── wave 5: typed params + wb test ─────────────────────────────────────────
+
+fn write_temp_md(slug: &str, body: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("wb-w5-{}-{}", slug, std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join(format!("{slug}.md"));
+    std::fs::write(&path, body).unwrap();
+    path
+}
+
+#[test]
+fn run_param_injects_value_and_validates() {
+    let md = write_temp_md(
+        "param",
+        "---\nruntime: bash\nparams:\n  greeting:\n    default: hi\n---\n```bash\necho \"g=$greeting\"\n```\n",
+    );
+    // Default injected.
+    let out = Command::new(wb_binary())
+        .args([md.to_str().unwrap()])
+        .output()
+        .expect("spawn wb");
+    assert!(String::from_utf8_lossy(&out.stdout).contains("g=hi"));
+
+    // Override via --param.
+    let out = Command::new(wb_binary())
+        .args([md.to_str().unwrap(), "--param", "greeting=yo"])
+        .output()
+        .expect("spawn wb");
+    assert!(String::from_utf8_lossy(&out.stdout).contains("g=yo"));
+
+    // Unknown param is a usage error (exit 2).
+    let out = Command::new(wb_binary())
+        .args([md.to_str().unwrap(), "--param", "nope=1"])
+        .output()
+        .expect("spawn wb");
+    assert_eq!(out.status.code(), Some(2));
+
+    std::fs::remove_dir_all(md.parent().unwrap()).ok();
+}
+
+#[test]
+fn run_missing_required_param_is_usage_error() {
+    let md = write_temp_md(
+        "reqparam",
+        "---\nruntime: bash\nparams:\n  token:\n    required: true\n---\n```bash\necho ok\n```\n",
+    );
+    let out = Command::new(wb_binary())
+        .args([md.to_str().unwrap(), "-q"])
+        .output()
+        .expect("spawn wb");
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "missing required param should exit 2"
+    );
+    std::fs::remove_dir_all(md.parent().unwrap()).ok();
+}
+
+#[test]
+fn test_command_passes_and_fails_by_assertions() {
+    // All assertions pass → exit 0.
+    let ok = write_temp_md(
+        "testok",
+        "---\nruntime: bash\n---\n```bash\necho ready\n```\n```expect\nexit 0\nstdout contains \"ready\"\n```\n",
+    );
+    let out = Command::new(wb_binary())
+        .args(["test", ok.to_str().unwrap(), "-q"])
+        .output()
+        .expect("spawn wb");
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "passing assertions should exit 0"
+    );
+
+    // A failing assertion → exit 1.
+    let bad = write_temp_md(
+        "testbad",
+        "---\nruntime: bash\n---\n```bash\necho ready\n```\n```expect\nstdout contains \"absent\"\n```\n",
+    );
+    let out = Command::new(wb_binary())
+        .args(["test", bad.to_str().unwrap(), "-q"])
+        .output()
+        .expect("spawn wb");
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "failing assertion should exit 1"
+    );
+
+    std::fs::remove_dir_all(ok.parent().unwrap()).ok();
+    std::fs::remove_dir_all(bad.parent().unwrap()).ok();
+}
+
+#[test]
+fn test_command_no_assertions_is_usage_error() {
+    let md = write_temp_md(
+        "noassert",
+        "---\nruntime: bash\n---\n```bash\necho hi\n```\n",
+    );
+    let out = Command::new(wb_binary())
+        .args(["test", md.to_str().unwrap(), "-q"])
+        .output()
+        .expect("spawn wb");
+    assert_eq!(out.status.code(), Some(2), "no assertions should exit 2");
+    std::fs::remove_dir_all(md.parent().unwrap()).ok();
+}
+
+#[test]
+fn test_command_json_shape() {
+    let md = write_temp_md(
+        "testjson",
+        "---\nruntime: bash\n---\n```bash\necho ok\n```\n```expect\nexit 0\n```\n",
+    );
+    let out = Command::new(wb_binary())
+        .args(["test", md.to_str().unwrap(), "-q", "--format", "json"])
+        .output()
+        .expect("spawn wb");
+    let v: serde_json::Value =
+        serde_json::from_slice(&out.stdout).expect("test --format json should be valid JSON");
+    assert_eq!(v["ok"], serde_json::Value::Bool(true));
+    assert_eq!(v["passed"], serde_json::json!(1));
+    assert!(v["files"].is_array());
+    std::fs::remove_dir_all(md.parent().unwrap()).ok();
+}

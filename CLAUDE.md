@@ -231,6 +231,103 @@ expressions log a warning and skip the block fail-safe.
 See `examples/conditional-demo.md` for a runnable example, and
 `examples/conditional-pause-demo.md` for gating a step on a prior step's output.
 
+## Typed parameters and profiles
+
+Declare parameters in frontmatter and supply values at run time. Each param has
+an optional `type` (`string` default | `int` | `bool` | `enum`), `default`,
+`required` flag, `one_of` choices, and `secret` flag. A bare scalar is shorthand
+for a defaulted string param.
+
+```yaml
+---
+params:
+  region:
+    type: enum
+    one_of: [us-east-1, eu-west-1]
+    default: us-east-1
+  replicas:
+    type: int
+    default: 2
+  dry_run:
+    type: bool
+    default: true
+  service: api            # shorthand: scalar = default, type string
+profiles:
+  prod:
+    region: eu-west-1
+    replicas: 6
+    dry_run: false
+---
+```
+
+```bash
+wb run deploy.md --param replicas=10        # override one value
+wb run deploy.md --profile prod             # apply a named preset
+wb run deploy.md --param-file values.yaml   # YAML mapping of name: value
+```
+
+- **Precedence** (highest first): `--param` > `--param-file` > selected
+  `--profile` > declared `default`.
+- **Validation at run start** (before any block): values are checked against
+  `type` and `one_of`; an undeclared `--param`/`--param-file` key, a missing
+  `required:` param, or a bad value is a usage error (exit 2). `wb validate`
+  statically checks the declarations (`wb-param-001`) and profiles
+  (`wb-param-002`).
+- **Injection**: resolved values are exported into every cell's env under their
+  bare name (`$region`, `$replicas`, …) and are visible to `{when=}` /
+  `{skip_if=}`. `secret: true` values are redacted from rendered output.
+- **Checkpoint identity**: the resolved set is hashed into the checkpoint
+  (`param_hash`). Re-running a checkpoint with different params starts fresh
+  instead of mixing state; the resolved values are persisted so `wb resume`
+  re-applies them (resume carries no `--param` flags, and a `required:` param
+  has no default to fall back on).
+- Cache identity (#18) and include-level param passing are not yet wired.
+
+See `examples/params-demo.md`.
+
+## Inline assertions and `wb test`
+
+Follow an executable block with an `expect` (or `assert`) fence to assert on its
+result. `wb test` runs the workbook and evaluates the assertions with CI-friendly
+exit codes; a plain `wb run` does not evaluate them.
+
+```markdown
+```bash
+curl -sf https://example.com/health
+```
+
+```expect
+exit 0
+stdout contains "ok"
+stderr empty
+```
+```
+
+**Grammar** — one assertion per line (`#` comments and blanks ignored), checked
+against the immediately preceding executable block:
+
+- `exit <N>` / `exit-code <N>` — exit code equals N; `exit != <N>` for inequality
+- `stdout contains <text>` / `stderr contains <text>` — substring present
+- `stdout not-contains <text>` — substring absent
+- `stdout equals <text>` — exact match (trimmed)
+- `stdout empty` / `stdout not-empty`
+
+`<text>` may be quoted (`"…"` / `'…'`) to include spaces. The DSL is tiny and
+dependency-free (no regex, no shell). `wb validate` reports malformed lines as
+`wb-expect-001`.
+
+```bash
+wb test deploy.md                 # human report
+wb test deploy.md --format json   # machine-readable {ok, passed, failed, files[]}
+wb test ./runbooks                # every *.md in the folder
+```
+
+Exit codes: `0` all assertions pass, `1` any assertion fails or a file errors,
+`2` no `expect`/`assert` fences found or a usage error. Artifact/file assertions,
+browser selector assertions, and JUnit/GitHub-annotation output are deferred.
+
+See `examples/test-demo.md`.
+
 ## Composing workbooks with `include:`
 
 Factor out repeated setup (logins, env priming, health pre-flights) into its own
@@ -307,6 +404,11 @@ wb run file.md --only <step-id>       # Run only this step; skip the rest
 wb run file.md --from <step-id>       # Start at this step (skip earlier)
 wb run file.md --until <step-id>      # Stop after this step (inclusive)
 wb run file.md --default-block-timeout 30m  # Opt-in default cap for every block
+wb run file.md --param region=us-east-1     # Set a declared typed parameter
+wb run file.md --profile prod               # Apply a named parameter profile
+wb run file.md --param-file values.yaml     # Load params from a YAML mapping
+wb test file.md                       # Run + evaluate expect/assert fences (CI exit codes)
+wb test some/ --format json           # Test every *.md in a folder, machine-readable
 wb inspect file.md                    # Show structure without running
 wb pending                            # List paused workbooks (auto-reaps expired abort-mode descriptors)
 wb pending --no-reap                  # List without reaping — safe for automation/inspection

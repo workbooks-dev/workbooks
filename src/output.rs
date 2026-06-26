@@ -188,6 +188,7 @@ fn build_json_output(workbook: &Workbook, summary: &RunSummary) -> JsonOutput {
             }
             Section::Wait(_) => {}
             Section::Browser(_) => {}
+            Section::Expect(_) => {}
             Section::Include(_) => {
                 unreachable!(
                     "Section::Include must be resolved by parser::resolve_includes before output"
@@ -344,6 +345,14 @@ fn format_markdown(workbook: &Workbook, summary: &RunSummary) -> String {
                     }
                 } else if let Ok(yaml) = serde_yaml::to_string(spec) {
                     out.push_str(&yaml);
+                }
+                out.push_str("```\n\n");
+            }
+            Section::Expect(spec) => {
+                out.push_str("```expect\n");
+                for (src, _) in &spec.assertions {
+                    out.push_str(src);
+                    out.push('\n');
                 }
                 out.push_str("```\n\n");
             }

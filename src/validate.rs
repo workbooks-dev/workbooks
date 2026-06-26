@@ -94,6 +94,12 @@ pub fn validate_content(content: &str, path: &Path, opts: &ValidateOptions) -> V
     //    closed, flag typo'd flags / keys the runtime would silently ignore.
     check_fence_attrs(&wb, path, &mut diags);
 
+    // 10. Typed parameter declarations (wb-param-001/002).
+    check_params(&wb, path, &mut diags);
+
+    // 11. Inline assertion fences (wb-expect-001).
+    check_expects(&wb, path, &mut diags);
+
     // If --strict: promote warnings to errors.
     if opts.strict {
         for d in &mut diags {
@@ -203,6 +209,8 @@ fn check_frontmatter_yaml(
         timeouts: Option<serde_yaml::Value>,
         retries: Option<serde_yaml::Value>,
         continue_on_error: Option<serde_yaml::Value>,
+        params: Option<serde_yaml::Value>,
+        profiles: Option<serde_yaml::Value>,
     }
 
     if let Err(e) = serde_yaml::from_str::<FrontmatterStrict>(&region.yaml_text) {
@@ -532,6 +540,165 @@ fn check_fence_attrs(wb: &Workbook, path: &Path, out: &mut Vec<Diagnostic>) {
                 .with_span(Span::point(line, 1))
                 .with_help("known flags: no-run, silent, continue_on_error"),
             );
+        }
+    }
+}
+
+/// Render a YAML scalar for messages / comparison.
+fn scalar_str(v: &serde_yaml::Value) -> Option<String> {
+    match v {
+        serde_yaml::Value::Bool(b) => Some(b.to_string()),
+        serde_yaml::Value::Number(n) => Some(n.to_string()),
+        serde_yaml::Value::String(s) => Some(s.clone()),
+        _ => None,
+    }
+}
+
+/// wb-param-001: bad parameter declaration (unknown type, default/type
+/// mismatch, default not in one_of). wb-param-002: a profile references an
+/// undeclared param or a value that violates its param's type/choices.
+fn check_params(wb: &Workbook, path: &Path, out: &mut Vec<Diagnostic>) {
+    let Some(params) = wb.frontmatter.params.as_ref() else {
+        // A profile with no params: block is dead config; flag each profile key.
+        if let Some(profiles) = wb.frontmatter.profiles.as_ref() {
+            for (pname, block) in profiles {
+                for key in block.keys() {
+                    out.push(Diagnostic::warning(
+                        "wb-param-002",
+                        path,
+                        format!("profile '{pname}' sets '{key}' but no params are declared"),
+                    ));
+                }
+            }
+        }
+        return;
+    };
+
+    // Validate each declared param's type + default.
+    for (name, spec) in params {
+        let def = spec.to_def();
+        if let Some(t) = def.type_.as_deref() {
+            if !crate::params::KNOWN_TYPES.contains(&t) {
+                out.push(
+                    Diagnostic::error(
+                        "wb-param-001",
+                        path,
+                        format!("param '{name}': unknown type '{t}'"),
+                    )
+                    .with_help(format!(
+                        "known types: {}",
+                        crate::params::KNOWN_TYPES.join(", ")
+                    )),
+                );
+            }
+        }
+        if let Some(default) = def.default.as_ref().and_then(scalar_str) {
+            check_param_value(name, &def, &default, "default", "wb-param-001", path, out);
+        }
+        // enum/one_of sanity: an `enum` type with no choices can never match.
+        if def.type_.as_deref() == Some("enum") && def.one_of.is_empty() {
+            out.push(Diagnostic::warning(
+                "wb-param-001",
+                path,
+                format!("param '{name}': type enum but no one_of choices declared"),
+            ));
+        }
+    }
+
+    // Validate profiles against the declared params.
+    if let Some(profiles) = wb.frontmatter.profiles.as_ref() {
+        for (pname, block) in profiles {
+            for (key, val) in block {
+                match params.get(key) {
+                    None => out.push(Diagnostic::warning(
+                        "wb-param-002",
+                        path,
+                        format!("profile '{pname}': '{key}' is not a declared parameter"),
+                    )),
+                    Some(spec) => {
+                        if let Some(v) = scalar_str(val) {
+                            check_param_value(
+                                key,
+                                &spec.to_def(),
+                                &v,
+                                &format!("profile '{pname}'"),
+                                "wb-param-002",
+                                path,
+                                out,
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Shared value-vs-declaration check used for both defaults and profile values.
+#[allow(clippy::too_many_arguments)]
+fn check_param_value(
+    name: &str,
+    def: &crate::params::ParamDef,
+    value: &str,
+    origin: &str,
+    code: diagnostic::Code,
+    path: &Path,
+    out: &mut Vec<Diagnostic>,
+) {
+    if !def.one_of.is_empty() {
+        let allowed: Vec<String> = def.one_of.iter().filter_map(scalar_str).collect();
+        if !allowed.iter().any(|a| a == value) {
+            out.push(Diagnostic::error(
+                code,
+                path,
+                format!(
+                    "param '{name}': {origin} value '{value}' is not one of [{}]",
+                    allowed.join(", ")
+                ),
+            ));
+            return;
+        }
+    }
+    match def.type_.as_deref().unwrap_or("string") {
+        "int" => {
+            if value.parse::<i64>().is_err() {
+                out.push(Diagnostic::error(
+                    code,
+                    path,
+                    format!("param '{name}': {origin} value '{value}' is not a valid int"),
+                ));
+            }
+        }
+        "bool" => {
+            if !matches!(
+                value.to_ascii_lowercase().as_str(),
+                "true" | "false" | "1" | "0" | "yes" | "no" | "on" | "off"
+            ) {
+                out.push(Diagnostic::error(
+                    code,
+                    path,
+                    format!("param '{name}': {origin} value '{value}' is not a valid bool"),
+                ));
+            }
+        }
+        _ => {}
+    }
+}
+
+/// wb-expect-001: malformed assertion line in an `expect` / `assert` fence.
+fn check_expects(wb: &Workbook, path: &Path, out: &mut Vec<Diagnostic>) {
+    for section in &wb.sections {
+        if let Section::Expect(spec) = section {
+            for err in &spec.errors {
+                out.push(
+                    Diagnostic::error(
+                        "wb-expect-001",
+                        path,
+                        format!("expect fence at L{}: {err}", spec.line_number),
+                    )
+                    .with_span(Span::point(spec.line_number as u32, 1)),
+                );
+            }
         }
     }
 }

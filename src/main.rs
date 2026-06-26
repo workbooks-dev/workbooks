@@ -1,4 +1,5 @@
 mod artifacts;
+mod assertion;
 mod atomic_io;
 mod callback;
 mod checkpoint;
@@ -11,6 +12,7 @@ mod exit;
 mod exit_codes;
 mod logging;
 mod output;
+mod params;
 mod parser;
 mod pending;
 mod sandbox;
@@ -480,6 +482,16 @@ struct RunArgs {
     /// Per-block `timeouts: {N: ...}` entries still win over this default.
     #[arg(long = "default-block-timeout", value_name = "DURATION")]
     default_block_timeout: Option<String>,
+    /// Set a declared parameter: `--param region=us-east-1`. Repeatable.
+    /// Highest precedence over --param-file, --profile, and declared defaults.
+    #[arg(long = "param", value_name = "KEY=VALUE")]
+    param: Vec<String>,
+    /// Load parameter values from a YAML file (mapping of name: value).
+    #[arg(long = "param-file", value_name = "PATH")]
+    param_file: Option<String>,
+    /// Apply a named parameter profile declared under `profiles:`.
+    #[arg(long = "profile", value_name = "NAME")]
+    profile: Option<String>,
 }
 
 #[derive(clap::Args)]
@@ -498,6 +510,46 @@ struct ValidateArgs {
     format: String,
     #[arg(long = "strict")]
     strict: bool,
+}
+
+#[derive(clap::Args)]
+struct TestArgs {
+    /// Markdown file or folder of workbooks to test.
+    file: String,
+    /// Output format: text | json.
+    #[arg(long, default_value = "text")]
+    format: String,
+    /// Stop a file at its first failing assertion (still reports it).
+    #[arg(long)]
+    bail: bool,
+    #[arg(short, long)]
+    quiet: bool,
+    #[arg(short = 'C', long)]
+    dir: Option<String>,
+    #[arg(long)]
+    secrets: Option<String>,
+    #[arg(long)]
+    project: Option<String>,
+    #[arg(long = "secrets-cmd")]
+    secrets_cmd: Option<String>,
+    #[arg(long)]
+    no_setup: bool,
+    #[arg(short = 'e', long = "set", value_name = "KEY=VALUE")]
+    set_vars: Vec<String>,
+    #[arg(long = "env-file", value_name = "PATH")]
+    env_files: Vec<String>,
+    #[arg(long = "env-file-relative")]
+    env_file_relative: bool,
+    #[arg(long)]
+    redact: Vec<String>,
+    #[arg(long = "default-block-timeout", value_name = "DURATION")]
+    default_block_timeout: Option<String>,
+    #[arg(long = "param", value_name = "KEY=VALUE")]
+    param: Vec<String>,
+    #[arg(long = "param-file", value_name = "PATH")]
+    param_file: Option<String>,
+    #[arg(long = "profile", value_name = "NAME")]
+    profile: Option<String>,
 }
 
 #[derive(clap::Args)]
@@ -673,6 +725,8 @@ enum Command {
     Run(RunArgs),
     Inspect(InspectArgs),
     Validate(ValidateArgs),
+    /// Run a workbook (or folder) and evaluate its `expect`/`assert` fences.
+    Test(TestArgs),
     Doctor(DoctorArgs),
     Pending(PendingArgs),
     Resume(ResumeArgs),
@@ -751,6 +805,12 @@ struct BareRunArgs {
     until: Option<String>,
     #[arg(long = "default-block-timeout", value_name = "DURATION")]
     default_block_timeout: Option<String>,
+    #[arg(long = "param", value_name = "KEY=VALUE")]
+    param: Vec<String>,
+    #[arg(long = "param-file", value_name = "PATH")]
+    param_file: Option<String>,
+    #[arg(long = "profile", value_name = "NAME")]
+    profile: Option<String>,
 }
 
 #[derive(Parser)]
@@ -787,6 +847,7 @@ fn main() -> std::process::ExitCode {
         Some(Command::Run(args)) => cmd_run(args),
         Some(Command::Inspect(args)) => cmd_inspect(args),
         Some(Command::Validate(args)) => cmd_validate(args),
+        Some(Command::Test(args)) => cmd_test(args),
         Some(Command::Doctor(args)) => cmd_doctor(args),
         Some(Command::Pending(args)) => cmd_pending_cmd(args),
         Some(Command::Resume(args)) => cmd_resume_cmd(args),
@@ -843,6 +904,9 @@ fn main() -> std::process::ExitCode {
                     from: bare.from,
                     until: bare.until,
                     default_block_timeout: bare.default_block_timeout,
+                    param: bare.param,
+                    param_file: bare.param_file,
+                    profile: bare.profile,
                 })
             }
         }
@@ -946,6 +1010,9 @@ fn cmd_run(args: RunArgs) -> WbExit {
             default_block_timeout: cli_default_timeout,
             browser_restart: false,
             skipped_by_goto: std::collections::HashSet::new(),
+            param_inputs: args.param,
+            param_file: args.param_file,
+            profile: args.profile,
         });
     }
     WbExit::Success
@@ -988,6 +1055,271 @@ fn cmd_validate(args: ValidateArgs) -> WbExit {
     } else {
         WbExit::WorkbookInvalid(String::new())
     }
+}
+
+/// One evaluated assertion within a tested file.
+struct AssertionReport {
+    source: String,
+    ok: bool,
+    detail: String,
+}
+
+/// Aggregate result of testing a single workbook file.
+struct FileReport {
+    file: String,
+    passed: usize,
+    failed: usize,
+    assertions: Vec<AssertionReport>,
+    /// Set when the file couldn't be run at all (read/param error).
+    error: Option<String>,
+}
+
+/// `wb test` — run a workbook (or folder) and evaluate its `expect`/`assert`
+/// fences against block results. Exit 0 if all assertions pass, 1 if any fail
+/// (or a file errors), 2 if no assertions were found or on a usage error.
+fn cmd_test(args: TestArgs) -> WbExit {
+    let json = match want_json(&args.format) {
+        Ok(b) => b,
+        Err(e) => return e,
+    };
+
+    let path = Path::new(&args.file);
+    let files: Vec<std::path::PathBuf> = if path.is_dir() {
+        let mut v: Vec<std::path::PathBuf> = match std::fs::read_dir(path) {
+            Ok(rd) => rd
+                .filter_map(|e| e.ok().map(|e| e.path()))
+                .filter(|p| p.extension().and_then(|s| s.to_str()) == Some("md"))
+                .collect(),
+            Err(e) => {
+                eprintln!("error: {}: {}", args.file, e);
+                return WbExit::Usage(format!("cannot read directory {}", args.file));
+            }
+        };
+        v.sort();
+        v
+    } else {
+        vec![path.to_path_buf()]
+    };
+
+    let reports: Vec<FileReport> = files
+        .iter()
+        .map(|f| test_one_file(&f.to_string_lossy(), &args))
+        .collect();
+
+    let total_passed: usize = reports.iter().map(|r| r.passed).sum();
+    let total_failed: usize = reports.iter().map(|r| r.failed).sum();
+    let total_assertions = total_passed + total_failed;
+    let any_error = reports.iter().any(|r| r.error.is_some());
+
+    if json {
+        let files_json: Vec<serde_json::Value> = reports
+            .iter()
+            .map(|r| {
+                serde_json::json!({
+                    "file": r.file,
+                    "passed": r.passed,
+                    "failed": r.failed,
+                    "error": r.error,
+                    "assertions": r.assertions.iter().map(|a| serde_json::json!({
+                        "source": a.source,
+                        "ok": a.ok,
+                        "detail": a.detail,
+                    })).collect::<Vec<_>>(),
+                })
+            })
+            .collect();
+        print_json(&serde_json::json!({
+            "ok": total_failed == 0 && !any_error,
+            "passed": total_passed,
+            "failed": total_failed,
+            "files": files_json,
+        }));
+    } else {
+        for r in &reports {
+            println!("{}", output::style_bold(&r.file));
+            if let Some(ref e) = r.error {
+                println!("  {} {}", output::style_fail("error:"), e);
+                continue;
+            }
+            for a in &r.assertions {
+                if a.ok {
+                    println!("  {} {}", output::style_ok("✓"), a.source);
+                } else {
+                    println!("  {} {} — {}", output::style_fail("✗"), a.source, a.detail);
+                }
+            }
+            println!("  {} passed, {} failed", r.passed, r.failed);
+        }
+        println!(
+            "\ntest: {} passed, {} failed across {} file(s)",
+            total_passed,
+            total_failed,
+            reports.len()
+        );
+    }
+
+    if total_assertions == 0 && !any_error {
+        eprintln!(
+            "wb test: no expect/assert fences found in {} — nothing to assert",
+            args.file
+        );
+        return WbExit::Usage("no assertions found".to_string());
+    }
+    if total_failed > 0 || any_error {
+        WbExit::BlockFailed
+    } else {
+        WbExit::Success
+    }
+}
+
+/// Run one workbook and evaluate its assertion fences.
+fn test_one_file(file: &str, args: &TestArgs) -> FileReport {
+    let mut report = FileReport {
+        file: file.to_string(),
+        passed: 0,
+        failed: 0,
+        assertions: Vec::new(),
+        error: None,
+    };
+
+    let content = match std::fs::read_to_string(file) {
+        Ok(c) => c,
+        Err(e) => {
+            report.error = Some(format!("read: {e}"));
+            return report;
+        }
+    };
+    let workbook = parse_and_resolve(&content, file);
+
+    let resolved = match params::resolve(
+        workbook.frontmatter.params.as_ref(),
+        workbook.frontmatter.profiles.as_ref(),
+        args.profile.as_deref(),
+        args.param_file.as_deref(),
+        &args.param,
+    ) {
+        Ok(r) => r,
+        Err(e) => {
+            report.error = Some(e);
+            return report;
+        }
+    };
+
+    let cli_default_timeout = match args.default_block_timeout.as_deref() {
+        Some(s) => match parser::parse_duration_secs(s) {
+            Ok(n) => Some(Duration::from_secs(n)),
+            Err(e) => {
+                report.error = Some(format!("--default-block-timeout: {e}"));
+                return report;
+            }
+        },
+        None => None,
+    };
+
+    let cli_vars: std::collections::HashMap<String, String> = args
+        .set_vars
+        .iter()
+        .filter_map(|s| {
+            s.split_once('=')
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+        })
+        .collect();
+
+    let summary = run_single_collect(
+        file,
+        args.secrets.clone(),
+        args.project.clone(),
+        args.secrets_cmd.clone(),
+        args.dir.clone(),
+        args.quiet,
+        args.no_setup,
+        cli_vars,
+        args.redact.clone(),
+        args.env_files.clone(),
+        args.env_file_relative,
+        cli_default_timeout,
+        resolved.values.into_iter().collect(),
+    );
+
+    let by_index: std::collections::HashMap<usize, &executor::BlockResult> =
+        summary.results.iter().map(|r| (r.block_index, r)).collect();
+
+    // Walk sections, tracking the block index exactly as run_single_collect
+    // assigns it (Code/Browser/Wait each consume one index). An `expect` fence
+    // asserts against the immediately preceding executable block.
+    let mut block_counter = 0usize;
+    'outer: for section in &workbook.sections {
+        match section {
+            parser::Section::Code(_) | parser::Section::Browser(_) | parser::Section::Wait(_) => {
+                block_counter += 1
+            }
+            parser::Section::Expect(spec) => {
+                for err in &spec.errors {
+                    report.failed += 1;
+                    report.assertions.push(AssertionReport {
+                        source: err.clone(),
+                        ok: false,
+                        detail: "malformed assertion".to_string(),
+                    });
+                    if args.bail {
+                        break 'outer;
+                    }
+                }
+                if block_counter == 0 {
+                    for (src, _) in &spec.assertions {
+                        report.failed += 1;
+                        report.assertions.push(AssertionReport {
+                            source: src.clone(),
+                            ok: false,
+                            detail: "no preceding block to assert against".to_string(),
+                        });
+                    }
+                    continue;
+                }
+                let target = block_counter - 1;
+                match by_index.get(&target) {
+                    Some(res) => {
+                        for (src, a) in &spec.assertions {
+                            let o = assertion::evaluate(
+                                src,
+                                a,
+                                res.exit_code,
+                                &res.stdout,
+                                &res.stderr,
+                            );
+                            if o.ok {
+                                report.passed += 1;
+                            } else {
+                                report.failed += 1;
+                            }
+                            let ok = o.ok;
+                            report.assertions.push(AssertionReport {
+                                source: o.source,
+                                ok,
+                                detail: o.detail,
+                            });
+                            if !ok && args.bail {
+                                break 'outer;
+                            }
+                        }
+                    }
+                    None => {
+                        for (src, _) in &spec.assertions {
+                            report.failed += 1;
+                            report.assertions.push(AssertionReport {
+                                source: src.clone(),
+                                ok: false,
+                                detail: "preceding block did not run (skipped)".to_string(),
+                            });
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    report
 }
 
 fn cmd_doctor(args: DoctorArgs) -> WbExit {
@@ -1134,6 +1466,7 @@ fn run_folder(
             env_files.clone(),
             env_file_relative,
             cli_default_block_timeout,
+            std::collections::HashMap::new(),
         );
 
         let line = format!(
@@ -1224,6 +1557,7 @@ fn run_single_collect(
     env_files: Vec<String>,
     env_file_relative: bool,
     cli_default_block_timeout: Option<Duration>,
+    extra_env: std::collections::HashMap<String, String>,
 ) -> output::RunSummary {
     // Resolve the trace-correlation id once so every subsequent artifact,
     // callback, and early-return RunSummary carries the same value.
@@ -1440,6 +1774,9 @@ fn run_single_collect(
     ctx.env.extend(vars.clone());
     ctx.vars = vars;
 
+    // Resolved typed parameters (passed by `wb test`); highest precedence.
+    ctx.env.extend(extra_env);
+
     // Build redact values from keys
     let mut redact_keys = workbook.frontmatter.redact.clone().unwrap_or_default();
     redact_keys.extend(cli_redact);
@@ -1643,6 +1980,9 @@ fn run_single_collect(
                 break;
             }
             parser::Section::Text(_) => {}
+            // Assertions are evaluated by `wb test` (which re-walks the
+            // sections against these results); a plain collect run ignores them.
+            parser::Section::Expect(_) => {}
             parser::Section::Include(_) => {
                 unreachable!(
                     "Section::Include must be resolved by parser::resolve_includes before execution"
@@ -1708,6 +2048,13 @@ struct RunConfig {
     /// emits `step.skipped` (kind "goto") during the replay prefix instead of
     /// being replayed/executed. Empty for normal runs and resumes.
     skipped_by_goto: std::collections::HashSet<usize>,
+    /// Raw `--param KEY=VALUE` inputs, resolved against the workbook's declared
+    /// `params:` inside `run_single`.
+    param_inputs: Vec<String>,
+    /// `--param-file` path (a YAML mapping of name → value).
+    param_file: Option<String>,
+    /// `--profile` name selecting a block under `profiles:`.
+    profile: Option<String>,
 }
 
 /// CLI-side selection inputs before resolution. Names mirror the flag
@@ -1844,6 +2191,7 @@ fn maybe_reenter_sandbox(workbook: &parser::Workbook, cfg: &RunConfig) {
 fn build_execution_context(
     workbook: &parser::Workbook,
     cfg: &RunConfig,
+    resolved_params: &params::ResolvedParams,
 ) -> executor::ExecutionContext {
     let mut ctx = executor::ExecutionContext::from_frontmatter(&workbook.frontmatter, &cfg.file);
 
@@ -1892,6 +2240,16 @@ fn build_execution_context(
     ctx.env.extend(vars.clone());
     ctx.vars = vars;
 
+    // Inject resolved typed parameters under their bare names. Highest
+    // precedence over env/secrets/vars so an explicit --param always wins, and
+    // visible to {when=}/{skip_if=} since they read the session env.
+    ctx.env.extend(
+        resolved_params
+            .values
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone())),
+    );
+
     // Build redact values from keys
     let mut redact_keys = workbook.frontmatter.redact.clone().unwrap_or_default();
     redact_keys.extend(cfg.cli_redact.clone());
@@ -1901,6 +2259,14 @@ fn build_execution_context(
         .filter(|v| !v.is_empty())
         .cloned()
         .collect();
+    // Secret-param values are masked even though they aren't named in `redact`.
+    ctx.redact_values.extend(
+        resolved_params
+            .secret_values
+            .iter()
+            .filter(|v| !v.is_empty())
+            .cloned(),
+    );
 
     // Run setup commands
     if !cfg.no_setup {
@@ -2017,6 +2383,7 @@ fn prepare_checkpoint(
     file: &str,
     block_count: usize,
     steps: &[step_ir::Step],
+    param_hash: Option<&str>,
     ctx: &mut executor::ExecutionContext,
 ) -> CheckpointPrep {
     let id = checkpoint_id.or_else(|| {
@@ -2024,6 +2391,14 @@ fn prepare_checkpoint(
             .file_stem()
             .map(|s| s.to_string_lossy().to_string())
     });
+
+    // Fresh checkpoint stamped with the current param identity, so a later
+    // resume can detect a params change and refuse to reuse stale state.
+    let mk_fresh = || {
+        let mut c = checkpoint::Checkpoint::new(file, block_count);
+        c.param_hash = param_hash.map(str::to_string);
+        c
+    };
 
     let lock_guard = match id.as_ref() {
         Some(id) => match atomic_io::try_lock_for(&checkpoint::checkpoint_path(id)) {
@@ -2045,49 +2420,45 @@ fn prepare_checkpoint(
             Ok(Some(mut c))
                 if c.status != checkpoint::CheckpointStatus::Complete && c.workbook == file =>
             {
-                // Step-id-first resume: if the checkpoint carries a step id,
-                // locate that step in the *current* workbook and resume from
-                // its position even if blocks shifted. Falls back to the
-                // saved block_idx (plus total_blocks gate) for legacy v1
-                // checkpoints without step ids.
-                let resolution = resolve_resume_position(&c, steps, block_count);
-                match resolution {
-                    ResumeResolution::Fresh(reason) => {
-                        eprintln!("wb: {}; starting fresh", reason);
-                        (
-                            0,
-                            Vec::new(),
-                            Some(checkpoint::Checkpoint::new(file, block_count)),
-                        )
-                    }
-                    ResumeResolution::Replay { replay, notice } => {
-                        if let Some(msg) = notice {
-                            eprintln!("{}", msg);
+                // Params changed since the checkpoint was saved → the resolved
+                // env differs, so resuming would mix state from two parameter
+                // sets. Start fresh.
+                if c.param_hash.as_deref() != param_hash {
+                    eprintln!("wb: parameters changed since checkpoint was saved; starting fresh");
+                    (0, Vec::new(), Some(mk_fresh()))
+                } else {
+                    // Step-id-first resume: if the checkpoint carries a step id,
+                    // locate that step in the *current* workbook and resume from
+                    // its position even if blocks shifted. Falls back to the
+                    // saved block_idx (plus total_blocks gate) for legacy v1
+                    // checkpoints without step ids.
+                    let resolution = resolve_resume_position(&c, steps, block_count);
+                    match resolution {
+                        ResumeResolution::Fresh(reason) => {
+                            eprintln!("wb: {}; starting fresh", reason);
+                            (0, Vec::new(), Some(mk_fresh()))
                         }
-                        eprintln!(
+                        ResumeResolution::Replay { replay, notice } => {
+                            if let Some(msg) = notice {
+                                eprintln!("{}", msg);
+                            }
+                            eprintln!(
                             "wb: resuming '{}' — replaying {} completed blocks to rebuild state",
                             id, replay
                         );
-                        let prior = c.block_results();
-                        c.next_block = replay;
-                        c.next_step_id = steps.get(replay).map(|s| s.id.0.clone());
-                        c.status = checkpoint::CheckpointStatus::InProgress;
-                        (replay, prior, Some(c))
+                            let prior = c.block_results();
+                            c.next_block = replay;
+                            c.next_step_id = steps.get(replay).map(|s| s.id.0.clone());
+                            c.status = checkpoint::CheckpointStatus::InProgress;
+                            (replay, prior, Some(c))
+                        }
                     }
                 }
             }
-            Ok(_) => (
-                0,
-                Vec::new(),
-                Some(checkpoint::Checkpoint::new(file, block_count)),
-            ),
+            Ok(_) => (0, Vec::new(), Some(mk_fresh())),
             Err(e) => {
                 log_warn!("warning: {}", e);
-                (
-                    0,
-                    Vec::new(),
-                    Some(checkpoint::Checkpoint::new(file, block_count)),
-                )
+                (0, Vec::new(), Some(mk_fresh()))
             }
         }
     } else {
@@ -2413,7 +2784,25 @@ fn run_single(cfg: RunConfig) {
 
     maybe_reenter_sandbox(&workbook, &cfg);
 
-    let mut ctx = build_execution_context(&workbook, &cfg);
+    // Resolve declared typed parameters against the CLI inputs. A bad value,
+    // unknown param/profile, or a missing required param is a usage error
+    // before any block runs.
+    let resolved_params = match params::resolve(
+        workbook.frontmatter.params.as_ref(),
+        workbook.frontmatter.profiles.as_ref(),
+        cfg.profile.as_deref(),
+        cfg.param_file.as_deref(),
+        &cfg.param_inputs,
+    ) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("error: {e}");
+            std::process::exit(exit_codes::EXIT_USAGE);
+        }
+    };
+    let param_hash = resolved_params.hash.clone();
+
+    let mut ctx = build_execution_context(&workbook, &cfg, &resolved_params);
 
     // Sandbox didn't re-enter; ctx is built. Destructure cfg now so the
     // rest of the function (checkpoint, callback, execution loop) uses
@@ -2442,6 +2831,9 @@ fn run_single(cfg: RunConfig) {
         default_block_timeout: cli_default_block_timeout,
         browser_restart,
         skipped_by_goto,
+        param_inputs: _,
+        param_file: _,
+        profile: _,
     } = cfg;
     let file = file.as_str();
     // Resolve the run-wide default block timeout once. Precedence:
@@ -2505,10 +2897,22 @@ fn run_single(cfg: RunConfig) {
         mut results,
         mut ckpt,
         lock_guard: _checkpoint_lock,
-    } = prepare_checkpoint(effective_checkpoint_id, file, block_count, &steps, &mut ctx);
+    } = prepare_checkpoint(
+        effective_checkpoint_id,
+        file,
+        block_count,
+        &steps,
+        param_hash.as_deref(),
+        &mut ctx,
+    );
 
     if let Some(ref mut c) = ckpt {
         c.workflow = workbook.frontmatter.workflow.clone();
+        // Persist the resolved params + identity so a later `wb resume` can
+        // re-apply them (resume carries no --param flags) and so a params
+        // change is detected on the next run.
+        c.param_hash = param_hash.clone();
+        c.params = resolved_params.values.clone();
     }
     let mut run_outputs = ckpt.as_ref().map(|c| c.outputs.clone()).unwrap_or_default();
 
@@ -3790,6 +4194,14 @@ fn inspect_workbook_json(file: &str) {
                 }));
             }
             parser::Section::Text(_) => {}
+            parser::Section::Expect(spec) => {
+                blocks.push(serde_json::json!({
+                    "index": serde_json::Value::Null,
+                    "kind": "expect",
+                    "line": spec.line_number,
+                    "assertions": spec.assertions.len(),
+                }));
+            }
             parser::Section::Include(_) => {
                 unreachable!(
                     "Section::Include must be resolved by parser::resolve_includes before inspect"
@@ -4890,6 +5302,15 @@ fn cmd_resume_cmd(cli: ResumeArgs) -> WbExit {
             default_block_timeout: None,
             browser_restart,
             skipped_by_goto,
+            // Re-apply the original run's resolved params (resume has no
+            // --param flags; a required param has no default to recover from).
+            param_inputs: ckpt
+                .params
+                .iter()
+                .map(|(k, v)| format!("{k}={v}"))
+                .collect(),
+            param_file: None,
+            profile: None,
         });
         return WbExit::Success;
     }
@@ -5133,6 +5554,13 @@ fn cmd_resume_cmd(cli: ResumeArgs) -> WbExit {
         default_block_timeout: None,
         browser_restart: false,
         skipped_by_goto: std::collections::HashSet::new(),
+        param_inputs: ckpt
+            .params
+            .iter()
+            .map(|(k, v)| format!("{k}={v}"))
+            .collect(),
+        param_file: None,
+        profile: None,
     });
     WbExit::Success
 }
