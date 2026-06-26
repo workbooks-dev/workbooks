@@ -29,7 +29,7 @@ pub struct Frontmatter {
     /// Optional compiled-workflow manifest. `wb` treats it as metadata: it
     /// validates declared node ids and passes compact fragments through
     /// callbacks/checkpoints, but does not interpret the workflow graph.
-    pub workflow: Option<serde_json::Value>,
+    pub workflow: Option<WorkflowManifest>,
     /// Per-block timeout map. Numeric keys (1-based block numbers) set a
     /// per-block cap; the special `_default` key sets a runbook-wide default
     /// applied to every block that doesn't have its own override. Values are
@@ -46,6 +46,17 @@ pub struct Frontmatter {
     /// run. The block's failure is still recorded and emitted via
     /// callbacks; execution just continues to the next block.
     pub continue_on_error: Option<Vec<u32>>,
+    /// Declared typed parameters. Each entry is either a full map
+    /// (`type`/`default`/`required`/`one_of`/`secret`) or a scalar shorthand
+    /// that becomes the default. Resolved at run start from `--param`,
+    /// `--param-file`, the selected `--profile`, and declared defaults; the
+    /// resolved set is injected into every cell's env and hashed into the
+    /// checkpoint identity. See `crate::params`.
+    pub params: Option<HashMap<String, crate::params::ParamSpec>>,
+    /// Named parameter presets. `--profile <name>` selects one block of
+    /// name → value pairs, applied below `--param`/`--param-file` and above
+    /// declared defaults.
+    pub profiles: Option<HashMap<String, HashMap<String, serde_yaml::Value>>>,
 }
 
 /// `timeouts:` frontmatter map. Mixes a runbook-wide `_default` cap with
@@ -242,6 +253,9 @@ pub struct CodeBlock {
     /// if EXPR evaluates true. Composes with `when` via AND — a block runs when
     /// `when` is true *and* `skip_if` is false.
     pub skip_if: Option<String>,
+    /// `{no-cache}` info-string flag: exclude this block from `--cache` skipping
+    /// (for side-effecting blocks that must run every time).
+    pub no_cache: bool,
     /// Pandoc-style fence attributes: `{#id .class key=value}`. Drives stable
     /// step IDs (`#id`), classes/tags, and per-block policy (`timeout=`,
     /// `retries=`, `continue_on_error`). See `crate::step_ir`.
@@ -304,12 +318,30 @@ pub fn reserved_bind_name<'a>(names: impl IntoIterator<Item = &'a str>) -> Optio
     None
 }
 
+/// The opaque compiled-workflow manifest (#26). `wb` validates declared node
+/// ids and forwards compact fragments through callbacks/checkpoints, but does
+/// not interpret the graph — a named newtype rather than a bare
+/// `serde_json::Value` in `Frontmatter`/`Checkpoint`. `#[serde(transparent)]`
+/// keeps the JSON shape byte-identical.
+#[derive(Debug, Deserialize, Serialize, Clone)]
+#[serde(transparent)]
+pub struct WorkflowManifest(pub serde_json::Value);
+
+/// Opaque, resolver-defined match criteria for a `wait` fence (#26). `wb` is
+/// protocol-agnostic — `kind`/`match` are metadata external resolvers interpret,
+/// not `wb`. A named newtype (rather than a bare `serde_yaml::Value` in two
+/// structs) gives the criteria a greppable home; `#[serde(transparent)]` keeps
+/// the YAML/JSON shape byte-identical.
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
+#[serde(transparent)]
+pub struct MatchSpec(pub serde_yaml::Value);
+
 #[derive(Debug, Deserialize, Serialize, Clone, Default)]
 pub struct WaitSpec {
     #[serde(default)]
     pub kind: Option<String>,
     #[serde(default, rename = "match")]
-    pub match_: Option<serde_yaml::Value>,
+    pub match_: Option<MatchSpec>,
     #[serde(default)]
     pub bind: Option<BindSpec>,
     #[serde(default)]
@@ -322,6 +354,19 @@ pub struct WaitSpec {
     pub section_index: usize,
     #[serde(skip, default)]
     pub attrs: crate::step_ir::FenceAttrs,
+}
+
+/// An `expect` / `assert` fence — a non-executable section holding assertions
+/// evaluated against the immediately preceding executable block's result.
+/// Parsed eagerly so `wb validate` can report malformed lines (`wb-expect-001`)
+/// without re-parsing. Does not consume a block index.
+#[derive(Debug, Default)]
+pub struct ExpectSpec {
+    /// Parsed assertions paired with their source lines.
+    pub assertions: Vec<(String, crate::assertion::Assertion)>,
+    /// Malformed lines (each with a reason) for diagnostics.
+    pub errors: Vec<String>,
+    pub line_number: usize,
 }
 
 /// Browser slice — body parsed into a structured envelope (`session`, `on_pause`)
@@ -405,6 +450,9 @@ pub enum Section {
     Code(CodeBlock),
     Wait(WaitSpec),
     Browser(BrowserSliceSpec),
+    /// `expect` / `assert` fence — non-executable, evaluated against the prior
+    /// block's result. Does not consume a block index.
+    Expect(ExpectSpec),
     Include(IncludeSpec),
     /// Inserted by `resolve_includes` to mark the start of an included
     /// workbook's spliced sections. Non-executable — skipped by block
@@ -723,6 +771,8 @@ struct InfoString {
     when: Option<String>,
     /// `skip_if=EXPR` — skip if EXPR is truthy at runtime.
     skip_if: Option<String>,
+    /// `no-cache` — exclude this block from `--cache` skipping.
+    no_cache: bool,
     /// `#id`, `.class`, and `key=value` attrs.
     attrs: FenceAttrs,
 }
@@ -771,6 +821,7 @@ fn parse_info_string(info: &str) -> InfoString {
                 match flag {
                     "no-run" => out.skip_execution = true,
                     "silent" => out.silent = true,
+                    "no-cache" => out.no_cache = true,
                     "continue_on_error" => {
                         out.attrs
                             .kv
@@ -991,6 +1042,30 @@ fn extract_sections(body: &str) -> Vec<Section> {
                 continue;
             }
 
+            // Expect/assert fence: a non-executable assertion block evaluated
+            // against the previous executable block. Parsed eagerly into
+            // assertions + errors.
+            if language.eq_ignore_ascii_case("expect") || language.eq_ignore_ascii_case("assert") {
+                if !current_text.is_empty() {
+                    sections.push(Section::Text(current_text.clone()));
+                    current_text.clear();
+                }
+                let mut body_lines = Vec::new();
+                for (_ln, body_line) in lines.by_ref() {
+                    if body_line.trim() == "```" {
+                        break;
+                    }
+                    body_lines.push(body_line);
+                }
+                let parsed = crate::assertion::parse(&body_lines.join("\n"));
+                sections.push(Section::Expect(ExpectSpec {
+                    assertions: parsed.assertions,
+                    errors: parsed.errors,
+                    line_number: line_num + 1,
+                }));
+                continue;
+            }
+
             // Skip non-executable blocks (like yaml examples, json, etc that are just docs)
             // We execute: python, bash, sh, zsh, node, javascript, js, ruby, rb, perl, r
             if !is_executable_language(&language) {
@@ -1030,6 +1105,7 @@ fn extract_sections(body: &str) -> Vec<Section> {
                 silent: info.silent,
                 when: info.when,
                 skip_if: info.skip_if,
+                no_cache: info.no_cache,
                 attrs: info.attrs,
             }));
         } else {
@@ -1165,6 +1241,12 @@ fn is_executable_language(lang: &str) -> bool {
             | "lua"
             | "swift"
             | "go"
+            // `http` is a native runtime (REST calls via curl); executed by
+            // the executor's `execute_http` path, not a language subprocess.
+            | "http"
+            // `sql` is a native runtime (queries via sqlite3/psql); executed by
+            // the executor's `execute_sql` path.
+            | "sql"
     )
 }
 

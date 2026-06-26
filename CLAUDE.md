@@ -24,7 +24,9 @@ workbooks/
 ├── Cargo.toml
 ├── install.sh         # curl | sh installer
 ├── src/
-│   ├── main.rs        # CLI entrypoint (wb run, wb inspect)
+│   ├── main.rs        # thin binary shim → wb::run()
+│   ├── lib.rs         # library root: pub fn run + embeddable parser/IR/diagnostic core (#48)
+├── wb-core/           # workspace crate: pure analysis core, WASM-buildable (#48)
 │   ├── parser.rs      # Markdown frontmatter + code block extraction
 │   ├── executor.rs    # Multi-runtime subprocess execution
 │   ├── checkpoint.rs  # Save/resume execution state
@@ -146,31 +148,77 @@ won't collide in practice since position is part of the hash.
 
 See `examples/step-ids-demo.md`.
 
-### Selective runs: `--only`, `--from`, `--until`
+### Selective runs: `--only`, `--from`, `--until`, `--tag`
 
-Step ids are the substrate for picking a subset of a workbook to run:
+Step ids (and fence `.class` tags) are the substrate for picking a subset of a
+workbook to run:
 
 ```bash
 wb run deploy.md --only login              # just run the login block
 wb run deploy.md --from migrate            # start at migrate, run to end
 wb run deploy.md --until smoke-test        # stop after smoke-test
 wb run deploy.md --from migrate --until smoke-test   # bounded range
+wb run deploy.md --tag smoke               # only blocks tagged {.smoke}
+wb run deploy.md --tag smoke --tag db      # union of .smoke and .db blocks
+wb run deploy.md --changed                 # only blocks new/edited vs git HEAD
+wb run deploy.md --changed --changed-base main   # …vs another ref
 ```
 
-Each flag takes a step id — either explicit (`{#login}`) or auto-derived
-(`auto-<hash>`). Unknown ids fail with a usage error before any block runs.
-Skipped blocks emit `step.skipped` callbacks with `kind: "selection"` so
+`--only`/`--from`/`--until` take a step id — either explicit (`{#login}`) or
+auto-derived (`auto-<hash>`). `--tag` takes a fence `.class` (repeatable; a
+block matches if it carries any of the given classes). `--changed` selects
+blocks whose `(language, body)` is new or edited versus a git ref
+(`--changed-base`, default `HEAD`) — matched by content, so it's robust to
+inserting/reordering blocks; an untracked file means "all changed". `--tag`,
+`--changed`, and `--from`/`--until` compose as an intersection. Unknown step
+ids, and tags that match no block, fail with a usage error before any block
+runs. Skipped blocks emit `step.skipped` callbacks with `kind: "selection"` so
 agents see the gap.
 
 Limits in this milestone:
 
-- `--only` conflicts with `--from`/`--until` (clap rejects at parse).
+- `--only` conflicts with `--from`/`--until`/`--tag`/`--changed` (clap rejects at parse).
 - Selection cannot be combined with `--checkpoint` — partial-run state
   semantics aren't defined yet (which "completed" do we track when most
   blocks are intentionally skipped?). Run ephemerally instead.
 - A selective run is *ephemeral*: it doesn't read or write the default
   checkpoint, so subsequent normal runs still see the previous state.
-- Tag-based selection (`--tag <class>`) and `--changed` are tracked in #33.
+- Transparent source-hash caching is `--cache` (see below), separate from selection.
+
+### Source-hash execution cache: `--cache`
+
+`wb run <file> --cache <id>` enables a per-id cache at `~/.wb/cache/<id>.json`.
+A block is **skipped** on re-run when its source + parameter identity is
+byte-identical to a previously *successful* run under that id — the "skip
+unchanged blocks" memoization that makes iterative agent re-runs fast.
+
+```bash
+wb run pipeline.md --cache pipe       # first run executes + records
+wb run pipeline.md --cache pipe       # unchanged blocks are skipped
+wb run pipeline.md --cache pipe --no-cache   # force a full run
+```
+
+- **Cache key** = sha256(language + body + param hash). Editing a block, or
+  changing `--param`/`--profile`, invalidates just that block's entry.
+- A cached block is *skipped*, not replayed — its stdout/outputs are not
+  reproduced. Use the cache for **idempotent** pipelines.
+- A side-effecting block opts out with the `{no-cache}` fence flag so it always
+  runs. `--no-cache` disables caching for the whole run.
+- Skips emit `step.skipped` with `kind: "cache"`.
+- A block declares artifact inputs with `{reads=foo.csv}`; the cache key folds in their content, so it re-runs when an upstream artifact it reads changes (#46). Not yet in the key:
+  included-file hashes, runtime versions. Change the cache id when those change.
+
+### Dry-run preview: `--dry-run`
+
+`wb run <file> --dry-run` resolves params, selection, conditionals, and per-step
+policy, then prints the execution plan — each block marked `run`/`skip` with the
+reason (selection, `no-run`, `when=`/`skip_if=`) and the resolved command — and
+exits without running anything. It does **not** resolve secrets or run setup, so
+conditionals are evaluated against frontmatter env + vars + params only.
+
+```bash
+wb run deploy.md --dry-run --profile prod
+```
 
 ## Conditional cells: `{when=…}` and `{skip_if=…}`
 
@@ -231,6 +279,150 @@ expressions log a warning and skip the block fail-safe.
 
 See `examples/conditional-demo.md` for a runnable example, and
 `examples/conditional-pause-demo.md` for gating a step on a prior step's output.
+
+## Typed parameters and profiles
+
+Declare parameters in frontmatter and supply values at run time. Each param has
+an optional `type` (`string` default | `int` | `bool` | `enum`), `default`,
+`required` flag, `one_of` choices, and `secret` flag. A bare scalar is shorthand
+for a defaulted string param.
+
+```yaml
+---
+params:
+  region:
+    type: enum
+    one_of: [us-east-1, eu-west-1]
+    default: us-east-1
+  replicas:
+    type: int
+    default: 2
+  dry_run:
+    type: bool
+    default: true
+  service: api            # shorthand: scalar = default, type string
+profiles:
+  prod:
+    region: eu-west-1
+    replicas: 6
+    dry_run: false
+---
+```
+
+```bash
+wb run deploy.md --param replicas=10        # override one value
+wb run deploy.md --profile prod             # apply a named preset
+wb run deploy.md --param-file values.yaml   # YAML mapping of name: value
+```
+
+- **Precedence** (highest first): `--param` > `--param-file` > selected
+  `--profile` > declared `default`.
+- **Validation at run start** (before any block): values are checked against
+  `type` and `one_of`; an undeclared `--param`/`--param-file` key, a missing
+  `required:` param, or a bad value is a usage error (exit 2). `wb validate`
+  statically checks the declarations (`wb-param-001`) and profiles
+  (`wb-param-002`).
+- **Injection**: resolved values are exported into every cell's env under their
+  bare name (`$region`, `$replicas`, …) and are visible to `{when=}` /
+  `{skip_if=}`. `secret: true` values are redacted from rendered output.
+- **Checkpoint identity**: the resolved set is hashed into the checkpoint
+  (`param_hash`). Re-running a checkpoint with different params starts fresh
+  instead of mixing state; the resolved values are persisted so `wb resume`
+  re-applies them (resume carries no `--param` flags, and a `required:` param
+  has no default to fall back on).
+- Cache identity (#18) and include-level param passing are not yet wired.
+
+See `examples/params-demo.md`.
+
+## Inline assertions and `wb test`
+
+Follow an executable block with an `expect` (or `assert`) fence to assert on its
+result. `wb test` runs the workbook and evaluates the assertions with CI-friendly
+exit codes; a plain `wb run` does not evaluate them.
+
+```markdown
+```bash
+curl -sf https://example.com/health
+```
+
+```expect
+exit 0
+stdout contains "ok"
+stderr empty
+```
+```
+
+**Grammar** — one assertion per line (`#` comments and blanks ignored), checked
+against the immediately preceding executable block:
+
+- `exit <N>` / `exit-code <N>` — exit code equals N; `exit != <N>` for inequality
+- `stdout contains <text>` / `stderr contains <text>` — substring present
+- `stdout not-contains <text>` — substring absent
+- `stdout equals <text>` — exact match (trimmed)
+- `stdout empty` / `stdout not-empty`
+
+`<text>` may be quoted (`"…"` / `'…'`) to include spaces. The DSL is tiny and
+dependency-free (no regex, no shell). `wb validate` reports malformed lines as
+`wb-expect-001`.
+
+```bash
+wb test deploy.md                 # human report
+wb test deploy.md --format json   # machine-readable {ok, passed, failed, files[]}
+wb test ./runbooks                # every *.md in the folder
+```
+
+Exit codes: `0` all assertions pass, `1` any assertion fails or a file errors,
+`2` no `expect`/`assert` fences found or a usage error. Artifact/file assertions,
+browser selector assertions, and JUnit/GitHub-annotation output are deferred.
+
+See `examples/test-demo.md`.
+
+### Docs-as-tests: `wb verify` + GitHub Action
+
+`wb verify <file|dir>` runs every executable code block in ordinary Markdown
+docs and fails if any block errors — or if any `expect`/`assert` fence fails.
+Unlike `wb test`, assertions are *optional*: a plain README whose commands all
+exit 0 passes. Exit `0` if every file passes, `1` otherwise; `--format json`
+available.
+
+```bash
+wb verify README.md          # one doc
+wb verify docs/              # every *.md in a folder
+```
+
+A reusable composite GitHub Action lives at `verify-action/` (published as
+`workbooks-dev/workbooks/verify-action`): it installs `wb` and runs
+`wb verify` so a repo can keep its docs' commands honest in CI. See
+`verify-action/README.md`.
+
+## Native `http` runtime
+
+An `http` fence makes a REST call a first-class block (no wrapping `curl` in
+bash). Body grammar: `METHOD URL` (method optional, defaults to `GET`), then
+`Header: Value` lines, a blank line, then an optional request body. `$VAR` /
+`${VAR}` are substituted from the session env (frontmatter `env:`, secrets,
+`--param`, …).
+
+```markdown
+```http
+GET https://api.example.com/health
+Authorization: Bearer $TOKEN
+Accept: application/json
+```
+```
+
+- stdout = response body; the block exits `0` on a 2xx status, `1` otherwise
+  (`error_type: "http_status"`), so it composes with `expect`/`wb test`/`--bail`.
+- Executed via `curl` (zero new dependency) with a built-in 60s timeout.
+- Secret-valued env (e.g. a redacted token) is masked in rendered output.
+
+See `examples/http-demo.md`.
+
+A sibling **`sql`** runtime runs a query block via the `sqlite3`/`psql` CLI
+(zero new deps): the connection comes from `$WB_SQL_URL` / `$DATABASE_URL`
+(`postgres(ql)://…` → `psql`, `sqlite:<path>` or a bare path → `sqlite3`),
+stdout is the result rows (secret-redacted), and the exit code reflects the
+query status — so it composes with `expect` / `wb test`.
 
 ## Composing workbooks with `include:`
 
@@ -308,6 +500,36 @@ wb run file.md --only <step-id>       # Run only this step; skip the rest
 wb run file.md --from <step-id>       # Start at this step (skip earlier)
 wb run file.md --until <step-id>      # Stop after this step (inclusive)
 wb run file.md --default-block-timeout 30m  # Opt-in default cap for every block
+wb run file.md --param region=us-east-1     # Set a declared typed parameter
+wb run file.md --profile prod               # Apply a named parameter profile
+wb run file.md --param-file values.yaml     # Load params from a YAML mapping
+wb run file.md --tag smoke                  # Run only blocks with the .smoke fence class
+wb run file.md --dry-run                    # Print the execution plan without running
+wb run file.md --cache <id>                 # Skip unchanged blocks (source-hash cache)
+wb test file.md                       # Run + evaluate expect/assert fences (CI exit codes)
+wb test some/ --format json           # Test every *.md in a folder, machine-readable
+wb verify README.md                   # Docs-as-tests: run a doc's code blocks, fail on error
+wb artifacts list --run <id>          # List a run's captured artifacts (manifest)
+wb artifacts open <name> --run <id>   # Print an artifact's absolute path
+wb artifacts export <name> --to <dst> # Copy an artifact out of the run dir
+wb runs list                          # List known runs (newest first)
+wb runs show <id>                     # Show a run's artifacts + checkpoint state
+wb watch <checkpoint-id>              # Live local viewer (terminal)
+wb watch <id> --serve                # Local web viewer at http://127.0.0.1:7878/
+wb run file.md --events run.jsonl     # Append each run event as a JSONL line (local stream)
+wb capture --assert -o run.md         # Command sequence (stdin) → workbook
+wb capture -i -o run.md               # Interactive REPL session recorder → workbook
+wb trust add file.md                  # Record a reviewed workbook as trusted (TOFU)
+wb run file.md --require-trust        # Refuse to run an untrusted/changed workbook
+wb run gh:org/repo/path.md            # Fetch a remote workbook (always trust-gated)
+wb keygen                             # Generate an ed25519 signing keypair
+wb sign file.md                       # Write a detached file.md.sig (ed25519)
+wb verify-sig file.md --pubkey <hex>  # Verify a workbook's signature
+wb run file.md --verify-sig --pubkey <hex>   # Refuse to run unless validly signed
+wb run file.md --sandbox [--sandbox-no-network]  # Run in a Docker container (OS isolation)
+wb lock file.md                       # Write file.md.lock (input identity, for reproducibility)
+wb run file.md --locked               # Refuse to run if the workbook drifted from its lockfile
+wb run file.md --repair <url>         # On a block failure, ask an endpoint: rerun/skip/abort
 wb inspect file.md                    # Show structure without running
 wb pending                            # List paused workbooks (auto-reaps expired abort-mode descriptors)
 wb pending --no-reap                  # List without reaping — safe for automation/inspection
@@ -446,6 +668,28 @@ When `WB_ARTIFACTS_UPLOAD_URL` is set (template supports `{run_id}` and
 wrote it completes, with `Authorization: Bearer $WB_RECORDING_UPLOAD_SECRET`.
 
 See `examples/artifacts-demo.md`.
+
+### Artifact manifest + `wb artifacts` / `wb runs`
+
+Every run writes a `manifest.json` into its artifacts dir recording each
+artifact with its size, content type, **sha256 checksum**, label/description
+(from the `.meta.json` sidecar), the **step id that produced it**, and an
+`updated_at` timestamp. Inspect captured artifacts after a run:
+
+```bash
+wb runs list                          # known runs, newest first, with counts
+wb runs show <run-id>                 # a run's artifacts + checkpoint state
+wb artifacts list --run <run-id>      # the run's manifest (--format json too)
+wb artifacts open report.csv --run <run-id>      # prints the absolute path
+wb artifacts export report.csv --to ./out.csv --run <run-id>
+```
+
+Runs live under `~/.wb/runs/<run-id>/artifacts` (a run id comes from
+`WB_RECORDING_RUN_ID` / `TRIGGER_RUN_ID`). Omitting `--run` targets the most
+recent run. For runs without a persisted manifest (older runs or external
+tooling), the commands fall back to scanning the directory (no step
+provenance). JSON output is available on `list`/`runs list`/`runs show` via
+`--format json`.
 
 ### Browser-runtime auto-capture
 

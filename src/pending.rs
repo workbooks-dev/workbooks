@@ -29,7 +29,7 @@ pub struct PendingDescriptor {
     pub section_index: usize,
     pub kind: Option<String>,
     #[serde(rename = "match", skip_serializing_if = "Option::is_none")]
-    pub match_: Option<serde_yaml::Value>,
+    pub match_: Option<crate::parser::MatchSpec>,
     pub bind: Option<BindSpec>,
     pub created_at: String,
     pub timeout_at: Option<String>,
@@ -37,7 +37,7 @@ pub struct PendingDescriptor {
     /// Opaque sidecar state captured at pause, restored on resume. Populated
     /// only for browser-slice pauses; `wb` does not interpret it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub sidecar_state: Option<serde_yaml::Value>,
+    pub sidecar_state: Option<crate::sidecar::SidecarState>,
     /// Browserbase live-view URL (or equivalent) the human clicks to resolve
     /// a slice-internal pause (MFA, OTP).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -425,6 +425,7 @@ pub fn reap_expired() -> Vec<ReapedEntry> {
                         stream_key: "wb:events".to_string(),
                         run_id: id.clone(),
                         seq: std::sync::atomic::AtomicU64::new(0),
+                        events_path: None,
                     };
                     let total = total_blocks.unwrap_or(desc_now.next_block);
                     let completed = desc_now.next_block.saturating_sub(1);
@@ -532,6 +533,46 @@ mod tests {
     use crate::parser::{BindSpec, WaitSpec};
     use std::sync::atomic::{AtomicU64, Ordering};
 
+    // #26: the typed `SidecarState`/`MatchSpec` newtypes are `#[serde(transparent)]`,
+    // so an existing on-disk pending descriptor (written before the newtypes,
+    // with `sidecar_state`/`match` as bare objects) must still deserialize and
+    // re-serialize byte-identically.
+    #[test]
+    fn legacy_pending_descriptor_roundtrips_through_typed_state() {
+        let legacy = serde_json::json!({
+            "checkpoint": "ck", "checkpoint_id": "ck", "workbook": "w.md",
+            "next_block": 2, "line_number": 5, "section_index": 3,
+            "kind": "email",
+            "match": { "from": "auth@example.com" },
+            "created_at": "2026-06-26T00:00:00Z",
+            "sidecar_state": { "verb_index": 1, "session": "abc" }
+        });
+        let desc: PendingDescriptor =
+            serde_json::from_value(legacy.clone()).expect("legacy descriptor must parse");
+        // Typed but still opaque: values preserved.
+        assert_eq!(
+            desc.match_
+                .as_ref()
+                .unwrap()
+                .0
+                .get("from")
+                .and_then(|v| v.as_str()),
+            Some("auth@example.com")
+        );
+        assert_eq!(
+            desc.sidecar_state
+                .as_ref()
+                .unwrap()
+                .get("session")
+                .and_then(|v| v.as_str()),
+            Some("abc")
+        );
+        // Re-serialization is byte-identical for these fields.
+        let out = serde_json::to_value(&desc).unwrap();
+        assert_eq!(out["match"], legacy["match"]);
+        assert_eq!(out["sidecar_state"], legacy["sidecar_state"]);
+    }
+
     static TEST_COUNTER: AtomicU64 = AtomicU64::new(0);
 
     /// Generate a unique test ID to avoid collisions between parallel tests.
@@ -559,14 +600,14 @@ mod tests {
     fn make_wait_spec() -> WaitSpec {
         WaitSpec {
             kind: Some("email".to_string()),
-            match_: Some(serde_yaml::Value::Mapping({
+            match_: Some(crate::parser::MatchSpec(serde_yaml::Value::Mapping({
                 let mut m = serde_yaml::Mapping::new();
                 m.insert(
                     serde_yaml::Value::String("from".to_string()),
                     serde_yaml::Value::String("auth@example.com".to_string()),
                 );
                 m
-            })),
+            }))),
             bind: Some(BindSpec::Single("otp_code".to_string())),
             timeout: Some("5m".to_string()),
             on_timeout: Some("abort".to_string()),

@@ -386,6 +386,24 @@ pub struct CallbackConfig {
     /// emitted event is sequence 1. Counter is per-process (not persisted) —
     /// receivers should always tie sequence to `run_id` when sorting.
     pub seq: AtomicU64,
+    /// Optional local JSONL event sink (`--events <file>`, #44). Every emitted
+    /// event is appended as one `{"event":…,"data":…}` line, so a local viewer
+    /// (`tail -f`, `wb watch --events`) can stream a run without an HTTP/Redis
+    /// endpoint. Independent of `url` — either, both, or neither may be set.
+    pub events_path: Option<std::path::PathBuf>,
+}
+
+impl CallbackConfig {
+    /// Current callback sequence high-water mark (last number handed out).
+    pub fn seq_value(&self) -> u64 {
+        self.seq.load(Ordering::Relaxed)
+    }
+
+    /// Seed the sequence counter (used on resume so `X-WB-Sequence` continues
+    /// monotonically from where the pre-pause process left off).
+    pub fn set_seq(&self, v: u64) {
+        self.seq.store(v, Ordering::Relaxed);
+    }
 }
 
 /// Compute the stable idempotency key for a logical event delivery.
@@ -756,10 +774,33 @@ impl CallbackConfig {
     }
 
     fn send(&self, event: &str, payload: &str) {
+        if let Some(ref path) = self.events_path {
+            self.append_event_line(path, event, payload);
+        }
+        // An events-only sink (no real endpoint) skips the network transport.
+        if self.url.is_empty() {
+            return;
+        }
         if self.is_redis() {
             self.send_redis(event, payload);
         } else {
             self.send_http(event, payload);
+        }
+    }
+
+    /// Append one JSONL line (`{"event":…,"data":<payload>}`) to the local
+    /// event sink. Best-effort — a write failure must not break the run.
+    fn append_event_line(&self, path: &std::path::Path, event: &str, payload: &str) {
+        use std::io::Write;
+        let data: serde_json::Value =
+            serde_json::from_str(payload).unwrap_or(serde_json::Value::Null);
+        let line = serde_json::json!({ "event": event, "run_id": self.run_id, "data": data });
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+        {
+            let _ = writeln!(f, "{line}");
         }
     }
 
@@ -995,6 +1036,25 @@ mod tests {
     }
 
     #[test]
+    fn seq_seed_and_readback() {
+        let cb = CallbackConfig {
+            url: "https://hooks.example.com/wb".to_string(),
+            secret: None,
+            stream_key: "wb:events".to_string(),
+            run_id: "test-run".to_string(),
+            seq: AtomicU64::new(0),
+            events_path: None,
+        };
+        // Simulate resume: seed from a persisted high-water mark.
+        cb.set_seq(7);
+        assert_eq!(cb.seq_value(), 7);
+        // Next emitted sequence continues monotonically (fetch_add + 1 ⇒ 8).
+        let next = cb.seq.fetch_add(1, Ordering::Relaxed) + 1;
+        assert_eq!(next, 8);
+        assert_eq!(cb.seq_value(), 8);
+    }
+
+    #[test]
     fn is_redis_detection() {
         let http_cb = CallbackConfig {
             url: "https://hooks.example.com/wb".to_string(),
@@ -1002,6 +1062,7 @@ mod tests {
             stream_key: "wb:events".to_string(),
             run_id: "test-run".to_string(),
             seq: AtomicU64::new(0),
+            events_path: None,
         };
         assert!(!http_cb.is_redis());
 
@@ -1011,6 +1072,7 @@ mod tests {
             stream_key: "wb:events".to_string(),
             run_id: "test-run".to_string(),
             seq: AtomicU64::new(0),
+            events_path: None,
         };
         assert!(redis_cb.is_redis());
 
@@ -1020,6 +1082,7 @@ mod tests {
             stream_key: "wb:events".to_string(),
             run_id: "test-run".to_string(),
             seq: AtomicU64::new(0),
+            events_path: None,
         };
         assert!(redis_plain.is_redis());
     }
@@ -1032,6 +1095,7 @@ mod tests {
             stream_key: "wb:events".to_string(),
             run_id: "test-run".to_string(),
             seq: AtomicU64::new(0),
+            events_path: None,
         };
         assert!(!cb.is_redis());
     }
@@ -1581,6 +1645,7 @@ mod tests {
             stream_key: "wb:events".to_string(),
             run_id: "run-seq".to_string(),
             seq: AtomicU64::new(0),
+            events_path: None,
         };
         let mut seen = Vec::new();
         for _ in 0..5 {
@@ -1603,6 +1668,7 @@ mod tests {
             stream_key: "wb:events".to_string(),
             run_id: run.to_string(),
             seq: AtomicU64::new(0),
+            events_path: None,
         };
         let a = mk("run-a");
         let b = mk("run-b");
@@ -1646,6 +1712,7 @@ mod tests {
             stream_key: "wb:events".to_string(),
             run_id: "run-headers".to_string(),
             seq: AtomicU64::new(0),
+            events_path: None,
         };
         cb.send_http("run.complete", r#"{"event":"run.complete"}"#);
 

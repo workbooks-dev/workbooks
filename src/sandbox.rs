@@ -238,6 +238,7 @@ pub fn run_in_sandbox(
     workbook_path: &str,
     env: &HashMap<String, String>,
     extra_args: &[String],
+    no_network: bool,
 ) -> WbResult<i32> {
     let workbook_abs = std::fs::canonicalize(workbook_path)
         .map_err(|e| WbError::Sandbox(format!("canonicalize {}: {}", workbook_path, e)))?;
@@ -257,6 +258,11 @@ pub fn run_in_sandbox(
 
     let mut cmd = Command::new("docker");
     cmd.args(["run", "--rm"]);
+
+    // Enforceable network allowlist (#37): no network namespace at all.
+    if no_network {
+        cmd.args(["--network", "none"]);
+    }
 
     // Mount workbook directory
     cmd.args(["-v", &format!("{}:/work", workbook_dir.display())]);

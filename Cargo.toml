@@ -5,6 +5,10 @@ edition = "2021"
 description = "Run markdown workbooks from the command line"
 license = "MIT"
 
+[lib]
+name = "wb"
+path = "src/lib.rs"
+
 [[bin]]
 name = "wb"
 path = "src/main.rs"
@@ -23,6 +27,8 @@ fs4 = "0.13"
 thiserror = "2"
 clap_complete = "4.6.5"
 clap_mangen = "0.3.0"
+ed25519-dalek = "2"
+getrandom = "0.2"
 
 [dev-dependencies]
 tempfile = "3"
@@ -33,3 +39,6 @@ lto = true          # Link-time optimization
 codegen-units = 1   # Single codegen unit for better optimization
 strip = true        # Strip debug symbols
 panic = "abort"     # Smaller binary, no unwinding
+
+[workspace]
+members = ["wb-core"]

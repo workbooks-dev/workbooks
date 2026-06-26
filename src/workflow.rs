@@ -13,7 +13,7 @@ pub struct WorkflowContext {
 
 impl WorkflowContext {
     pub fn from_frontmatter(frontmatter: &Frontmatter) -> Option<Self> {
-        let raw = frontmatter.workflow.as_ref()?;
+        let raw = &frontmatter.workflow.as_ref()?.0;
         let workflow = workflow_summary(raw);
         let nodes = workflow_nodes(raw);
         Some(Self { workflow, nodes })
@@ -34,7 +34,7 @@ pub fn declared_node_ids(frontmatter: &Frontmatter) -> std::collections::BTreeSe
     frontmatter
         .workflow
         .as_ref()
-        .map(workflow_nodes)
+        .map(|w| workflow_nodes(&w.0))
         .unwrap_or_default()
         .into_keys()
         .collect()
@@ -84,7 +84,7 @@ mod tests {
     #[test]
     fn builds_payload_for_declared_step() {
         let fm = Frontmatter {
-            workflow: Some(json!({
+            workflow: Some(crate::parser::WorkflowManifest(json!({
                 "slug": "stripe/balance",
                 "version": "2026-05-09T00:00:00Z",
                 "nodes": {
@@ -94,7 +94,7 @@ mod tests {
                         "outputs": [{"name": "snapshot_path"}]
                     }
                 }
-            })),
+            }))),
             ..Default::default()
         };
         let ctx = WorkflowContext::from_frontmatter(&fm).unwrap();
@@ -111,7 +111,9 @@ mod tests {
     #[test]
     fn declared_node_ids_extracts_nodes() {
         let fm = Frontmatter {
-            workflow: Some(json!({"nodes": {"a": {}, "b": {}}})),
+            workflow: Some(crate::parser::WorkflowManifest(
+                json!({"nodes": {"a": {}, "b": {}}}),
+            )),
             ..Default::default()
         };
         let ids: Vec<_> = declared_node_ids(&fm).into_iter().collect();

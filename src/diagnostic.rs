@@ -22,6 +22,9 @@
 //   wb-workflow-001 workflow node id has no matching step or wait id
 //   wb-workflow-002 workflow/workflow.nodes shape is not a mapping/object
 //   wb-workflow-003 workflow node primitive is missing or not a non-empty string
+//   wb-param-001  bad parameter declaration (unknown type, default type/choice mismatch)
+//   wb-param-002  profile references an undeclared param or a value violating its type/choices
+//   wb-expect-001 malformed assertion line in an expect/assert fence
 
 use serde::Serialize;
 use std::path::PathBuf;

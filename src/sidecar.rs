@@ -41,6 +41,30 @@ const SLICE_EVENT_TIMEOUT: Duration = Duration::from_secs(300);
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(45);
 
 /// Info captured when a slice pauses for a human-in-the-loop action.
+/// Opaque, sidecar-defined pause/resume state (#26). The browser sidecar emits
+/// it at a pause; `wb` persists it in the pending descriptor and hands it back
+/// verbatim on resume — it does **not** interpret the contents (the runtime
+/// stays protocol-agnostic). A named newtype rather than a bare
+/// `serde_yaml::Value` scattered through three structs, so the pause/resume
+/// state has a greppable, documented home. `#[serde(transparent)]` keeps the
+/// on-disk/wire shape byte-identical to the previous `serde_yaml::Value`.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(transparent)]
+pub struct SidecarState(pub serde_yaml::Value);
+
+impl SidecarState {
+    /// Look up a key when the state is a mapping (sidecar-specific shape).
+    #[allow(dead_code)]
+    pub fn get(&self, key: &str) -> Option<&serde_yaml::Value> {
+        self.0.get(key)
+    }
+    /// The underlying opaque value.
+    #[allow(dead_code)]
+    pub fn value(&self) -> &serde_yaml::Value {
+        &self.0
+    }
+}
+
 /// Generalized from the original MFA-only shape to carry the full
 /// `pause_for_human` payload so the run page can render operator-facing
 /// affordances (message, deep-link, action buttons) from a single event.
@@ -48,7 +72,7 @@ const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(45);
 /// descriptor and exit 42.
 #[derive(Debug, Clone, Default)]
 pub struct PauseInfo {
-    pub sidecar_state: Option<serde_yaml::Value>,
+    pub sidecar_state: Option<SidecarState>,
     pub reason: Option<String>,
     pub resume_url: Option<String>,
     pub verb_index: Option<usize>,
@@ -113,7 +137,7 @@ pub struct SliceCallbackContext<'a> {
 /// carries whatever the external resolver gave `wb resume` (e.g. OTP code).
 #[derive(Debug, Clone, Default)]
 pub struct RestoreArgs {
-    pub state: Option<serde_yaml::Value>,
+    pub state: Option<SidecarState>,
     pub signal: Option<serde_json::Value>,
 }
 
@@ -545,7 +569,8 @@ fn fire_lifecycle(ctx: &SliceCallbackContext, event: &str, sidecar_msg: &Value) 
 fn extract_pause_info(msg: &Value) -> PauseInfo {
     let sidecar_state = msg
         .get("sidecar_state")
-        .and_then(|v| serde_yaml::to_value(v).ok());
+        .and_then(|v| serde_yaml::to_value(v).ok())
+        .map(SidecarState);
     let reason = msg
         .get("reason")
         .and_then(|v| v.as_str())
