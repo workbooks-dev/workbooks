@@ -476,6 +476,10 @@ struct RunArgs {
     /// steps are skipped. Combines with --from for an explicit range.
     #[arg(long, value_name = "STEP_ID", conflicts_with = "only")]
     until: Option<String>,
+    /// Run only blocks carrying this fence `.class` tag (repeatable). Composes
+    /// with --from/--until; conflicts with --only.
+    #[arg(long = "tag", value_name = "CLASS", conflicts_with = "only")]
+    tag: Vec<String>,
     /// Cap how long a block may run before wb kills it. Accepts duration
     /// strings ("30s", "5m", "2h") or bare seconds. Without this flag and
     /// without a `timeouts._default` frontmatter entry, blocks run unbounded.
@@ -492,6 +496,11 @@ struct RunArgs {
     /// Apply a named parameter profile declared under `profiles:`.
     #[arg(long = "profile", value_name = "NAME")]
     profile: Option<String>,
+    /// Print the resolved execution plan (which blocks would run, skip, and the
+    /// resolved command for each) and exit without running anything. Does not
+    /// resolve secrets or run setup.
+    #[arg(long = "dry-run")]
+    dry_run: bool,
 }
 
 #[derive(clap::Args)]
@@ -803,6 +812,8 @@ struct BareRunArgs {
     from: Option<String>,
     #[arg(long, value_name = "STEP_ID", conflicts_with = "only")]
     until: Option<String>,
+    #[arg(long = "tag", value_name = "CLASS", conflicts_with = "only")]
+    tag: Vec<String>,
     #[arg(long = "default-block-timeout", value_name = "DURATION")]
     default_block_timeout: Option<String>,
     #[arg(long = "param", value_name = "KEY=VALUE")]
@@ -811,6 +822,8 @@ struct BareRunArgs {
     param_file: Option<String>,
     #[arg(long = "profile", value_name = "NAME")]
     profile: Option<String>,
+    #[arg(long = "dry-run")]
+    dry_run: bool,
 }
 
 #[derive(Parser)]
@@ -903,10 +916,12 @@ fn main() -> std::process::ExitCode {
                     only: bare.only,
                     from: bare.from,
                     until: bare.until,
+                    tag: bare.tag,
                     default_block_timeout: bare.default_block_timeout,
                     param: bare.param,
                     param_file: bare.param_file,
                     profile: bare.profile,
+                    dry_run: bare.dry_run,
                 })
             }
         }
@@ -1006,6 +1021,7 @@ fn cmd_run(args: RunArgs) -> WbExit {
                 only: args.only,
                 from: args.from,
                 until: args.until,
+                tag: args.tag,
             },
             default_block_timeout: cli_default_timeout,
             browser_restart: false,
@@ -1013,6 +1029,7 @@ fn cmd_run(args: RunArgs) -> WbExit {
             param_inputs: args.param,
             param_file: args.param_file,
             profile: args.profile,
+            dry_run: args.dry_run,
         });
     }
     WbExit::Success
@@ -2055,6 +2072,9 @@ struct RunConfig {
     param_file: Option<String>,
     /// `--profile` name selecting a block under `profiles:`.
     profile: Option<String>,
+    /// `--dry-run`: print the resolved execution plan and exit without running
+    /// any block (no sandbox, no secrets, no setup).
+    dry_run: bool,
 }
 
 /// CLI-side selection inputs before resolution. Names mirror the flag
@@ -2065,12 +2085,53 @@ struct SelectionArgs {
     only: Option<String>,
     from: Option<String>,
     until: Option<String>,
+    /// `--tag <class>` (repeatable): run only blocks carrying one of these
+    /// fence `.class` tags. Composes with `--from`/`--until` (intersection).
+    tag: Vec<String>,
 }
 
 impl SelectionArgs {
     fn is_empty(&self) -> bool {
-        self.only.is_none() && self.from.is_none() && self.until.is_none()
+        self.only.is_none() && self.from.is_none() && self.until.is_none() && self.tag.is_empty()
     }
+}
+
+/// Resolve `--tag` to the set of block indices whose step carries a matching
+/// fence `.class`. Returns `None` when no tags were given (no tag filter), or an
+/// error if a given tag matches no block (typo guard, mirrors unknown step id).
+fn resolve_tag_set(
+    sel: &SelectionArgs,
+    steps: &[step_ir::Step],
+) -> Result<Option<std::collections::BTreeSet<usize>>, String> {
+    if sel.tag.is_empty() {
+        return Ok(None);
+    }
+    let mut set = std::collections::BTreeSet::new();
+    for tag in &sel.tag {
+        let mut matched = false;
+        for (idx, step) in steps.iter().enumerate() {
+            if step.attrs.classes.iter().any(|c| c == tag) {
+                set.insert(idx);
+                matched = true;
+            }
+        }
+        if !matched {
+            return Err(format!(
+                "--tag '{tag}' matches no block (no fence has .{tag})"
+            ));
+        }
+    }
+    Ok(Some(set))
+}
+
+/// Whether a block index is selected, given the resolved range and optional tag
+/// set. A block must be in the range AND (if tags are active) in the tag set.
+fn block_selected(
+    range: &std::ops::Range<usize>,
+    tags: &Option<std::collections::BTreeSet<usize>>,
+    idx: usize,
+) -> bool {
+    range.contains(&idx) && tags.as_ref().is_none_or(|s| s.contains(&idx))
 }
 
 /// If the workbook declares `requires:` and we're not already running inside
@@ -2279,6 +2340,169 @@ fn build_execution_context(
     }
 
     ctx
+}
+
+/// `--dry-run`: print the resolved execution plan without running anything.
+/// Resolves params, selection, conditionals, and per-step policy, then prints
+/// for each executable block whether it would run (and the resolved command) or
+/// be skipped (and why). Does not resolve secrets or run setup — conditionals
+/// are evaluated against frontmatter env + vars + params only.
+fn dry_run_preview(
+    workbook: &parser::Workbook,
+    steps: &[step_ir::Step],
+    resolved_step_policies: &[step_ir::ResolvedStepPolicy],
+    resolved_params: &params::ResolvedParams,
+    cfg: &RunConfig,
+    block_count: usize,
+) {
+    let selection_range = match resolve_selection(&cfg.selection, steps, block_count) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("error: {e}");
+            std::process::exit(exit_codes::EXIT_USAGE);
+        }
+    };
+    let selection_tags = match resolve_tag_set(&cfg.selection, steps) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("error: {e}");
+            std::process::exit(exit_codes::EXIT_USAGE);
+        }
+    };
+
+    // Preview env: frontmatter env + vars + CLI vars + resolved params. No
+    // secrets, no env-files, no setup — a dry run has no side effects.
+    let mut env: std::collections::HashMap<String, String> =
+        workbook.frontmatter.env.clone().unwrap_or_default();
+    if let Some(ref v) = workbook.frontmatter.vars {
+        env.extend(v.clone());
+    }
+    env.extend(cfg.cli_vars.clone());
+    env.extend(
+        resolved_params
+            .values
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone())),
+    );
+
+    let title = workbook.frontmatter.title.as_deref().unwrap_or(&cfg.file);
+    println!("{}", output::style_bold(&format!("dry run: {title}")));
+    if !resolved_params.values.is_empty() {
+        let rendered: Vec<String> = resolved_params
+            .values
+            .iter()
+            .map(|(k, v)| format!("{k}={v}"))
+            .collect();
+        println!("params: {}", rendered.join(" "));
+    }
+    println!();
+
+    let mut block_idx = 0usize;
+    let mut will_run = 0usize;
+    let mut will_skip = 0usize;
+    let fm = &workbook.frontmatter;
+    for section in &workbook.sections {
+        let (lang, line, when, skip_if, no_run, detail) = match section {
+            parser::Section::Code(b) => (
+                b.language.clone(),
+                b.line_number,
+                b.when.as_deref(),
+                b.skip_if.as_deref(),
+                b.skip_execution,
+                {
+                    let l = b.language.to_lowercase();
+                    match &fm.exec {
+                        Some(parser::ExecConfig::Global(prefix)) => {
+                            format!("{} {}", prefix, default_program(&l))
+                        }
+                        Some(parser::ExecConfig::PerLanguage(map)) => map
+                            .get(normalize_block_language(&l))
+                            .cloned()
+                            .unwrap_or_else(|| default_program(&l).to_string()),
+                        None => default_program(&l).to_string(),
+                    }
+                },
+            ),
+            parser::Section::Browser(spec) => (
+                "browser".to_string(),
+                spec.line_number,
+                spec.when.as_deref(),
+                spec.skip_if.as_deref(),
+                spec.skip_execution,
+                format!("browser slice ({} verbs)", spec.verbs.len()),
+            ),
+            _ => continue,
+        };
+
+        let step_id = steps
+            .get(block_idx)
+            .map(|s| s.id.as_str().to_string())
+            .unwrap_or_default();
+        let policy = step_policy_for(resolved_step_policies, block_idx);
+
+        // Skip precedence mirrors the run loop: selection > no-run > conditional.
+        let status = if !block_selected(&selection_range, &selection_tags, block_idx) {
+            "skip (selection)".to_string()
+        } else if no_run {
+            "skip (no-run)".to_string()
+        } else if let Some(d) = conditional_skip_decision(when, skip_if, &env) {
+            format!("skip ({})", d.reason)
+        } else {
+            "run".to_string()
+        };
+
+        let mut policy_bits = Vec::new();
+        if let Some(t) = policy.timeout_secs {
+            policy_bits.push(format!("timeout={t}s"));
+        }
+        if policy.retries > 0 {
+            policy_bits.push(format!("retries={}", policy.retries));
+        }
+        if policy.continue_on_error {
+            policy_bits.push("continue_on_error".to_string());
+        }
+        let policy_str = if policy_bits.is_empty() {
+            String::new()
+        } else {
+            format!(" [{}]", policy_bits.join(" "))
+        };
+
+        if status == "run" {
+            will_run += 1;
+            println!(
+                "  {} [{}] {} (L{}) {} → {}{}",
+                output::style_ok("run "),
+                block_idx + 1,
+                lang,
+                line,
+                style_step_id(&step_id),
+                detail,
+                policy_str
+            );
+        } else {
+            will_skip += 1;
+            println!(
+                "  {} [{}] {} (L{}) {} — {}",
+                output::style_dim("skip"),
+                block_idx + 1,
+                lang,
+                line,
+                style_step_id(&step_id),
+                status
+            );
+        }
+        block_idx += 1;
+    }
+
+    println!(
+        "\nplan: {} block(s) — {} would run, {} skipped",
+        block_count, will_run, will_skip
+    );
+}
+
+/// Dim a step id for plan output.
+fn style_step_id(id: &str) -> String {
+    output::style_dim(&format!("#{id}"))
 }
 
 /// State pulled out of a run's checkpoint before the execution loop starts.
@@ -2782,11 +3006,10 @@ fn run_single(cfg: RunConfig) {
         std::process::exit(exit_codes::EXIT_USAGE);
     }
 
-    maybe_reenter_sandbox(&workbook, &cfg);
-
     // Resolve declared typed parameters against the CLI inputs. A bad value,
     // unknown param/profile, or a missing required param is a usage error
-    // before any block runs.
+    // before any block runs. Done before sandbox re-entry so --dry-run and
+    // param errors surface on the host, not inside a container.
     let resolved_params = match params::resolve(
         workbook.frontmatter.params.as_ref(),
         workbook.frontmatter.profiles.as_ref(),
@@ -2801,6 +3024,22 @@ fn run_single(cfg: RunConfig) {
         }
     };
     let param_hash = resolved_params.hash.clone();
+
+    // --dry-run: print the resolved execution plan and exit without running
+    // anything (no sandbox, no secrets, no setup, no blocks).
+    if cfg.dry_run {
+        dry_run_preview(
+            &workbook,
+            &steps,
+            &resolved_step_policies,
+            &resolved_params,
+            &cfg,
+            block_count,
+        );
+        return;
+    }
+
+    maybe_reenter_sandbox(&workbook, &cfg);
 
     let mut ctx = build_execution_context(&workbook, &cfg, &resolved_params);
 
@@ -2834,6 +3073,7 @@ fn run_single(cfg: RunConfig) {
         param_inputs: _,
         param_file: _,
         profile: _,
+        dry_run: _,
     } = cfg;
     let file = file.as_str();
     // Resolve the run-wide default block timeout once. Precedence:
@@ -2865,13 +3105,20 @@ fn run_single(cfg: RunConfig) {
             std::process::exit(exit_codes::EXIT_USAGE);
         }
     };
+    let selection_tags = match resolve_tag_set(&selection, &steps) {
+        Ok(set) => set,
+        Err(e) => {
+            eprintln!("error: {}", e);
+            std::process::exit(exit_codes::EXIT_USAGE);
+        }
+    };
     // "User opted into selection" — independent of whether the resolved
     // range happens to equal 0..block_count (e.g. `--only` of a one-block
     // workbook). That's what controls checkpoint conflict + suppression.
     let selection_active = !selection.is_empty();
     if selection_active && checkpoint_id.is_some() {
         eprintln!(
-            "error: --only/--from/--until cannot be combined with --checkpoint yet. \
+            "error: --only/--from/--until/--tag cannot be combined with --checkpoint yet. \
              Selective-run checkpoint semantics aren't defined (which 'completed' do we \
              track when most blocks are intentionally skipped?). Drop --checkpoint to run \
              ephemerally, or remove the selection flags to resume normally."
@@ -2880,11 +3127,7 @@ fn run_single(cfg: RunConfig) {
     }
     let effective_checkpoint_id = if selection_active {
         if !quiet {
-            eprintln!(
-                "wb: selective run — checkpointing disabled (steps {}..{})",
-                selection_range.start + 1,
-                selection_range.end
-            );
+            eprintln!("wb: selective run — checkpointing disabled");
         }
         None
     } else {
@@ -3277,7 +3520,7 @@ fn run_single(cfg: RunConfig) {
             }
 
             let block_heading = last_heading.take();
-            let live_skip = if !selection_range.contains(&block_idx) {
+            let live_skip = if !block_selected(&selection_range, &selection_tags, block_idx) {
                 Some(selection_skip_decision())
             } else if block.skip_execution {
                 Some(no_run_skip_decision())
@@ -3603,7 +3846,7 @@ fn run_single(cfg: RunConfig) {
             }
 
             let block_heading = last_heading.take();
-            let live_skip = if !selection_range.contains(&block_idx) {
+            let live_skip = if !block_selected(&selection_range, &selection_tags, block_idx) {
                 Some(selection_skip_decision())
             } else if spec.skip_execution {
                 Some(no_run_skip_decision())
@@ -5311,6 +5554,7 @@ fn cmd_resume_cmd(cli: ResumeArgs) -> WbExit {
                 .collect(),
             param_file: None,
             profile: None,
+            dry_run: false,
         });
         return WbExit::Success;
     }
@@ -5561,6 +5805,7 @@ fn cmd_resume_cmd(cli: ResumeArgs) -> WbExit {
             .collect(),
         param_file: None,
         profile: None,
+        dry_run: false,
     });
     WbExit::Success
 }

@@ -145,31 +145,48 @@ won't collide in practice since position is part of the hash.
 
 See `examples/step-ids-demo.md`.
 
-### Selective runs: `--only`, `--from`, `--until`
+### Selective runs: `--only`, `--from`, `--until`, `--tag`
 
-Step ids are the substrate for picking a subset of a workbook to run:
+Step ids (and fence `.class` tags) are the substrate for picking a subset of a
+workbook to run:
 
 ```bash
 wb run deploy.md --only login              # just run the login block
 wb run deploy.md --from migrate            # start at migrate, run to end
 wb run deploy.md --until smoke-test        # stop after smoke-test
 wb run deploy.md --from migrate --until smoke-test   # bounded range
+wb run deploy.md --tag smoke               # only blocks tagged {.smoke}
+wb run deploy.md --tag smoke --tag db      # union of .smoke and .db blocks
 ```
 
-Each flag takes a step id — either explicit (`{#login}`) or auto-derived
-(`auto-<hash>`). Unknown ids fail with a usage error before any block runs.
-Skipped blocks emit `step.skipped` callbacks with `kind: "selection"` so
-agents see the gap.
+`--only`/`--from`/`--until` take a step id — either explicit (`{#login}`) or
+auto-derived (`auto-<hash>`). `--tag` takes a fence `.class` (repeatable; a
+block matches if it carries any of the given classes) and composes with
+`--from`/`--until` as an intersection. Unknown step ids, and tags that match no
+block, fail with a usage error before any block runs. Skipped blocks emit
+`step.skipped` callbacks with `kind: "selection"` so agents see the gap.
 
 Limits in this milestone:
 
-- `--only` conflicts with `--from`/`--until` (clap rejects at parse).
+- `--only` conflicts with `--from`/`--until`/`--tag` (clap rejects at parse).
 - Selection cannot be combined with `--checkpoint` — partial-run state
   semantics aren't defined yet (which "completed" do we track when most
   blocks are intentionally skipped?). Run ephemerally instead.
 - A selective run is *ephemeral*: it doesn't read or write the default
   checkpoint, so subsequent normal runs still see the previous state.
-- Tag-based selection (`--tag <class>`) and `--changed` are tracked in #33.
+- `--changed` and the source-hash cache (`--no-cache`) are tracked in #33.
+
+### Dry-run preview: `--dry-run`
+
+`wb run <file> --dry-run` resolves params, selection, conditionals, and per-step
+policy, then prints the execution plan — each block marked `run`/`skip` with the
+reason (selection, `no-run`, `when=`/`skip_if=`) and the resolved command — and
+exits without running anything. It does **not** resolve secrets or run setup, so
+conditionals are evaluated against frontmatter env + vars + params only.
+
+```bash
+wb run deploy.md --dry-run --profile prod
+```
 
 ## Conditional cells: `{when=…}` and `{skip_if=…}`
 
@@ -407,6 +424,8 @@ wb run file.md --default-block-timeout 30m  # Opt-in default cap for every block
 wb run file.md --param region=us-east-1     # Set a declared typed parameter
 wb run file.md --profile prod               # Apply a named parameter profile
 wb run file.md --param-file values.yaml     # Load params from a YAML mapping
+wb run file.md --tag smoke                  # Run only blocks with the .smoke fence class
+wb run file.md --dry-run                    # Print the execution plan without running
 wb test file.md                       # Run + evaluate expect/assert fences (CI exit codes)
 wb test some/ --format json           # Test every *.md in a folder, machine-readable
 wb inspect file.md                    # Show structure without running

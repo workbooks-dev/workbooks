@@ -265,3 +265,54 @@ fn test_command_json_shape() {
     assert!(v["files"].is_array());
     std::fs::remove_dir_all(md.parent().unwrap()).ok();
 }
+
+#[test]
+fn dry_run_previews_without_executing() {
+    let md = write_temp_md(
+        "dryrun",
+        "---\nruntime: bash\n---\n```bash\necho SHOULD_NOT_RUN\n```\n",
+    );
+    let out = Command::new(wb_binary())
+        .args([md.to_str().unwrap(), "--dry-run"])
+        .output()
+        .expect("spawn wb");
+    assert_eq!(out.status.code(), Some(0));
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("dry run:"), "missing plan header: {stdout}");
+    assert!(
+        stdout.contains("would run"),
+        "missing plan summary: {stdout}"
+    );
+    // The block must NOT have executed.
+    assert!(
+        !stdout.contains("SHOULD_NOT_RUN"),
+        "dry run must not execute blocks: {stdout}"
+    );
+    std::fs::remove_dir_all(md.parent().unwrap()).ok();
+}
+
+#[test]
+fn tag_selection_runs_only_tagged_blocks() {
+    let md = write_temp_md(
+        "tagsel",
+        "---\nruntime: bash\n---\n```bash {.a}\necho AAA\n```\n```bash {.b}\necho BBB\n```\n",
+    );
+    let out = Command::new(wb_binary())
+        .args([md.to_str().unwrap(), "--tag", "a"])
+        .output()
+        .expect("spawn wb");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("AAA"), "tagged block should run: {stdout}");
+    assert!(
+        !stdout.contains("BBB"),
+        "untagged block should be skipped: {stdout}"
+    );
+
+    // Unknown tag is a usage error.
+    let out = Command::new(wb_binary())
+        .args([md.to_str().unwrap(), "--tag", "ghost"])
+        .output()
+        .expect("spawn wb");
+    assert_eq!(out.status.code(), Some(2), "unknown tag should exit 2");
+    std::fs::remove_dir_all(md.parent().unwrap()).ok();
+}

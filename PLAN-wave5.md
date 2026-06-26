@@ -85,6 +85,27 @@ TODO.md; runnable `examples/params-demo.md` + `examples/test-demo.md`.
 - `src/validate.rs` (`check_params`, `check_expects`, strict-schema keys)
 - `src/diagnostic.rs` (code registry), `src/output.rs` (`Section::Expect` arms)
 
+## 2b. Follow-on increment — selection + dry-run
+
+Two more self-contained, in-repo capabilities folded into the same PR:
+
+- **`--tag <class>` selection (#33)** — runs only blocks whose step carries a
+  matching fence `.class`. `resolve_tag_set` builds the index set; a new
+  `block_selected(range, tags, idx)` ANDs the tag set with the existing
+  `--from`/`--until` range (so they compose). Repeatable (union of tags),
+  conflicts with `--only` at the clap layer, and a tag matching no block is a
+  usage error. The source-hash cache (`--changed`/`--no-cache`, #18) is still
+  open.
+- **`wb run --dry-run` (#37)** — `dry_run_preview` resolves params, selection,
+  conditionals, and per-step policy and prints each block as run/skip (with the
+  reason + resolved command), then exits. No sandbox, no secrets, no setup, no
+  block execution. Conditionals are evaluated against frontmatter env + vars +
+  params only.
+
+Both covered by new `cli_smoke.rs` integration tests (15 total in that file).
+Signed/trusted workbooks, sandbox-by-default, and allowlists (#37 remainder) and
+the cache (#18/#33) remain future waves.
+
 ## 5. Deferred (next steps)
 
 - #18/#33 source-hash execution cache (param hash is ready to feed cache keys).
