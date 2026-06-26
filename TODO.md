@@ -100,3 +100,25 @@ These were the longer-form Xatabase run-page specs. F1–F6 shipped across v0.11
 ## Notes
 
 - `features-request.md` at repo root holds longer-form specs for fence-flags and browser recording — keep as canonical reference, this file is the checklist.
+
+---
+
+## 🚀 Strategic 10–100x bets (Wave 5+)
+
+Order-of-magnitude *reach* bets, distinct from the incremental roadmap above.
+Full write-up in `docs/enhancement-ideas.md`; dependency-ordered implementation
+plan in `PLAN-wave5-bets.md`; copy-paste session goals in `IDEA_GOALS.md`.
+Thesis: wb already built the rare durable-execution engine — the multiplier is
+plugging it into the agent ecosystem (MCP), a sharing network (registry), and a
+wider set of jobs (docs-tests, sql/http, capture), with trust (#37) as the gate.
+
+- [x] **39. `wb mcp` — Model Context Protocol server.** Shipped (Wave 5, Phase A). New `Command::Mcp` + `src/mcp.rs`: a JSON-RPC 2.0 server over newline-delimited stdio implementing `initialize`/`notifications/initialized`/`tools/list`/`tools/call`/`ping`. Tools: `author_workbook`, `run_workbook`, `resume_workbook`, `inspect_workbook`, `validate_workbook`, `list_pending`, `get_run_events`. Thin adapter by design — shells out to the same `wb` binary (`current_exe`) for run/inspect/validate/resume/pending (so `run_single`'s `process::exit`-on-pause becomes a mappable exit code instead of killing the server) and reads checkpoint+pending in-process (read-only) for `get_run_events`. State mapping: checkpoint+pending = the Task store (`run_id` = checkpoint id); `pause_for_human`/`wait` → `status:"input_required"` + an `elicitation` object (message + `requestedSchema`, one property per bound var) that the client satisfies via `resume_workbook`; task status rides on the child exit code (0→completed, 42→input_required, 1→failed, 7→timeout, …). Zero new deps (`serde_json` only). End-to-end author→run→pause→resume→read verified in `tests/mcp_e2e.rs`; unit coverage in `src/mcp.rs`. Hosted HTTP/SSE transport + a true server-initiated `elicitation/create` round-trip are deferred (the CLI subprocess model can't hold a call open mid-pause).
+- [ ] **40. Trust + registry / remote execution.** `wb run gh:org/repo/x.md`, signing, trust store, workbooks.dev gallery. **Gated on #37.** Network-effect engine; the atoms/flows/tasks taxonomy is already a package model.
+- [ ] **41. `wb capture` — record a session → emit a workbook.** Shell PTY + browser-recording reuse; MANIFEST.md-compatible output. Collapses authoring cost, feeds the registry.
+- [ ] **42. `wb run --repair` — self-healing runs.** Hand a failed block to an agent endpoint, apply structured `{rerun|patch|skip|abort}`. **Gated on #37.** Makes unattended VPS operation real.
+- [ ] **43. Docs-as-tests + GitHub Action.** `wb verify README.md` over ordinary docs; ship `workbooks/verify-action`. Builds on #31. Broadest low-risk top-of-funnel — a different audience (every maintainer).
+- [ ] **44. `wb watch` / hosted run pages.** Generalize the bespoke run page: local TUI/web viewer (#35) first, shareable hosted run links later. Events already standardized.
+- [ ] **45. Native `sql` + `http` runtimes.** Declarative DB queries + REST calls as first-class blocks with structured outputs. Tension with zero-dep identity → feature-gated `wb-full` build. **Gated on #37** for the sandbox piece.
+- [ ] **46. Content-addressed execution cache.** = #18, reframed as a build-tool capability (inputs/outputs graph). Depends on #30 params.
+- [ ] **47. Reproducibility — `wb.lock` + signed run attestations.** Verifiable run receipts; unlocks audited/compliance ops.
+- [ ] **48. `wb-core` crate + WASM target.** Embeddable parser/executor; client-side preview on workbooks.dev. Makes the *format* a platform.
