@@ -382,3 +382,55 @@ fn artifacts_manifest_list_and_open() {
     ))
     .ok();
 }
+
+#[test]
+fn cache_skips_unchanged_blocks() {
+    let dir = std::env::temp_dir().join(format!("wb-cache-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let md = dir.join("c.md");
+    std::fs::write(
+        &md,
+        "---\nruntime: bash\n---\n```bash\necho CACHE_ME\n```\n",
+    )
+    .unwrap();
+    let cache_id = format!("wb-test-cache-{}", std::process::id());
+    let cache_file = format!(
+        "{}/.wb/cache/{}.json",
+        std::env::var("HOME").unwrap(),
+        cache_id
+    );
+    std::fs::remove_file(&cache_file).ok();
+
+    // First run executes the block.
+    let first = Command::new(wb_binary())
+        .args([md.to_str().unwrap(), "--cache", &cache_id])
+        .output()
+        .expect("spawn wb");
+    assert!(String::from_utf8_lossy(&first.stdout).contains("CACHE_ME"));
+
+    // Second run skips it (cached); the output is no longer produced.
+    let second = Command::new(wb_binary())
+        .args([md.to_str().unwrap(), "--cache", &cache_id])
+        .output()
+        .expect("spawn wb");
+    let out2 = format!(
+        "{}{}",
+        String::from_utf8_lossy(&second.stdout),
+        String::from_utf8_lossy(&second.stderr)
+    );
+    assert!(
+        !out2.contains("CACHE_ME"),
+        "cached block should be skipped: {out2}"
+    );
+    assert!(out2.contains("skipped"), "should report a skip: {out2}");
+
+    // --no-cache forces re-execution.
+    let third = Command::new(wb_binary())
+        .args([md.to_str().unwrap(), "--cache", &cache_id, "--no-cache"])
+        .output()
+        .expect("spawn wb");
+    assert!(String::from_utf8_lossy(&third.stdout).contains("CACHE_ME"));
+
+    std::fs::remove_dir_all(&dir).ok();
+    std::fs::remove_file(&cache_file).ok();
+}

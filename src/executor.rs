@@ -371,6 +371,7 @@ impl Session {
                     silent: false,
                     when: None,
                     skip_if: None,
+                    no_cache: false,
                     attrs: Default::default(),
                 };
                 let saved_quiet = self.ctx.quiet;
@@ -388,6 +389,7 @@ impl Session {
                 silent: false,
                 when: None,
                 skip_if: None,
+                no_cache: false,
                 attrs: Default::default(),
             };
             let saved_quiet = self.ctx.quiet;
@@ -404,6 +406,7 @@ impl Session {
                 silent: false,
                 when: None,
                 skip_if: None,
+                no_cache: false,
                 attrs: Default::default(),
             };
             let saved_quiet = self.ctx.quiet;
@@ -420,6 +423,7 @@ impl Session {
                 silent: false,
                 when: None,
                 skip_if: None,
+                no_cache: false,
                 attrs: Default::default(),
             };
             let saved_quiet = self.ctx.quiet;
@@ -1252,6 +1256,7 @@ mod tests {
             silent: false,
             when: None,
             skip_if: None,
+            no_cache: false,
             attrs: Default::default(),
         }
     }

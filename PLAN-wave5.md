@@ -118,6 +118,19 @@ the cache (#18/#33) remain future waves.
   manifest-less runs fall back to a directory scan. `--format json` on the read
   commands. Covered by a new `cli_smoke.rs` integration test.
 
+## 2d. Follow-on increment — source-hash cache (#18, core)
+
+- New `src/cache.rs`: `CacheStore` persisted at `~/.wb/cache/<id>.json`,
+  `cache_key(language, body, param_hash)` (sha256, 16 hex). `--cache <id>`
+  enables it; `--no-cache` disables; the `{no-cache}` fence flag opts a block
+  out. In the live run loop, a block whose key matches a prior **success** is
+  skipped (`step.skipped` kind `cache`); every executed block records its
+  outcome, and the store is saved at run end.
+- Limitation (documented): a cached block is skipped, not replayed (no output
+  reproduction); env/secret identity, included-file hashes, and runtime
+  versions are not yet in the key. Covered by `cache.rs` unit tests + a
+  `cli_smoke.rs` integration test.
+
 ## 5. Deferred (next steps)
 
 - #18/#33 source-hash execution cache (param hash is ready to feed cache keys).

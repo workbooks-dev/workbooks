@@ -538,7 +538,7 @@ fn check_fence_attrs(wb: &Workbook, path: &Path, out: &mut Vec<Diagnostic>) {
                     format!("block at L{line}: unknown fence flag `{flag}`"),
                 )
                 .with_span(Span::point(line, 1))
-                .with_help("known flags: no-run, silent, continue_on_error"),
+                .with_help("known flags: no-run, silent, no-cache, continue_on_error"),
             );
         }
     }

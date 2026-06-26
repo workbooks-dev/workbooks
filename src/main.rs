@@ -1,6 +1,7 @@
 mod artifacts;
 mod assertion;
 mod atomic_io;
+mod cache;
 mod callback;
 mod checkpoint;
 mod config;
@@ -289,6 +290,16 @@ fn selection_skip_decision() -> SkipDecision {
     }
 }
 
+/// Skip decision produced when `--cache` has a successful entry for this block's
+/// source + params (#18). Same `step.skipped` shape as the other skip kinds.
+fn cache_skip_decision() -> SkipDecision {
+    SkipDecision {
+        kind: "cache".to_string(),
+        expression: None,
+        reason: "unchanged source + params since a cached success".to_string(),
+    }
+}
+
 /// Skip decision produced when an operator `goto_step` jumps the cursor past
 /// an executable step. Same `step.skipped` shape as the other skip kinds.
 fn goto_skip_decision() -> SkipDecision {
@@ -502,6 +513,13 @@ struct RunArgs {
     /// resolve secrets or run setup.
     #[arg(long = "dry-run")]
     dry_run: bool,
+    /// Enable the source-hash execution cache under this id (`~/.wb/cache/<id>`):
+    /// skip blocks whose source + params are unchanged since a prior success.
+    #[arg(long = "cache", value_name = "ID")]
+    cache: Option<String>,
+    /// Disable the cache for this run even if `--cache` is given.
+    #[arg(long = "no-cache")]
+    no_cache: bool,
 }
 
 #[derive(clap::Args)]
@@ -884,6 +902,10 @@ struct BareRunArgs {
     profile: Option<String>,
     #[arg(long = "dry-run")]
     dry_run: bool,
+    #[arg(long = "cache", value_name = "ID")]
+    cache: Option<String>,
+    #[arg(long = "no-cache")]
+    no_cache: bool,
 }
 
 #[derive(Parser)]
@@ -985,6 +1007,8 @@ fn main() -> std::process::ExitCode {
                     param_file: bare.param_file,
                     profile: bare.profile,
                     dry_run: bare.dry_run,
+                    cache: bare.cache,
+                    no_cache: bare.no_cache,
                 })
             }
         }
@@ -1093,6 +1117,7 @@ fn cmd_run(args: RunArgs) -> WbExit {
             param_file: args.param_file,
             profile: args.profile,
             dry_run: args.dry_run,
+            cache_id: if args.no_cache { None } else { args.cache },
         });
     }
     WbExit::Success
@@ -2363,6 +2388,9 @@ struct RunConfig {
     /// `--dry-run`: print the resolved execution plan and exit without running
     /// any block (no sandbox, no secrets, no setup).
     dry_run: bool,
+    /// Resolved cache id (`Some` only when `--cache <id>` is set and `--no-cache`
+    /// is not). Enables the source-hash execution cache (#18).
+    cache_id: Option<String>,
 }
 
 /// CLI-side selection inputs before resolution. Names mirror the flag
@@ -3362,6 +3390,7 @@ fn run_single(cfg: RunConfig) {
         param_file: _,
         profile: _,
         dry_run: _,
+        cache_id,
     } = cfg;
     let file = file.as_str();
     // Resolve the run-wide default block timeout once. Precedence:
@@ -3457,6 +3486,12 @@ fn run_single(cfg: RunConfig) {
     let start = Instant::now();
     let mut block_idx = 0;
     let mut session = executor::Session::new(ctx);
+
+    // Source-hash execution cache (#18): load the store when `--cache <id>` is
+    // active. A block whose (language, body, param) key matches a prior success
+    // is skipped; new successes are recorded and the store is saved at run end.
+    let mut cache_store = cache_id.as_ref().map(|id| cache::CacheStore::load(id));
+    let cache_now = chrono::Utc::now().to_rfc3339();
 
     if !quiet {
         let title = workbook.frontmatter.title.as_deref().unwrap_or(file);
@@ -3819,6 +3854,16 @@ fn run_single(cfg: RunConfig) {
                     &parser::resolved_env(session.env()),
                 )
             };
+            // Cache skip (#18): if nothing else skipped this block and `--cache`
+            // has a successful entry for its source+params, skip it.
+            let live_skip = live_skip.or_else(|| {
+                let store = cache_store.as_ref()?;
+                if block.no_cache {
+                    return None;
+                }
+                let key = cache::cache_key(&block.language, &block.code, param_hash.as_deref());
+                store.is_cached_success(&key).then(cache_skip_decision)
+            });
             if let Some(skip) = live_skip {
                 if !quiet {
                     let label = if skip.kind == "no_run" {
@@ -3895,6 +3940,14 @@ fn run_single(cfg: RunConfig) {
                 effective_default_source,
                 quiet,
             );
+            // Record this block's outcome in the source-hash cache (#18) so a
+            // future `--cache` run can skip it when unchanged.
+            if let Some(ref mut store) = cache_store {
+                if !block.no_cache {
+                    let key = cache::cache_key(&block.language, &block.code, param_hash.as_deref());
+                    store.record(key, result.success(), result.exit_code, &cache_now);
+                }
+            }
             let current_outputs = capture_outputs_for_result(&mut result, policy.continue_on_error);
             if !current_outputs.is_empty() {
                 let key = step_key(step_id, block_idx);
@@ -4432,6 +4485,14 @@ fn run_single(cfg: RunConfig) {
     let total_duration = start.elapsed();
     let passed = results.iter().filter(|r| r.success()).count();
     let failed = results.iter().filter(|r| !r.success()).count();
+
+    // Persist the source-hash cache (#18) so the next `--cache` run can skip
+    // unchanged successful blocks.
+    if let (Some(id), Some(store)) = (&cache_id, &cache_store) {
+        if let Err(e) = store.save(id) {
+            log_warn!("warning: could not save cache '{}': {}", id, e);
+        }
+    }
 
     // Callback: run complete
     if let Some(ref cb) = cb {
@@ -5845,6 +5906,7 @@ fn cmd_resume_cmd(cli: ResumeArgs) -> WbExit {
             param_file: None,
             profile: None,
             dry_run: false,
+            cache_id: None,
         });
         return WbExit::Success;
     }
@@ -6096,6 +6158,7 @@ fn cmd_resume_cmd(cli: ResumeArgs) -> WbExit {
         param_file: None,
         profile: None,
         dry_run: false,
+        cache_id: None,
     });
     WbExit::Success
 }
@@ -6914,6 +6977,7 @@ echo "pin=$pin"
             silent: false,
             when: None,
             skip_if: None,
+            no_cache: false,
             attrs: Default::default(),
         }
     }

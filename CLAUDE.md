@@ -177,6 +177,29 @@ Limits in this milestone:
   checkpoint, so subsequent normal runs still see the previous state.
 - `--changed` and the source-hash cache (`--no-cache`) are tracked in #33.
 
+### Source-hash execution cache: `--cache`
+
+`wb run <file> --cache <id>` enables a per-id cache at `~/.wb/cache/<id>.json`.
+A block is **skipped** on re-run when its source + parameter identity is
+byte-identical to a previously *successful* run under that id — the "skip
+unchanged blocks" memoization that makes iterative agent re-runs fast.
+
+```bash
+wb run pipeline.md --cache pipe       # first run executes + records
+wb run pipeline.md --cache pipe       # unchanged blocks are skipped
+wb run pipeline.md --cache pipe --no-cache   # force a full run
+```
+
+- **Cache key** = sha256(language + body + param hash). Editing a block, or
+  changing `--param`/`--profile`, invalidates just that block's entry.
+- A cached block is *skipped*, not replayed — its stdout/outputs are not
+  reproduced. Use the cache for **idempotent** pipelines.
+- A side-effecting block opts out with the `{no-cache}` fence flag so it always
+  runs. `--no-cache` disables caching for the whole run.
+- Skips emit `step.skipped` with `kind: "cache"`.
+- Not yet in the key (tracked under #18/#33): env/secret identity,
+  included-file hashes, runtime versions. Change the cache id when those change.
+
 ### Dry-run preview: `--dry-run`
 
 `wb run <file> --dry-run` resolves params, selection, conditionals, and per-step
@@ -427,6 +450,7 @@ wb run file.md --profile prod               # Apply a named parameter profile
 wb run file.md --param-file values.yaml     # Load params from a YAML mapping
 wb run file.md --tag smoke                  # Run only blocks with the .smoke fence class
 wb run file.md --dry-run                    # Print the execution plan without running
+wb run file.md --cache <id>                 # Skip unchanged blocks (source-hash cache)
 wb test file.md                       # Run + evaluate expect/assert fences (CI exit codes)
 wb test some/ --format json           # Test every *.md in a folder, machine-readable
 wb artifacts list --run <id>          # List a run's captured artifacts (manifest)

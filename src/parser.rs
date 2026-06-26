@@ -253,6 +253,9 @@ pub struct CodeBlock {
     /// if EXPR evaluates true. Composes with `when` via AND — a block runs when
     /// `when` is true *and* `skip_if` is false.
     pub skip_if: Option<String>,
+    /// `{no-cache}` info-string flag: exclude this block from `--cache` skipping
+    /// (for side-effecting blocks that must run every time).
+    pub no_cache: bool,
     /// Pandoc-style fence attributes: `{#id .class key=value}`. Drives stable
     /// step IDs (`#id`), classes/tags, and per-block policy (`timeout=`,
     /// `retries=`, `continue_on_error`). See `crate::step_ir`.
@@ -750,6 +753,8 @@ struct InfoString {
     when: Option<String>,
     /// `skip_if=EXPR` — skip if EXPR is truthy at runtime.
     skip_if: Option<String>,
+    /// `no-cache` — exclude this block from `--cache` skipping.
+    no_cache: bool,
     /// `#id`, `.class`, and `key=value` attrs.
     attrs: FenceAttrs,
 }
@@ -798,6 +803,7 @@ fn parse_info_string(info: &str) -> InfoString {
                 match flag {
                     "no-run" => out.skip_execution = true,
                     "silent" => out.silent = true,
+                    "no-cache" => out.no_cache = true,
                     "continue_on_error" => {
                         out.attrs
                             .kv
@@ -1081,6 +1087,7 @@ fn extract_sections(body: &str) -> Vec<Section> {
                 silent: info.silent,
                 when: info.when,
                 skip_if: info.skip_if,
+                no_cache: info.no_cache,
                 attrs: info.attrs,
             }));
         } else {
