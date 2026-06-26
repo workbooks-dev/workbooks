@@ -540,6 +540,13 @@ struct RunArgs {
     /// an *enforceable* policy gate (wb dispatches by language). (#37)
     #[arg(long = "allow-runtime", value_name = "LANG")]
     allow_runtime: Vec<String>,
+    /// Run inside a Docker container for OS isolation even when the workbook has
+    /// no `requires:` block (sandbox-by-default for untrusted code). (#37)
+    #[arg(long = "sandbox")]
+    sandbox: bool,
+    /// Launch the `--sandbox` container with `--network none` (no network).
+    #[arg(long = "sandbox-no-network")]
+    sandbox_no_network: bool,
     /// Refuse to run unless the workbook's input identity matches its lockfile
     /// (see `wb lock`). Detects drift in the runbook or its included files.
     #[arg(long = "locked")]
@@ -1103,6 +1110,10 @@ struct BareRunArgs {
     pubkey: Option<String>,
     #[arg(long = "allow-runtime", value_name = "LANG")]
     allow_runtime: Vec<String>,
+    #[arg(long = "sandbox")]
+    sandbox: bool,
+    #[arg(long = "sandbox-no-network")]
+    sandbox_no_network: bool,
     #[arg(long = "locked")]
     locked: bool,
     #[arg(long = "lockfile", value_name = "PATH")]
@@ -1234,6 +1245,8 @@ pub fn run() -> std::process::ExitCode {
                     verify_sig: bare.verify_sig,
                     pubkey: bare.pubkey,
                     allow_runtime: bare.allow_runtime,
+                    sandbox: bare.sandbox,
+                    sandbox_no_network: bare.sandbox_no_network,
                     locked: bare.locked,
                     lockfile: bare.lockfile,
                     repair: bare.repair,
@@ -1613,6 +1626,8 @@ fn cmd_run_inner(args: RunArgs, remote_forced_trust: bool) -> WbExit {
             repair_url: args.repair,
             repair_max: args.repair_max,
             events_path: args.events,
+            sandbox: args.sandbox,
+            sandbox_no_network: args.sandbox_no_network,
         });
     }
     WbExit::Success
@@ -3279,30 +3294,31 @@ fn run_single_collect(
             }
 
             let start = Instant::now();
-            let exit_code = match sandbox::run_in_sandbox(&tag, file, &container_env, &extra_args) {
-                Ok(code) => code,
-                Err(e) => {
-                    return output::RunSummary {
-                        source_file: file.to_string(),
-                        run_id: run_id.clone(),
-                        total_blocks: block_count,
-                        passed: 0,
-                        failed: 1,
-                        total_duration: std::time::Duration::ZERO,
-                        results: vec![executor::BlockResult {
-                            block_index: 0,
-                            language: "sandbox".to_string(),
-                            stdout: String::new(),
-                            stderr: format!("sandbox run: {}", e),
-                            exit_code: 1,
-                            duration: std::time::Duration::ZERO,
-                            error_type: Some("sandbox_failed".to_string()),
-                            stdout_partial: false,
-                            stderr_partial: false,
-                        }],
-                    };
-                }
-            };
+            let exit_code =
+                match sandbox::run_in_sandbox(&tag, file, &container_env, &extra_args, false) {
+                    Ok(code) => code,
+                    Err(e) => {
+                        return output::RunSummary {
+                            source_file: file.to_string(),
+                            run_id: run_id.clone(),
+                            total_blocks: block_count,
+                            passed: 0,
+                            failed: 1,
+                            total_duration: std::time::Duration::ZERO,
+                            results: vec![executor::BlockResult {
+                                block_index: 0,
+                                language: "sandbox".to_string(),
+                                stdout: String::new(),
+                                stderr: format!("sandbox run: {}", e),
+                                exit_code: 1,
+                                duration: std::time::Duration::ZERO,
+                                error_type: Some("sandbox_failed".to_string()),
+                                stdout_partial: false,
+                                stderr_partial: false,
+                            }],
+                        };
+                    }
+                };
 
             return output::RunSummary {
                 source_file: file.to_string(),
@@ -3681,6 +3697,12 @@ struct RunConfig {
     repair_max: u32,
     /// `--events <file>`: append each callback event as a JSONL line (#44).
     events_path: Option<String>,
+    /// `--sandbox`: run in a `requires:`-style Docker container even when the
+    /// workbook declares no `requires:` (OS isolation for untrusted code, #37).
+    sandbox: bool,
+    /// `--sandbox-no-network`: launch the sandbox container with `--network
+    /// none` (an enforceable network allowlist).
+    sandbox_no_network: bool,
 }
 
 /// CLI-side selection inputs before resolution. Names mirror the flag
@@ -3821,13 +3843,42 @@ fn resolve_changed_set(
 /// a `wb` container, build the sandbox image and re-exec `wb` inside Docker.
 /// Exits the process directly on re-entry — returns normally only when no
 /// sandbox is needed (caller continues with in-process execution).
-fn maybe_reenter_sandbox(workbook: &parser::Workbook, cfg: &RunConfig) {
-    let Some(ref requires) = workbook.frontmatter.requires else {
-        return;
+/// A default `requires:` config synthesized for `--sandbox` when the workbook
+/// declares none — a plain container for the workbook's runtime (#37).
+fn default_sandbox_requires(workbook: &parser::Workbook) -> parser::RequiresConfig {
+    let runtime = workbook
+        .frontmatter
+        .runtime
+        .clone()
+        .unwrap_or_else(|| "python".to_string());
+    let sandbox = match runtime.as_str() {
+        "node" | "javascript" | "js" => "node",
+        _ => "python",
     };
+    parser::RequiresConfig {
+        sandbox: sandbox.to_string(),
+        apt: Vec::new(),
+        pip: Vec::new(),
+        node: Vec::new(),
+        dockerfile: None,
+    }
+}
+
+fn maybe_reenter_sandbox(workbook: &parser::Workbook, cfg: &RunConfig) {
     if std::env::var("WB_SANDBOX_INNER").ok().as_deref() == Some("1") {
         return;
     }
+    // Declared `requires:`, or a synthesized container when `--sandbox` forces
+    // isolation for a workbook that declares none.
+    let synthesized;
+    let requires = match workbook.frontmatter.requires.as_ref() {
+        Some(r) => r,
+        None if cfg.sandbox => {
+            synthesized = default_sandbox_requires(workbook);
+            &synthesized
+        }
+        None => return,
+    };
 
     let file = cfg.file.as_str();
     let workbook_dir = std::path::Path::new(file)
@@ -3916,7 +3967,13 @@ fn maybe_reenter_sandbox(workbook: &parser::Workbook, cfg: &RunConfig) {
         }
     }
 
-    let exit_code = match sandbox::run_in_sandbox(&tag, file, &container_env, &extra_args) {
+    let exit_code = match sandbox::run_in_sandbox(
+        &tag,
+        file,
+        &container_env,
+        &extra_args,
+        cfg.sandbox_no_network,
+    ) {
         Ok(code) => code,
         Err(e) => {
             eprintln!("error: sandbox run: {}", e);
@@ -4769,6 +4826,8 @@ fn run_single(cfg: RunConfig) {
         repair_url,
         repair_max,
         events_path,
+        sandbox: _,
+        sandbox_no_network: _,
     } = cfg;
     let file = file.as_str();
     // Resolve the run-wide default block timeout once. Precedence:
@@ -7405,6 +7464,8 @@ fn cmd_resume_cmd(cli: ResumeArgs) -> WbExit {
             repair_url: None,
             repair_max: 0,
             events_path: None,
+            sandbox: false,
+            sandbox_no_network: false,
         });
         return WbExit::Success;
     }
@@ -7660,6 +7721,8 @@ fn cmd_resume_cmd(cli: ResumeArgs) -> WbExit {
         repair_url: None,
         repair_max: 0,
         events_path: None,
+        sandbox: false,
+        sandbox_no_network: false,
     });
     WbExit::Success
 }
@@ -7708,6 +7771,17 @@ fn json_scalar_to_string(v: &serde_json::Value) -> Option<String> {
 mod tests {
     use super::*;
     use std::collections::HashMap;
+
+    #[test]
+    fn synthesized_sandbox_requires_picks_runtime() {
+        let node_wb = parser::parse("---\nruntime: node\n---\n```js\nx\n```\n");
+        assert_eq!(default_sandbox_requires(&node_wb).sandbox, "node");
+        let bash_wb = parser::parse("---\nruntime: bash\n---\n```bash\nx\n```\n");
+        // bash/unknown runtimes get a python base (has bash + a shell).
+        assert_eq!(default_sandbox_requires(&bash_wb).sandbox, "python");
+        let none_wb = parser::parse("```bash\nx\n```\n");
+        assert_eq!(default_sandbox_requires(&none_wb).sandbox, "python");
+    }
 
     #[test]
     fn remote_ref_resolution() {

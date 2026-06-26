@@ -526,6 +526,7 @@ wb keygen                             # Generate an ed25519 signing keypair
 wb sign file.md                       # Write a detached file.md.sig (ed25519)
 wb verify-sig file.md --pubkey <hex>  # Verify a workbook's signature
 wb run file.md --verify-sig --pubkey <hex>   # Refuse to run unless validly signed
+wb run file.md --sandbox [--sandbox-no-network]  # Run in a Docker container (OS isolation)
 wb lock file.md                       # Write file.md.lock (input identity, for reproducibility)
 wb run file.md --locked               # Refuse to run if the workbook drifted from its lockfile
 wb run file.md --repair <url>         # On a block failure, ask an endpoint: rerun/skip/abort
