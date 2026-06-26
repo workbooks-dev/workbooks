@@ -786,6 +786,13 @@ struct WatchArgs {
     /// Poll interval in seconds while watching.
     #[arg(long, default_value = "1")]
     interval: u64,
+    /// Serve a local web viewer instead of the terminal view (#35). Open the
+    /// printed http://127.0.0.1:<port>/ — it polls the run state as JSON.
+    #[arg(long)]
+    serve: bool,
+    /// Port for `--serve` (default 7878).
+    #[arg(long, default_value = "7878")]
+    port: u16,
     #[command(flatten)]
     fmt: FormatArg,
 }
@@ -2174,7 +2181,82 @@ fn cmd_trust(args: TrustArgs) -> WbExit {
 /// state (complete/failed) or `--once`/`--format json` requests a single
 /// snapshot. No new dependency — a clear-screen redraw over the existing,
 /// already-standardized checkpoint state.
+/// Minimal local web viewer for a checkpointed run (#35) — a dependency-free
+/// `std::net` HTTP server. `GET /` serves an HTML page that polls `GET /state`
+/// (the same JSON as `wb watch --format json`) and renders progress + results.
+/// Loopback-only; serves one request per connection.
+fn watch_serve(id: &str, port: u16) -> WbExit {
+    use std::io::{Read, Write};
+    let listener = match std::net::TcpListener::bind(("127.0.0.1", port)) {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("error: cannot bind 127.0.0.1:{port}: {e}");
+            return WbExit::Usage(format!("bind failed: {e}"));
+        }
+    };
+    eprintln!("wb: serving run viewer for '{id}' at http://127.0.0.1:{port}/  (Ctrl-C to stop)");
+
+    const PAGE: &str = r#"<!doctype html><html><head><meta charset=utf-8>
+<title>wb watch</title><style>
+body{font:14px/1.5 ui-monospace,Menlo,monospace;margin:2rem;color:#222}
+h1{font-size:1.1rem}.ok{color:#157f3b}.bad{color:#c0392b}.dim{color:#888}
+.bar{height:8px;background:#eee;border-radius:4px;overflow:hidden;margin:.5rem 0}
+.bar>div{height:100%;background:#157f3b}li{margin:.1rem 0}</style></head>
+<body><h1 id=t>wb watch</h1><div class=bar><div id=p style=width:0></div></div>
+<div id=s class=dim></div><ul id=r></ul>
+<script>
+async function tick(){try{let d=await (await fetch('/state')).json();
+document.getElementById('t').textContent='wb watch — '+d.checkpoint+' ['+d.status+']';
+let pct=d.total_blocks?Math.round(100*d.next_block/d.total_blocks):0;
+document.getElementById('p').style.width=pct+'%';
+document.getElementById('s').textContent=d.workbook+' — block '+d.next_block+'/'+d.total_blocks+'  ('+d.passed+' ok, '+d.failed+' failed, '+d.skipped+' skipped)';
+document.getElementById('r').innerHTML=(d.results||[]).map(r=>'<li><span class="'+(r.exit_code===0?'ok':'bad')+'">'+(r.exit_code===0?'✓':'✗')+'</span> ['+(r.block_index+1)+'] '+r.language+' <span class=dim>'+(r.heading||'')+'</span></li>').join('');
+}catch(e){document.getElementById('s').textContent='(run finished or no checkpoint)';}}
+tick();setInterval(tick,1000);
+</script></body></html>"#;
+
+    for stream in listener.incoming() {
+        let mut stream = match stream {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        let mut buf = [0u8; 1024];
+        let n = stream.read(&mut buf).unwrap_or(0);
+        let req = String::from_utf8_lossy(&buf[..n]);
+        let path = req
+            .split_whitespace()
+            .nth(1)
+            .unwrap_or("/")
+            .split('?')
+            .next()
+            .unwrap_or("/");
+        let (status, ctype, body) = if path == "/state" {
+            let snap = match checkpoint::load(id).ok().flatten() {
+                Some(ckpt) => {
+                    let pending = pending::load(id).ok().flatten();
+                    watch_snapshot_json(id, &ckpt, pending.as_ref()).to_string()
+                }
+                None => serde_json::json!({"checkpoint": id, "status": "gone"}).to_string(),
+            };
+            ("200 OK", "application/json", snap)
+        } else if path == "/" {
+            ("200 OK", "text/html; charset=utf-8", PAGE.to_string())
+        } else {
+            ("404 Not Found", "text/plain", "not found".to_string())
+        };
+        let resp = format!(
+            "HTTP/1.1 {status}\r\nContent-Type: {ctype}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        let _ = stream.write_all(resp.as_bytes());
+    }
+    WbExit::Success
+}
+
 fn cmd_watch(args: WatchArgs) -> WbExit {
+    if args.serve {
+        return watch_serve(&args.id, args.port);
+    }
     let json = match want_json(&args.fmt.format) {
         Ok(b) => b,
         Err(e) => return e,

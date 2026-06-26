@@ -514,7 +514,8 @@ wb artifacts open <name> --run <id>   # Print an artifact's absolute path
 wb artifacts export <name> --to <dst> # Copy an artifact out of the run dir
 wb runs list                          # List known runs (newest first)
 wb runs show <id>                     # Show a run's artifacts + checkpoint state
-wb watch <checkpoint-id>              # Live local viewer for a checkpointed run
+wb watch <checkpoint-id>              # Live local viewer (terminal)
+wb watch <id> --serve                # Local web viewer at http://127.0.0.1:7878/
 wb run file.md --events run.jsonl     # Append each run event as a JSONL line (local stream)
 wb capture --assert -o run.md         # Command sequence (stdin) → workbook
 wb capture -i -o run.md               # Interactive REPL session recorder → workbook
