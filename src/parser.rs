@@ -1223,6 +1223,9 @@ fn is_executable_language(lang: &str) -> bool {
             | "lua"
             | "swift"
             | "go"
+            // `http` is a native runtime (REST calls via curl); executed by
+            // the executor's `execute_http` path, not a language subprocess.
+            | "http"
     )
 }
 

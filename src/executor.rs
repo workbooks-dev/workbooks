@@ -133,6 +133,106 @@ pub fn substitute_vars(code: &str, vars: &HashMap<String, String>) -> String {
     result
 }
 
+/// A parsed `http` request (#45).
+#[derive(Debug, PartialEq, Eq)]
+pub struct HttpRequest {
+    pub method: String,
+    pub url: String,
+    pub headers: Vec<(String, String)>,
+    pub body: Option<String>,
+}
+
+/// Substitute `$VAR` and `${VAR}` from `env`. Unknown vars expand to empty,
+/// matching shell behavior. `$$` is a literal `$`.
+pub fn substitute_env_dollar(input: &str, env: &HashMap<String, String>) -> String {
+    let bytes = input.as_bytes();
+    let mut out = String::with_capacity(input.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'$' && i + 1 < bytes.len() {
+            if bytes[i + 1] == b'$' {
+                out.push('$');
+                i += 2;
+                continue;
+            }
+            if bytes[i + 1] == b'{' {
+                if let Some(end) = input[i + 2..].find('}') {
+                    let name = &input[i + 2..i + 2 + end];
+                    out.push_str(env.get(name).map(|s| s.as_str()).unwrap_or(""));
+                    i = i + 2 + end + 1;
+                    continue;
+                }
+            }
+            // Bare $NAME (alnum + underscore).
+            let mut j = i + 1;
+            while j < bytes.len() && (bytes[j].is_ascii_alphanumeric() || bytes[j] == b'_') {
+                j += 1;
+            }
+            if j > i + 1 {
+                let name = &input[i + 1..j];
+                out.push_str(env.get(name).map(|s| s.as_str()).unwrap_or(""));
+                i = j;
+                continue;
+            }
+        }
+        out.push(bytes[i] as char);
+        i += 1;
+    }
+    out
+}
+
+/// Parse an `http` fence body into a request. Lines starting with `#` and blank
+/// lines before the request line are ignored.
+pub fn parse_http_request(body: &str) -> Result<HttpRequest, String> {
+    let mut lines = body.lines().peekable();
+    // First meaningful line: `METHOD URL` or just `URL` (defaults to GET).
+    let request_line = loop {
+        match lines.next() {
+            Some(l) if l.trim().is_empty() || l.trim_start().starts_with('#') => continue,
+            Some(l) => break l.trim().to_string(),
+            None => return Err("empty request (expected `METHOD URL`)".to_string()),
+        }
+    };
+    let (method, url) = match request_line.split_once(char::is_whitespace) {
+        Some((m, u)) if !u.trim().is_empty() => (m.to_uppercase(), u.trim().to_string()),
+        _ => ("GET".to_string(), request_line),
+    };
+    if url.is_empty() {
+        return Err("missing URL".to_string());
+    }
+
+    let mut headers = Vec::new();
+    // Header lines until a blank line.
+    for line in lines.by_ref() {
+        if line.trim().is_empty() {
+            break;
+        }
+        match line.split_once(':') {
+            Some((k, v)) => headers.push((k.trim().to_string(), v.trim().to_string())),
+            None => return Err(format!("bad header line '{}'", line.trim())),
+        }
+    }
+    // Everything after the blank line is the body.
+    let rest: Vec<&str> = lines.collect();
+    let body = if rest.is_empty() {
+        None
+    } else {
+        let joined = rest.join("\n");
+        if joined.trim().is_empty() {
+            None
+        } else {
+            Some(joined)
+        }
+    };
+
+    Ok(HttpRequest {
+        method,
+        url,
+        headers,
+        body,
+    })
+}
+
 pub fn redact_output(text: &str, values: &[String]) -> String {
     if values.is_empty() {
         return text.to_string();
@@ -357,6 +457,114 @@ impl Session {
         &self.ctx.env
     }
 
+    /// Native `http` runtime (#45): execute a REST call described by an `http`
+    /// fence via `curl`. Body grammar:
+    ///   line 1: `METHOD URL` (METHOD optional → defaults to GET)
+    ///   then:   `Header: Value` lines until a blank line
+    ///   then:   the (optional) request body
+    /// `$VAR` / `${VAR}` in the URL, headers, and body are substituted from the
+    /// session env. stdout = response body; exit 0 on a 2xx status, else 1.
+    fn execute_http(&self, block: &CodeBlock, index: usize) -> BlockResult {
+        let start = Instant::now();
+        let resolved = substitute_env_dollar(&block.code, &self.ctx.env);
+        let req = match parse_http_request(&resolved) {
+            Ok(r) => r,
+            Err(e) => {
+                return BlockResult {
+                    block_index: index,
+                    language: "http".to_string(),
+                    stdout: String::new(),
+                    stderr: format!("http: {e}"),
+                    exit_code: 2,
+                    duration: start.elapsed(),
+                    error_type: Some("http_invalid".to_string()),
+                    stdout_partial: false,
+                    stderr_partial: false,
+                };
+            }
+        };
+
+        // Marker separates the response body from the trailing status code that
+        // `-w` appends, so we can split them even when the body lacks a newline.
+        const MARK: &str = "\n__WB_HTTP_STATUS__:";
+        let mut args: Vec<String> = vec![
+            "-sS".into(),
+            "--max-time".into(),
+            "60".into(),
+            "-X".into(),
+            req.method.clone(),
+            "-w".into(),
+            format!("{MARK}%{{http_code}}"),
+        ];
+        for (k, v) in &req.headers {
+            args.push("-H".into());
+            args.push(format!("{k}: {v}"));
+        }
+        if let Some(ref body) = req.body {
+            args.push("--data-binary".into());
+            args.push(body.clone());
+        }
+        args.push(req.url.clone());
+
+        if !self.ctx.quiet {
+            println!("→ {} {}", req.method, req.url);
+        }
+
+        let output = match Command::new("curl").args(&args).output() {
+            Ok(o) => o,
+            Err(e) => {
+                return BlockResult {
+                    block_index: index,
+                    language: "http".to_string(),
+                    stdout: String::new(),
+                    stderr: format!("http: curl failed to launch: {e}"),
+                    exit_code: 1,
+                    duration: start.elapsed(),
+                    error_type: Some("http_failed".to_string()),
+                    stdout_partial: false,
+                    stderr_partial: false,
+                };
+            }
+        };
+
+        let raw = String::from_utf8_lossy(&output.stdout);
+        let (body, status) = match raw.rsplit_once(MARK) {
+            Some((b, s)) => (b.to_string(), s.trim().parse::<u16>().unwrap_or(0)),
+            None => (raw.to_string(), 0),
+        };
+        let curl_err = String::from_utf8_lossy(&output.stderr);
+
+        let ok = (200..300).contains(&status);
+        let body = redact_output(&body, &self.ctx.redact_values);
+        if !self.ctx.quiet {
+            if !body.is_empty() {
+                println!("{body}");
+            }
+            eprintln!("← HTTP {status}");
+        }
+        BlockResult {
+            block_index: index,
+            language: "http".to_string(),
+            stdout: body,
+            stderr: if status == 0 {
+                format!("http request failed: {}", curl_err.trim())
+            } else if ok {
+                String::new()
+            } else {
+                format!("HTTP {status}")
+            },
+            exit_code: if ok { 0 } else { 1 },
+            duration: start.elapsed(),
+            error_type: if ok {
+                None
+            } else {
+                Some("http_status".to_string())
+            },
+            stdout_partial: false,
+            stderr_partial: false,
+        }
+    }
+
     /// Inject a small code snippet into all running persistent sessions to unset an env var.
     /// This ensures the already-spawned processes reflect the removal.
     pub fn unset_env_in_sessions(&mut self, key: &str) {
@@ -435,6 +643,14 @@ impl Session {
 
     pub fn execute_block(&mut self, block: &CodeBlock, index: usize) -> BlockResult {
         let start = Instant::now();
+
+        // Native `http` runtime: REST calls via curl (no language subprocess).
+        if block.language.eq_ignore_ascii_case("http") {
+            let mut r = self.execute_http(block, index);
+            r.auto_classify();
+            return r;
+        }
+
         let lang = normalize_language(&block.language, &self.ctx.default_runtime);
 
         // Fall back to one-shot for unsupported languages
@@ -1175,6 +1391,50 @@ fn resolve_runtime(
 
 fn is_python_language(lang: &str) -> bool {
     matches!(lang.to_lowercase().as_str(), "python" | "python3" | "py")
+}
+
+#[cfg(test)]
+mod http_tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    #[test]
+    fn parses_method_url_headers_body() {
+        let req = parse_http_request(
+            "POST https://api.test/x\nAuthorization: Bearer t\nContent-Type: application/json\n\n{\"a\":1}",
+        )
+        .unwrap();
+        assert_eq!(req.method, "POST");
+        assert_eq!(req.url, "https://api.test/x");
+        assert_eq!(req.headers.len(), 2);
+        assert_eq!(req.body.as_deref(), Some("{\"a\":1}"));
+    }
+
+    #[test]
+    fn defaults_to_get_and_ignores_comments() {
+        let req = parse_http_request("# get health\nhttps://api.test/health\n").unwrap();
+        assert_eq!(req.method, "GET");
+        assert_eq!(req.url, "https://api.test/health");
+        assert!(req.body.is_none());
+    }
+
+    #[test]
+    fn empty_request_errors() {
+        assert!(parse_http_request("\n# only a comment\n").is_err());
+    }
+
+    #[test]
+    fn dollar_substitution() {
+        let mut env = HashMap::new();
+        env.insert("TOKEN".to_string(), "secret".to_string());
+        env.insert("HOST".to_string(), "api.test".to_string());
+        assert_eq!(
+            substitute_env_dollar("https://${HOST}/x?t=$TOKEN", &env),
+            "https://api.test/x?t=secret"
+        );
+        // Unknown var → empty; $$ → literal $.
+        assert_eq!(substitute_env_dollar("$NOPE/$$", &env), "/$");
+    }
 }
 
 #[cfg(test)]

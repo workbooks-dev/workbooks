@@ -393,6 +393,30 @@ A reusable composite GitHub Action lives at `verify-action/` (published as
 `wb verify` so a repo can keep its docs' commands honest in CI. See
 `verify-action/README.md`.
 
+## Native `http` runtime
+
+An `http` fence makes a REST call a first-class block (no wrapping `curl` in
+bash). Body grammar: `METHOD URL` (method optional, defaults to `GET`), then
+`Header: Value` lines, a blank line, then an optional request body. `$VAR` /
+`${VAR}` are substituted from the session env (frontmatter `env:`, secrets,
+`--param`, …).
+
+```markdown
+```http
+GET https://api.example.com/health
+Authorization: Bearer $TOKEN
+Accept: application/json
+```
+```
+
+- stdout = response body; the block exits `0` on a 2xx status, `1` otherwise
+  (`error_type: "http_status"`), so it composes with `expect`/`wb test`/`--bail`.
+- Executed via `curl` (zero new dependency) with a built-in 60s timeout.
+- Secret-valued env (e.g. a redacted token) is masked in rendered output.
+
+See `examples/http-demo.md`. The `sql` runtime (#45) is still open (gated on
+trust/#37).
+
 ## Composing workbooks with `include:`
 
 Factor out repeated setup (logins, env priming, health pre-flights) into its own
