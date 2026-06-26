@@ -609,3 +609,35 @@ fn capture_emits_runnable_workbook() {
 
     std::fs::remove_dir_all(&dir).ok();
 }
+
+#[test]
+fn require_trust_gates_untrusted_and_changed() {
+    let dir = std::env::temp_dir().join(format!("wb-trust-cli-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let md = dir.join("w.md");
+    std::fs::write(&md, "---\nruntime: bash\n---\n```bash\necho ok\n```\n").unwrap();
+    let trust_path = dir.join("trust.json");
+
+    let run = |extra_trust: bool| {
+        let mut c = Command::new(wb_binary());
+        c.env("WB_TRUST_PATH", &trust_path);
+        if extra_trust {
+            c.args(["trust", "add", md.to_str().unwrap()]);
+        } else {
+            c.args([md.to_str().unwrap(), "--require-trust", "-q"]);
+        }
+        c.output().expect("spawn wb")
+    };
+
+    // Untrusted → refused (exit 2).
+    assert_eq!(run(false).status.code(), Some(2));
+    // Trust it.
+    assert_eq!(run(true).status.code(), Some(0));
+    // Now runs (exit 0).
+    assert_eq!(run(false).status.code(), Some(0));
+    // Edit → changed → refused again.
+    std::fs::write(&md, "---\nruntime: bash\n---\n```bash\necho EDITED\n```\n").unwrap();
+    assert_eq!(run(false).status.code(), Some(2));
+
+    std::fs::remove_dir_all(&dir).ok();
+}

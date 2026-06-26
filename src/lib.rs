@@ -23,6 +23,7 @@ mod sidecar;
 mod signal;
 pub mod step_ir;
 mod step_outputs;
+mod trust;
 mod update;
 mod validate;
 mod workflow;
@@ -520,6 +521,11 @@ struct RunArgs {
     /// resolve secrets or run setup.
     #[arg(long = "dry-run")]
     dry_run: bool,
+    /// Refuse to run unless this workbook's content is recorded as trusted
+    /// (`wb trust add`). Also enabled by `$WB_REQUIRE_TRUST=1`. A trust-on-
+    /// first-use integrity check — not a signature; see `wb trust`.
+    #[arg(long = "require-trust")]
+    require_trust: bool,
     /// Enable the source-hash execution cache under this id (`~/.wb/cache/<id>`):
     /// skip blocks whose source + params are unchanged since a prior success.
     #[arg(long = "cache", value_name = "ID")]
@@ -635,6 +641,39 @@ enum RunsSub {
     /// Show a run's artifacts and (if present) its checkpoint state.
     Show {
         id: String,
+        #[command(flatten)]
+        fmt: FormatArg,
+    },
+}
+
+#[derive(clap::Args)]
+struct TrustArgs {
+    #[command(subcommand)]
+    sub: TrustSub,
+}
+
+#[derive(Subcommand)]
+enum TrustSub {
+    /// Record a workbook's current content as trusted (review it first!).
+    Add {
+        file: String,
+        #[command(flatten)]
+        fmt: FormatArg,
+    },
+    /// Show the trust status of a workbook (trusted/untrusted/changed).
+    Check {
+        file: String,
+        #[command(flatten)]
+        fmt: FormatArg,
+    },
+    /// Remove a workbook from the trust store.
+    Remove {
+        file: String,
+        #[command(flatten)]
+        fmt: FormatArg,
+    },
+    /// List all trusted workbooks.
+    List {
         #[command(flatten)]
         fmt: FormatArg,
     },
@@ -860,6 +899,8 @@ enum Command {
     Watch(WatchArgs),
     /// Capture a sequence of commands (from stdin) into a runnable workbook.
     Capture(CaptureArgs),
+    /// Manage the trust-on-first-use store (`wb run --require-trust`).
+    Trust(TrustArgs),
     Doctor(DoctorArgs),
     Pending(PendingArgs),
     Resume(ResumeArgs),
@@ -954,6 +995,8 @@ struct BareRunArgs {
     profile: Option<String>,
     #[arg(long = "dry-run")]
     dry_run: bool,
+    #[arg(long = "require-trust")]
+    require_trust: bool,
     #[arg(long = "cache", value_name = "ID")]
     cache: Option<String>,
     #[arg(long = "no-cache")]
@@ -1002,6 +1045,7 @@ pub fn run() -> std::process::ExitCode {
         Some(Command::Runs(args)) => cmd_runs(args),
         Some(Command::Watch(args)) => cmd_watch(args),
         Some(Command::Capture(args)) => cmd_capture(args),
+        Some(Command::Trust(args)) => cmd_trust(args),
         Some(Command::Doctor(args)) => cmd_doctor(args),
         Some(Command::Pending(args)) => cmd_pending_cmd(args),
         Some(Command::Resume(args)) => cmd_resume_cmd(args),
@@ -1066,6 +1110,7 @@ pub fn run() -> std::process::ExitCode {
                     param_file: bare.param_file,
                     profile: bare.profile,
                     dry_run: bare.dry_run,
+                    require_trust: bare.require_trust,
                     cache: bare.cache,
                     no_cache: bare.no_cache,
                 })
@@ -1121,6 +1166,29 @@ fn cmd_run(args: RunArgs) -> WbExit {
     };
 
     let p = Path::new(&args.file);
+
+    // Trust-on-first-use gate (#37): refuse to run an untrusted/changed
+    // workbook when --require-trust (or $WB_REQUIRE_TRUST=1) is set.
+    let require_trust =
+        args.require_trust || std::env::var("WB_REQUIRE_TRUST").ok().as_deref() == Some("1");
+    if require_trust {
+        if p.is_dir() {
+            eprintln!("error: --require-trust is not supported for folder runs yet; run files individually");
+            return WbExit::Usage("require-trust unsupported for folders".to_string());
+        }
+        match trust::TrustStore::load().status(&args.file) {
+            trust::TrustStatus::Trusted => {}
+            status => {
+                eprintln!(
+                    "error: refusing to run {} — workbook is {}. Review it, then run `wb trust add {}`.",
+                    args.file,
+                    status.label(),
+                    args.file
+                );
+                return WbExit::Usage(format!("untrusted workbook ({})", status.label()));
+            }
+        }
+    }
 
     if p.is_dir() {
         run_folder(
@@ -1511,6 +1579,99 @@ fn capture_stdout_assertion(stdout: &str) -> Option<String> {
         return None;
     }
     Some(line.to_string())
+}
+
+/// `wb trust` — manage the trust-on-first-use store (#37). `add` records a
+/// reviewed workbook's hash; `check` reports its status; `remove`/`list` manage
+/// the store. Honest scope: an integrity check (detects changes to a known
+/// workbook), not a signature — see `src/trust.rs`.
+fn cmd_trust(args: TrustArgs) -> WbExit {
+    match args.sub {
+        TrustSub::Add { file, fmt } => {
+            let json = match want_json(&fmt.format) {
+                Ok(b) => b,
+                Err(e) => return e,
+            };
+            let mut store = trust::TrustStore::load();
+            match store.trust(&file) {
+                Ok(hash) => {
+                    if let Err(e) = store.save() {
+                        eprintln!("error: trust store: {e}");
+                        return WbExit::Io(e.to_string());
+                    }
+                    if json {
+                        print_json(&serde_json::json!({"ok": true, "file": file, "sha256": hash}));
+                    } else {
+                        eprintln!("wb: trusted {file}");
+                    }
+                    WbExit::Success
+                }
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    WbExit::Usage(e)
+                }
+            }
+        }
+        TrustSub::Check { file, fmt } => {
+            let json = match want_json(&fmt.format) {
+                Ok(b) => b,
+                Err(e) => return e,
+            };
+            let status = trust::TrustStore::load().status(&file);
+            if json {
+                print_json(&serde_json::json!({"file": file, "status": status.label()}));
+            } else {
+                println!("{}: {}", file, status.label());
+            }
+            // Non-trusted is a non-zero (usage) exit so scripts can gate on it.
+            if status == trust::TrustStatus::Trusted {
+                WbExit::Success
+            } else {
+                WbExit::Usage(status.label().to_string())
+            }
+        }
+        TrustSub::Remove { file, fmt } => {
+            let json = match want_json(&fmt.format) {
+                Ok(b) => b,
+                Err(e) => return e,
+            };
+            let mut store = trust::TrustStore::load();
+            let removed = store.remove(&file);
+            if removed {
+                if let Err(e) = store.save() {
+                    eprintln!("error: trust store: {e}");
+                    return WbExit::Io(e.to_string());
+                }
+            }
+            if json {
+                print_json(&serde_json::json!({"ok": removed, "file": file}));
+            } else if removed {
+                eprintln!("wb: removed {file} from trust store");
+            } else {
+                eprintln!("wb: {file} was not in the trust store");
+            }
+            WbExit::Success
+        }
+        TrustSub::List { fmt } => {
+            let json = match want_json(&fmt.format) {
+                Ok(b) => b,
+                Err(e) => return e,
+            };
+            let store = trust::TrustStore::load();
+            if json {
+                print_json(&serde_json::json!({
+                    "entries": store.entries.iter().map(|(k, v)| serde_json::json!({"file": k, "sha256": v})).collect::<Vec<_>>()
+                }));
+            } else if store.entries.is_empty() {
+                println!("(no trusted workbooks)");
+            } else {
+                for (k, v) in &store.entries {
+                    println!("{}  {}", &v[..v.len().min(12)], k);
+                }
+            }
+            WbExit::Success
+        }
+    }
 }
 
 /// `wb watch <id>` — a local run viewer (#35/#44). Polls the checkpoint +
