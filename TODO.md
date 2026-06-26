@@ -100,3 +100,25 @@ These were the longer-form Xatabase run-page specs. F1–F6 shipped across v0.11
 ## Notes
 
 - `features-request.md` at repo root holds longer-form specs for fence-flags and browser recording — keep as canonical reference, this file is the checklist.
+
+---
+
+## 🚀 Strategic 10–100x bets (Wave 5+)
+
+Order-of-magnitude *reach* bets, distinct from the incremental roadmap above.
+Full write-up in `docs/enhancement-ideas.md`; dependency-ordered implementation
+plan in `PLAN-wave5-bets.md`; copy-paste session goals in `IDEA_GOALS.md`.
+Thesis: wb already built the rare durable-execution engine — the multiplier is
+plugging it into the agent ecosystem (MCP), a sharing network (registry), and a
+wider set of jobs (docs-tests, sql/http, capture), with trust (#37) as the gate.
+
+- [ ] **39. `wb mcp` — Model Context Protocol server.** Expose run/inspect/resume/pending as MCP tools over stdio; map checkpoint/pending onto MCP Tasks, `pause_for_human` onto elicitation. Top pick — highest reach-per-effort, reuses existing primitives.
+- [ ] **40. Trust + registry / remote execution.** `wb run gh:org/repo/x.md`, signing, trust store, workbooks.dev gallery. **Gated on #37.** Network-effect engine; the atoms/flows/tasks taxonomy is already a package model.
+- [ ] **41. `wb capture` — record a session → emit a workbook.** Shell PTY + browser-recording reuse; MANIFEST.md-compatible output. Collapses authoring cost, feeds the registry.
+- [ ] **42. `wb run --repair` — self-healing runs.** Hand a failed block to an agent endpoint, apply structured `{rerun|patch|skip|abort}`. **Gated on #37.** Makes unattended VPS operation real.
+- [ ] **43. Docs-as-tests + GitHub Action.** `wb verify README.md` over ordinary docs; ship `workbooks/verify-action`. Builds on #31. Broadest low-risk top-of-funnel — a different audience (every maintainer).
+- [ ] **44. `wb watch` / hosted run pages.** Generalize the bespoke run page: local TUI/web viewer (#35) first, shareable hosted run links later. Events already standardized.
+- [ ] **45. Native `sql` + `http` runtimes.** Declarative DB queries + REST calls as first-class blocks with structured outputs. Tension with zero-dep identity → feature-gated `wb-full` build. **Gated on #37** for the sandbox piece.
+- [ ] **46. Content-addressed execution cache.** = #18, reframed as a build-tool capability (inputs/outputs graph). Depends on #30 params.
+- [ ] **47. Reproducibility — `wb.lock` + signed run attestations.** Verifiable run receipts; unlocks audited/compliance ops.
+- [ ] **48. `wb-core` crate + WASM target.** Embeddable parser/executor; client-side preview on workbooks.dev. Makes the *format* a platform.
