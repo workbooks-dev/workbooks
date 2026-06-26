@@ -734,3 +734,41 @@ fn sql_runtime_runs_sqlite_query() {
     );
     std::fs::remove_dir_all(&dir).ok();
 }
+
+#[test]
+fn events_jsonl_sink_writes_one_object_per_line() {
+    let dir = std::env::temp_dir().join(format!("wb-events-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let md = dir.join("e.md");
+    std::fs::write(&md, "---\nruntime: bash\n---\n```bash\necho a\n```\n").unwrap();
+    let events = dir.join("events.jsonl");
+
+    let out = Command::new(wb_binary())
+        .args([
+            md.to_str().unwrap(),
+            "--events",
+            events.to_str().unwrap(),
+            "-q",
+        ])
+        .output()
+        .expect("spawn wb");
+    assert_eq!(out.status.code(), Some(0));
+
+    let body = std::fs::read_to_string(&events).expect("events file written");
+    let lines: Vec<&str> = body.lines().filter(|l| !l.trim().is_empty()).collect();
+    assert!(
+        lines.len() >= 2,
+        "expected step.complete + run.complete: {body}"
+    );
+    // Every line is a valid JSON object with an `event` field.
+    let mut saw_complete = false;
+    for line in &lines {
+        let v: serde_json::Value = serde_json::from_str(line).expect("each line is JSON");
+        assert!(v.get("event").and_then(|e| e.as_str()).is_some());
+        if v["event"] == "run.complete" {
+            saw_complete = true;
+        }
+    }
+    assert!(saw_complete, "should end with run.complete: {body}");
+    std::fs::remove_dir_all(&dir).ok();
+}

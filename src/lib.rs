@@ -542,6 +542,10 @@ struct RunArgs {
     /// Max repair reruns per failed block (default 3) — bounds repair loops.
     #[arg(long = "repair-max", value_name = "N", default_value = "3")]
     repair_max: u32,
+    /// Append each run event as a JSONL line to this file (a local event sink
+    /// for `tail -f` / a viewer; works with or without `--callback`).
+    #[arg(long = "events", value_name = "FILE")]
+    events: Option<String>,
     /// Enable the source-hash execution cache under this id (`~/.wb/cache/<id>`):
     /// skip blocks whose source + params are unchanged since a prior success.
     #[arg(long = "cache", value_name = "ID")]
@@ -1034,6 +1038,8 @@ struct BareRunArgs {
     repair: Option<String>,
     #[arg(long = "repair-max", value_name = "N", default_value = "3")]
     repair_max: u32,
+    #[arg(long = "events", value_name = "FILE")]
+    events: Option<String>,
     #[arg(long = "cache", value_name = "ID")]
     cache: Option<String>,
     #[arg(long = "no-cache")]
@@ -1153,6 +1159,7 @@ pub fn run() -> std::process::ExitCode {
                     lockfile: bare.lockfile,
                     repair: bare.repair,
                     repair_max: bare.repair_max,
+                    events: bare.events,
                     cache: bare.cache,
                     no_cache: bare.no_cache,
                 })
@@ -1457,6 +1464,7 @@ fn cmd_run_inner(args: RunArgs, remote_forced_trust: bool) -> WbExit {
             cache_id: if args.no_cache { None } else { args.cache },
             repair_url: args.repair,
             repair_max: args.repair_max,
+            events_path: args.events,
         });
     }
     WbExit::Success
@@ -3304,6 +3312,8 @@ struct RunConfig {
     repair_url: Option<String>,
     /// Max repair reruns per failed block.
     repair_max: u32,
+    /// `--events <file>`: append each callback event as a JSONL line (#44).
+    events_path: Option<String>,
 }
 
 /// CLI-side selection inputs before resolution. Names mirror the flag
@@ -4219,6 +4229,7 @@ fn resolve_callback_config(
     callback_url: Option<String>,
     callback_secret: Option<String>,
     callback_key: Option<String>,
+    events_path: Option<String>,
     ctx: &executor::ExecutionContext,
     run_id: &str,
 ) -> Option<callback::CallbackConfig> {
@@ -4227,7 +4238,11 @@ fn resolve_callback_config(
     let cfg = config::Config::load_lenient();
     let url = callback_url
         .or_else(|| ctx.env.get("WB_CALLBACK_URL").cloned())
-        .or_else(|| cfg.get("callback.url").map(str::to_string))?;
+        .or_else(|| cfg.get("callback.url").map(str::to_string));
+    // Nothing to emit to (no endpoint and no local sink) → no callback config.
+    if url.is_none() && events_path.is_none() {
+        return None;
+    }
     let secret = callback_secret
         .or_else(|| ctx.env.get("WB_CALLBACK_SECRET").cloned())
         .or_else(|| cfg.get("callback.secret").map(str::to_string));
@@ -4235,23 +4250,26 @@ fn resolve_callback_config(
         .or_else(|| ctx.env.get("WB_CALLBACK_KEY").cloned())
         .or_else(|| cfg.get("callback.key").map(str::to_string))
         .unwrap_or_else(|| "wb:events".to_string());
-    match callback::validate_callback_config(&url, secret.as_deref()) {
-        Ok(warnings) => {
-            for w in warnings {
-                log_warn!("warning: {w}");
+    if let Some(ref u) = url {
+        match callback::validate_callback_config(u, secret.as_deref()) {
+            Ok(warnings) => {
+                for w in warnings {
+                    log_warn!("warning: {w}");
+                }
             }
-        }
-        Err(e) => {
-            eprintln!("error: {e}");
-            std::process::exit(exit_codes::EXIT_USAGE);
+            Err(e) => {
+                eprintln!("error: {e}");
+                std::process::exit(exit_codes::EXIT_USAGE);
+            }
         }
     }
     Some(callback::CallbackConfig {
-        url,
+        url: url.unwrap_or_default(),
         secret,
         stream_key,
         run_id: run_id.to_string(),
         seq: std::sync::atomic::AtomicU64::new(0),
+        events_path: events_path.map(std::path::PathBuf::from),
     })
 }
 
@@ -4383,6 +4401,7 @@ fn run_single(cfg: RunConfig) {
         cache_id,
         repair_url,
         repair_max,
+        events_path,
     } = cfg;
     let file = file.as_str();
     // Resolve the run-wide default block timeout once. Precedence:
@@ -4468,7 +4487,14 @@ fn run_single(cfg: RunConfig) {
     }
     let mut run_outputs = ckpt.as_ref().map(|c| c.outputs.clone()).unwrap_or_default();
 
-    let cb = resolve_callback_config(callback_url, callback_secret, callback_key, &ctx, &run_id);
+    let cb = resolve_callback_config(
+        callback_url,
+        callback_secret,
+        callback_key,
+        events_path,
+        &ctx,
+        &run_id,
+    );
     // Resume: continue the X-WB-Sequence counter from where the pre-pause
     // process left off, so a run's HTTP callbacks stay totally orderable by
     // sequence even across pause/resume (the counter is otherwise per-process).
@@ -6972,6 +6998,7 @@ fn cmd_resume_cmd(cli: ResumeArgs) -> WbExit {
             cache_id: None,
             repair_url: None,
             repair_max: 0,
+            events_path: None,
         });
         return WbExit::Success;
     }
@@ -7226,6 +7253,7 @@ fn cmd_resume_cmd(cli: ResumeArgs) -> WbExit {
         cache_id: None,
         repair_url: None,
         repair_max: 0,
+        events_path: None,
     });
     WbExit::Success
 }

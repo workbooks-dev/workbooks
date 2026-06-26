@@ -425,6 +425,7 @@ pub fn reap_expired() -> Vec<ReapedEntry> {
                         stream_key: "wb:events".to_string(),
                         run_id: id.clone(),
                         seq: std::sync::atomic::AtomicU64::new(0),
+                        events_path: None,
                     };
                     let total = total_blocks.unwrap_or(desc_now.next_block);
                     let completed = desc_now.next_block.saturating_sub(1);
