@@ -318,12 +318,21 @@ pub fn reserved_bind_name<'a>(names: impl IntoIterator<Item = &'a str>) -> Optio
     None
 }
 
+/// Opaque, resolver-defined match criteria for a `wait` fence (#26). `wb` is
+/// protocol-agnostic — `kind`/`match` are metadata external resolvers interpret,
+/// not `wb`. A named newtype (rather than a bare `serde_yaml::Value` in two
+/// structs) gives the criteria a greppable home; `#[serde(transparent)]` keeps
+/// the YAML/JSON shape byte-identical.
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
+#[serde(transparent)]
+pub struct MatchSpec(pub serde_yaml::Value);
+
 #[derive(Debug, Deserialize, Serialize, Clone, Default)]
 pub struct WaitSpec {
     #[serde(default)]
     pub kind: Option<String>,
     #[serde(default, rename = "match")]
-    pub match_: Option<serde_yaml::Value>,
+    pub match_: Option<MatchSpec>,
     #[serde(default)]
     pub bind: Option<BindSpec>,
     #[serde(default)]
