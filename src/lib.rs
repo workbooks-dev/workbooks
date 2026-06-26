@@ -1240,18 +1240,22 @@ fn print_short_usage() {
 }
 
 /// The action an agent endpoint returns for a failed block (#42). `patch`
-/// (code injection) is deliberately not modeled — it needs the signing/trust
-/// story (#37/#40) and would be remote code execution.
+/// `patch` carries a replacement command the endpoint wants run in place of the
+/// failed block. It is real code execution — but `--repair` is an explicit
+/// opt-in to an endpoint the operator chose, which already controls the run
+/// (rerun/skip/abort), and the workbook itself is arbitrary code. wb logs the
+/// patched command prominently so it's never silent.
 enum RepairAction {
     Rerun,
     Skip,
     Abort,
+    Patch(String),
 }
 
 /// POST a failed block to the `--repair` endpoint and parse the returned
-/// `{"action": "rerun"|"skip"|"abort"}`. Secret values are redacted from the
-/// block output before it leaves the box. Any network/parse error → `Abort`
-/// (fail safe: don't silently skip or loop).
+/// `{"action": "rerun"|"skip"|"abort"|"patch", "code": "…"}`. Secret values are
+/// redacted from the block output before it leaves the box. Any network/parse
+/// error → `Abort` (fail safe: don't silently skip, patch, or loop).
 fn repair_consult(
     url: &str,
     result: &executor::BlockResult,
@@ -1285,13 +1289,18 @@ fn repair_consult(
             return RepairAction::Abort;
         }
     };
-    match serde_json::from_slice::<serde_json::Value>(&body)
-        .ok()
-        .and_then(|v| v.get("action").and_then(|a| a.as_str()).map(str::to_string))
-        .as_deref()
-    {
+    let parsed: serde_json::Value =
+        serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null);
+    match parsed.get("action").and_then(|a| a.as_str()) {
         Some("rerun") => RepairAction::Rerun,
         Some("skip") => RepairAction::Skip,
+        Some("patch") => match parsed.get("code").and_then(|c| c.as_str()) {
+            Some(code) if !code.trim().is_empty() => RepairAction::Patch(code.to_string()),
+            _ => {
+                log_warn!("warning: --repair patch action missing `code`; aborting");
+                RepairAction::Abort
+            }
+        },
         _ => RepairAction::Abort,
     }
 }
@@ -5172,8 +5181,8 @@ fn run_single(cfg: RunConfig) {
             );
 
             // Self-healing (#42): on failure, consult the repair endpoint and
-            // apply rerun/skip/abort. `patch` (code injection) is intentionally
-            // unsupported. Bounded by repair_max to prevent loops.
+            // apply rerun/skip/abort/patch. Bounded by repair_max to prevent
+            // loops. `patch` runs endpoint-supplied code (opt-in; see below).
             let mut repair_skip = false;
             if let Some(ref url) = repair_url {
                 let mut budget = repair_max;
@@ -5198,6 +5207,37 @@ fn run_single(cfg: RunConfig) {
                                 quiet,
                             );
                         }
+                        RepairAction::Patch(code) if budget > 0 => {
+                            budget -= 1;
+                            // Endpoint-supplied code. Logged prominently — never
+                            // silent — since `--repair` is an explicit opt-in.
+                            eprintln!(
+                                "  ✚ repair: applying patched command from endpoint for block {} ({} left):\n      {}",
+                                block_idx + 1,
+                                budget,
+                                code.lines().next().unwrap_or("")
+                            );
+                            let patched = parser::CodeBlock {
+                                language: block.language.clone(),
+                                code,
+                                line_number: block.line_number,
+                                skip_execution: false,
+                                silent: block.silent,
+                                when: None,
+                                skip_if: None,
+                                no_cache: true,
+                                attrs: Default::default(),
+                            };
+                            result = execute_block_with_policy(
+                                &mut session,
+                                &patched,
+                                block_idx,
+                                policy,
+                                effective_default_timeout,
+                                effective_default_source,
+                                quiet,
+                            );
+                        }
                         RepairAction::Skip => {
                             if !quiet {
                                 eprintln!("  ⤼ repair: skipping failed block {}", block_idx + 1);
@@ -5205,7 +5245,7 @@ fn run_single(cfg: RunConfig) {
                             repair_skip = true;
                             break;
                         }
-                        // Abort, unknown, or rerun-budget-exhausted: stop repairing.
+                        // Abort, unknown, or budget-exhausted: stop repairing.
                         _ => break,
                     }
                 }
