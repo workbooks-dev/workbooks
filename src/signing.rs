@@ -1,0 +1,176 @@
+//! Workbook signing + verification (#37 signed workbooks, #40 signing, #47
+//! signed attestations).
+//!
+//! Ed25519 detached signatures over a workbook's content (like minisign /
+//! signify). `wb keygen` makes a keypair; `wb sign` writes a `<file>.sig`
+//! binding the signature to `sha256(content)`; `wb verify-sig` (and
+//! `wb run --verify-sig`) check it. The crypto is `ed25519-dalek` (a
+//! well-audited library) used in the standard way — we don't roll our own.
+//!
+//! Honest scope: this proves *integrity + authorship* of a workbook against a
+//! public key the verifier already trusts. It is not a PKI / web-of-trust; key
+//! distribution and a hosted registry of trusted signers are the larger #40
+//! story. Private keys are stored `0600`.
+
+use std::path::{Path, PathBuf};
+
+use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+
+/// A detached signature file (`<file>.sig`), JSON.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SignatureFile {
+    pub alg: String,
+    /// Hex-encoded 32-byte public key.
+    pub pubkey: String,
+    /// Hex-encoded 64-byte signature over the signed bytes.
+    pub signature: String,
+    /// Hex sha256 of the content that was signed (for a fast mismatch message).
+    pub sha256: String,
+}
+
+fn to_hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn from_hex(s: &str) -> Result<Vec<u8>, String> {
+    if !s.len().is_multiple_of(2) {
+        return Err("odd-length hex".to_string());
+    }
+    (0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).map_err(|e| e.to_string()))
+        .collect()
+}
+
+/// Default key paths under `~/.wb/keys/` (override the dir with `$WB_KEYS_DIR`).
+pub fn default_key_path() -> PathBuf {
+    let base = std::env::var_os("WB_KEYS_DIR")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".wb").join("keys")))
+        .unwrap_or_else(std::env::temp_dir);
+    base.join("wb_signing_key")
+}
+
+/// Generate a new ed25519 keypair, writing `<prefix>` (private, hex, mode 0600)
+/// and `<prefix>.pub` (public, hex). Returns the public key hex.
+pub fn keygen(prefix: &Path) -> Result<String, String> {
+    let mut seed = [0u8; 32];
+    getrandom::getrandom(&mut seed).map_err(|e| format!("rng: {e}"))?;
+    let signing = SigningKey::from_bytes(&seed);
+    let pub_hex = to_hex(signing.verifying_key().as_bytes());
+
+    if let Some(parent) = prefix.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("keys dir: {e}"))?;
+    }
+    std::fs::write(prefix, to_hex(&seed)).map_err(|e| format!("write key: {e}"))?;
+    restrict_permissions(prefix);
+    let pub_path = PathBuf::from(format!("{}.pub", prefix.display()));
+    std::fs::write(&pub_path, &pub_hex).map_err(|e| format!("write pubkey: {e}"))?;
+    Ok(pub_hex)
+}
+
+#[cfg(unix)]
+fn restrict_permissions(path: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+    let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+}
+#[cfg(not(unix))]
+fn restrict_permissions(_path: &Path) {}
+
+/// Sign `content` with the private key at `key_path`, returning the signature
+/// file. The signed message is the raw content bytes; `sha256` is recorded for
+/// diagnostics.
+pub fn sign(key_path: &Path, content: &[u8]) -> Result<SignatureFile, String> {
+    let key_hex = std::fs::read_to_string(key_path)
+        .map_err(|e| format!("read key {}: {e}", key_path.display()))?;
+    let seed = from_hex(key_hex.trim())?;
+    let seed: [u8; 32] = seed
+        .try_into()
+        .map_err(|_| "private key must be 32 bytes (64 hex chars)".to_string())?;
+    let signing = SigningKey::from_bytes(&seed);
+    let sig = signing.sign(content);
+    Ok(SignatureFile {
+        alg: "ed25519".to_string(),
+        pubkey: to_hex(signing.verifying_key().as_bytes()),
+        signature: to_hex(&sig.to_bytes()),
+        sha256: to_hex(&Sha256::digest(content)),
+    })
+}
+
+/// Verify a signature file against `content`. If `expected_pubkey` is given, the
+/// signature's pubkey must match it (else any self-signed sig would "verify").
+pub fn verify(
+    sigfile: &SignatureFile,
+    content: &[u8],
+    expected_pubkey: Option<&str>,
+) -> Result<(), String> {
+    if sigfile.alg != "ed25519" {
+        return Err(format!("unsupported algorithm '{}'", sigfile.alg));
+    }
+    if let Some(want) = expected_pubkey {
+        if !want.eq_ignore_ascii_case(&sigfile.pubkey) {
+            return Err("signature is by a different key than --pubkey".to_string());
+        }
+    }
+    let pub_bytes: [u8; 32] = from_hex(&sigfile.pubkey)?
+        .try_into()
+        .map_err(|_| "pubkey must be 32 bytes".to_string())?;
+    let sig_bytes: [u8; 64] = from_hex(&sigfile.signature)?
+        .try_into()
+        .map_err(|_| "signature must be 64 bytes".to_string())?;
+    let vk = VerifyingKey::from_bytes(&pub_bytes).map_err(|e| format!("bad pubkey: {e}"))?;
+    let sig = Signature::from_bytes(&sig_bytes);
+    vk.verify(content, &sig)
+        .map_err(|_| "signature does not verify against the content".to_string())
+}
+
+/// Default sig path for a workbook: `<file>.sig`.
+pub fn sig_path(file: &str, explicit: Option<&str>) -> PathBuf {
+    match explicit {
+        Some(p) => PathBuf::from(p),
+        None => PathBuf::from(format!("{file}.sig")),
+    }
+}
+
+pub fn load_sig(path: &Path) -> Result<SignatureFile, String> {
+    let bytes = std::fs::read(path).map_err(|e| format!("read {}: {e}", path.display()))?;
+    serde_json::from_slice(&bytes).map_err(|e| format!("parse {}: {e}", path.display()))
+}
+
+pub fn save_sig(path: &Path, sig: &SignatureFile) -> Result<(), String> {
+    let json = serde_json::to_string_pretty(sig).map_err(|e| e.to_string())?;
+    std::fs::write(path, json).map_err(|e| format!("write {}: {e}", path.display()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sign_then_verify_roundtrip() {
+        let dir = std::env::temp_dir().join(format!("wb-sign-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let key = dir.join("k");
+        let pubhex = keygen(&key).unwrap();
+
+        let content = b"---\nruntime: bash\n---\n```bash\necho hi\n```\n";
+        let sig = sign(&key, content).unwrap();
+        assert_eq!(sig.pubkey, pubhex);
+        // Verifies against the right content + pubkey.
+        assert!(verify(&sig, content, Some(&pubhex)).is_ok());
+        // Tampered content fails.
+        assert!(verify(&sig, b"tampered", Some(&pubhex)).is_err());
+        // Wrong pubkey fails.
+        assert!(verify(&sig, content, Some("00")).is_err());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn hex_roundtrip() {
+        assert_eq!(from_hex(&to_hex(&[0, 255, 16])).unwrap(), vec![0, 255, 16]);
+        assert!(from_hex("xyz").is_err());
+    }
+}

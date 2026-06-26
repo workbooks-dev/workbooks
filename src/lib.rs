@@ -22,6 +22,7 @@ mod sandbox;
 mod secrets;
 mod sidecar;
 mod signal;
+mod signing;
 pub mod step_ir;
 mod step_outputs;
 mod trust;
@@ -527,6 +528,13 @@ struct RunArgs {
     /// first-use integrity check — not a signature; see `wb trust`.
     #[arg(long = "require-trust")]
     require_trust: bool,
+    /// Refuse to run unless the workbook carries a valid ed25519 signature
+    /// (`wb sign`). Pin the author with `--pubkey`. (#37)
+    #[arg(long = "verify-sig")]
+    verify_sig: bool,
+    /// Required signer public key (hex) for `--verify-sig`.
+    #[arg(long = "pubkey", value_name = "HEX")]
+    pubkey: Option<String>,
     /// Refuse to run unless the workbook's input identity matches its lockfile
     /// (see `wb lock`). Detects drift in the runbook or its included files.
     #[arg(long = "locked")]
@@ -664,6 +672,42 @@ enum RunsSub {
         #[command(flatten)]
         fmt: FormatArg,
     },
+}
+
+#[derive(clap::Args)]
+struct KeygenArgs {
+    /// Key file prefix (writes <prefix> + <prefix>.pub). Default ~/.wb/keys/wb_signing_key.
+    #[arg(long = "out", value_name = "PREFIX")]
+    out: Option<String>,
+    #[command(flatten)]
+    fmt: FormatArg,
+}
+
+#[derive(clap::Args)]
+struct SignArgs {
+    /// Workbook to sign.
+    file: String,
+    /// Private key path (default ~/.wb/keys/wb_signing_key).
+    #[arg(long = "key", value_name = "PATH")]
+    key: Option<String>,
+    /// Signature output path (default <file>.sig).
+    #[arg(long = "out", value_name = "PATH")]
+    out: Option<String>,
+}
+
+#[derive(clap::Args)]
+struct VerifySigArgs {
+    /// Workbook whose signature to verify.
+    file: String,
+    /// Signature file (default <file>.sig).
+    #[arg(long = "sig", value_name = "PATH")]
+    sig: Option<String>,
+    /// Required signer public key (hex). Without it, only signature validity is
+    /// checked, not *who* signed — pass `--pubkey` to pin the author.
+    #[arg(long = "pubkey", value_name = "HEX")]
+    pubkey: Option<String>,
+    #[command(flatten)]
+    fmt: FormatArg,
 }
 
 #[derive(clap::Args)]
@@ -934,6 +978,13 @@ enum Command {
     Trust(TrustArgs),
     /// Write a reproducibility lockfile of a workbook's input identity (#47).
     Lock(LockArgs),
+    /// Generate an ed25519 signing keypair (#37).
+    Keygen(KeygenArgs),
+    /// Sign a workbook, writing a detached `<file>.sig` (#37/#40).
+    Sign(SignArgs),
+    /// Verify a workbook's signature (#37).
+    #[command(name = "verify-sig")]
+    VerifySig(VerifySigArgs),
     Doctor(DoctorArgs),
     Pending(PendingArgs),
     Resume(ResumeArgs),
@@ -1030,6 +1081,10 @@ struct BareRunArgs {
     dry_run: bool,
     #[arg(long = "require-trust")]
     require_trust: bool,
+    #[arg(long = "verify-sig")]
+    verify_sig: bool,
+    #[arg(long = "pubkey", value_name = "HEX")]
+    pubkey: Option<String>,
     #[arg(long = "locked")]
     locked: bool,
     #[arg(long = "lockfile", value_name = "PATH")]
@@ -1090,6 +1145,9 @@ pub fn run() -> std::process::ExitCode {
         Some(Command::Capture(args)) => cmd_capture(args),
         Some(Command::Trust(args)) => cmd_trust(args),
         Some(Command::Lock(args)) => cmd_lock(args),
+        Some(Command::Keygen(args)) => cmd_keygen(args),
+        Some(Command::Sign(args)) => cmd_sign(args),
+        Some(Command::VerifySig(args)) => cmd_verify_sig(args),
         Some(Command::Doctor(args)) => cmd_doctor(args),
         Some(Command::Pending(args)) => cmd_pending_cmd(args),
         Some(Command::Resume(args)) => cmd_resume_cmd(args),
@@ -1155,6 +1213,8 @@ pub fn run() -> std::process::ExitCode {
                     profile: bare.profile,
                     dry_run: bare.dry_run,
                     require_trust: bare.require_trust,
+                    verify_sig: bare.verify_sig,
+                    pubkey: bare.pubkey,
                     locked: bare.locked,
                     lockfile: bare.lockfile,
                     repair: bare.repair,
@@ -1371,6 +1431,39 @@ fn cmd_run_inner(args: RunArgs, remote_forced_trust: bool) -> WbExit {
                     args.file
                 );
                 return WbExit::Usage(format!("untrusted workbook ({})", status.label()));
+            }
+        }
+    }
+
+    // Signature gate (#37): refuse to run unless the workbook carries a valid
+    // ed25519 signature (and matches --pubkey when pinned).
+    if args.verify_sig {
+        if p.is_dir() {
+            eprintln!("error: --verify-sig is not supported for folder runs yet");
+            return WbExit::Usage("verify-sig unsupported for folders".to_string());
+        }
+        let content = match std::fs::read(&args.file) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("error: {}: {}", args.file, e);
+                return WbExit::Io(e.to_string());
+            }
+        };
+        let sp = signing::sig_path(&args.file, None);
+        match signing::load_sig(&sp)
+            .and_then(|sig| signing::verify(&sig, &content, args.pubkey.as_deref()))
+        {
+            Ok(()) => {
+                if !args.quiet {
+                    eprintln!("wb: signature OK for {}", args.file);
+                }
+            }
+            Err(e) => {
+                eprintln!(
+                    "error: refusing to run {} — signature check failed: {e}. Sign it with `wb sign {}`.",
+                    args.file, args.file
+                );
+                return WbExit::Usage("signature verification failed".to_string());
             }
         }
     }
@@ -1821,6 +1914,108 @@ fn cmd_lock(args: LockArgs) -> WbExit {
         Err(e) => {
             eprintln!("error: {e}");
             WbExit::Io(e)
+        }
+    }
+}
+
+/// `wb keygen` — generate an ed25519 signing keypair (#37).
+fn cmd_keygen(args: KeygenArgs) -> WbExit {
+    let json = match want_json(&args.fmt.format) {
+        Ok(b) => b,
+        Err(e) => return e,
+    };
+    let prefix = args
+        .out
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(signing::default_key_path);
+    match signing::keygen(&prefix) {
+        Ok(pubhex) => {
+            if json {
+                print_json(&serde_json::json!({
+                    "key": prefix.to_string_lossy(),
+                    "pubkey_file": format!("{}.pub", prefix.display()),
+                    "pubkey": pubhex,
+                }));
+            } else {
+                eprintln!("wb: wrote private key {} (mode 0600)", prefix.display());
+                eprintln!("wb: public key: {pubhex}");
+            }
+            WbExit::Success
+        }
+        Err(e) => {
+            eprintln!("error: keygen: {e}");
+            WbExit::Io(e)
+        }
+    }
+}
+
+/// `wb sign <file>` — write a detached `<file>.sig` (#37/#40).
+fn cmd_sign(args: SignArgs) -> WbExit {
+    let key = args
+        .key
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(signing::default_key_path);
+    let content = match std::fs::read(&args.file) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("error: {}: {}", args.file, e);
+            return WbExit::Io(e.to_string());
+        }
+    };
+    match signing::sign(&key, &content) {
+        Ok(sig) => {
+            let out = signing::sig_path(&args.file, args.out.as_deref());
+            if let Err(e) = signing::save_sig(&out, &sig) {
+                eprintln!("error: {e}");
+                return WbExit::Io(e);
+            }
+            eprintln!(
+                "wb: signed {} → {} (key {})",
+                args.file,
+                out.display(),
+                sig.pubkey
+            );
+            WbExit::Success
+        }
+        Err(e) => {
+            eprintln!("error: sign: {e}");
+            WbExit::Usage(e)
+        }
+    }
+}
+
+/// `wb verify-sig <file>` — verify a workbook's signature (#37).
+fn cmd_verify_sig(args: VerifySigArgs) -> WbExit {
+    let json = match want_json(&args.fmt.format) {
+        Ok(b) => b,
+        Err(e) => return e,
+    };
+    let content = match std::fs::read(&args.file) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("error: {}: {}", args.file, e);
+            return WbExit::Io(e.to_string());
+        }
+    };
+    let sp = signing::sig_path(&args.file, args.sig.as_deref());
+    let result = signing::load_sig(&sp)
+        .and_then(|sig| signing::verify(&sig, &content, args.pubkey.as_deref()));
+    match result {
+        Ok(()) => {
+            if json {
+                print_json(&serde_json::json!({"file": args.file, "ok": true}));
+            } else {
+                println!("{}: signature OK", args.file);
+            }
+            WbExit::Success
+        }
+        Err(e) => {
+            if json {
+                print_json(&serde_json::json!({"file": args.file, "ok": false, "error": e}));
+            } else {
+                eprintln!("{}: {e}", args.file);
+            }
+            WbExit::Usage("signature verification failed".to_string())
         }
     }
 }

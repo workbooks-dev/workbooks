@@ -772,3 +772,58 @@ fn events_jsonl_sink_writes_one_object_per_line() {
     assert!(saw_complete, "should end with run.complete: {body}");
     std::fs::remove_dir_all(&dir).ok();
 }
+
+#[test]
+fn sign_verify_and_run_gate() {
+    let dir = std::env::temp_dir().join(format!("wb-sign-cli-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let keys = dir.join("keys");
+    let md = dir.join("w.md");
+    std::fs::write(&md, "---\nruntime: bash\n---\n```bash\necho ok\n```\n").unwrap();
+
+    let with_env = |args: &[&str]| {
+        Command::new(wb_binary())
+            .args(args)
+            .env("WB_KEYS_DIR", &keys)
+            .output()
+            .expect("spawn wb")
+    };
+
+    // --verify-sig before signing → refused (exit 2).
+    assert_eq!(
+        with_env(&[md.to_str().unwrap(), "--verify-sig", "-q"])
+            .status
+            .code(),
+        Some(2)
+    );
+    // keygen + sign.
+    assert_eq!(with_env(&["keygen"]).status.code(), Some(0));
+    assert_eq!(
+        with_env(&["sign", md.to_str().unwrap()]).status.code(),
+        Some(0)
+    );
+    // verify-sig passes.
+    assert_eq!(
+        with_env(&["verify-sig", md.to_str().unwrap()])
+            .status
+            .code(),
+        Some(0)
+    );
+    // run --verify-sig now succeeds.
+    let run = with_env(&[md.to_str().unwrap(), "--verify-sig"]);
+    assert!(String::from_utf8_lossy(&run.stdout).contains("ok"));
+    // Tamper → verify-sig fails (exit 2).
+    std::fs::write(
+        &md,
+        "---\nruntime: bash\n---\n```bash\necho TAMPERED\n```\n",
+    )
+    .unwrap();
+    assert_eq!(
+        with_env(&["verify-sig", md.to_str().unwrap()])
+            .status
+            .code(),
+        Some(2)
+    );
+
+    std::fs::remove_dir_all(&dir).ok();
+}
