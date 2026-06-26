@@ -1130,7 +1130,85 @@ fn print_short_usage() {
     eprintln!("       wb update");
 }
 
-fn cmd_run(args: RunArgs) -> WbExit {
+/// Resolve a remote workbook ref to an `https://` URL, or `None` for a local
+/// path. `gh:OWNER/REPO/PATH[@REF]` → raw.githubusercontent.com; bare
+/// `http(s)://…` URLs pass through. (#40, the safe remote-fetch piece.)
+fn resolve_remote_url(arg: &str) -> Option<String> {
+    if let Some(rest) = arg.strip_prefix("gh:") {
+        let (spec, git_ref) = match rest.split_once('@') {
+            Some((s, r)) => (s, r),
+            None => (rest, "HEAD"),
+        };
+        let mut parts = spec.splitn(3, '/');
+        let owner = parts.next().filter(|s| !s.is_empty())?;
+        let repo = parts.next().filter(|s| !s.is_empty())?;
+        let path = parts.next().filter(|s| !s.is_empty())?;
+        return Some(format!(
+            "https://raw.githubusercontent.com/{owner}/{repo}/{git_ref}/{path}"
+        ));
+    }
+    if arg.starts_with("http://") || arg.starts_with("https://") {
+        return Some(arg.to_string());
+    }
+    None
+}
+
+/// Fetch a remote workbook to `~/.wb/remote/<sha-of-url>.md` and return the
+/// local cache path. The content is downloaded but never executed here —
+/// `cmd_run` always trust-gates remote workbooks (TOFU).
+fn fetch_remote(url: &str) -> Result<std::path::PathBuf, String> {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(url.as_bytes());
+    let key: String = hasher
+        .finalize()
+        .iter()
+        .take(8)
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    let dir = std::env::var_os("HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir)
+        .join(".wb")
+        .join("remote");
+    std::fs::create_dir_all(&dir).map_err(|e| format!("remote cache: {e}"))?;
+    let dest = dir.join(format!("{key}.md"));
+    let out = std::process::Command::new("curl")
+        .args(["-fsSL", "--max-time", "30", "-o"])
+        .arg(&dest)
+        .arg(url)
+        .output()
+        .map_err(|e| format!("curl: {e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "failed to fetch {url}: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    Ok(dest)
+}
+
+fn cmd_run(mut args: RunArgs) -> WbExit {
+    // Remote ref (#40): fetch gh:/https: workbooks to a local cache. Remote
+    // workbooks are ALWAYS trust-gated (TOFU) and never auto-executed.
+    let mut remote_forced_trust = false;
+    if let Some(url) = resolve_remote_url(&args.file) {
+        match fetch_remote(&url) {
+            Ok(path) => {
+                eprintln!("wb: fetched {url}\n    → {}", path.display());
+                args.file = path.to_string_lossy().into_owned();
+                remote_forced_trust = true;
+            }
+            Err(e) => {
+                eprintln!("error: {e}");
+                return WbExit::Usage(e);
+            }
+        }
+    }
+    cmd_run_inner(args, remote_forced_trust)
+}
+
+fn cmd_run_inner(args: RunArgs, remote_forced_trust: bool) -> WbExit {
     let format_flag = if args.json {
         Some(OutputFormat::Json)
     } else if args.yaml {
@@ -1169,8 +1247,9 @@ fn cmd_run(args: RunArgs) -> WbExit {
 
     // Trust-on-first-use gate (#37): refuse to run an untrusted/changed
     // workbook when --require-trust (or $WB_REQUIRE_TRUST=1) is set.
-    let require_trust =
-        args.require_trust || std::env::var("WB_REQUIRE_TRUST").ok().as_deref() == Some("1");
+    let require_trust = args.require_trust
+        || remote_forced_trust
+        || std::env::var("WB_REQUIRE_TRUST").ok().as_deref() == Some("1");
     if require_trust {
         if p.is_dir() {
             eprintln!("error: --require-trust is not supported for folder runs yet; run files individually");
@@ -6973,6 +7052,25 @@ fn json_scalar_to_string(v: &serde_json::Value) -> Option<String> {
 mod tests {
     use super::*;
     use std::collections::HashMap;
+
+    #[test]
+    fn remote_ref_resolution() {
+        assert_eq!(
+            resolve_remote_url("gh:rust-lang/rust/README.md"),
+            Some("https://raw.githubusercontent.com/rust-lang/rust/HEAD/README.md".to_string())
+        );
+        assert_eq!(
+            resolve_remote_url("gh:o/r/docs/x.md@v1.2"),
+            Some("https://raw.githubusercontent.com/o/r/v1.2/docs/x.md".to_string())
+        );
+        assert_eq!(
+            resolve_remote_url("https://example.com/x.md"),
+            Some("https://example.com/x.md".to_string())
+        );
+        // Local paths and malformed gh refs are not remote.
+        assert_eq!(resolve_remote_url("./local.md"), None);
+        assert_eq!(resolve_remote_url("gh:onlyowner"), None);
+    }
 
     // ─── F7b: resume navigation actions ──────────────────────────────
 
