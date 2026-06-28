@@ -68,10 +68,18 @@ pub struct Checkpoint {
     /// checkpoints and runs that set no requirements.
     #[serde(default)]
     pub security: Option<SecurityRequirements>,
+    // --- sandbox isolation (security) ---
+    /// Whether this run was started with `--sandbox-no-network`. Persisted so a
+    /// `wb resume` of a paused sandbox run re-enters the container with the same
+    /// network confinement instead of silently regaining network access.
+    /// `false` for non-sandbox runs and legacy checkpoints written before this
+    /// field shipped (serde default).
+    #[serde(default)]
+    pub sandbox_no_network: bool,
 }
 
 /// The trust / signature / lockfile gates that were in force when a run started.
-/// Stored on the checkpoint so a later `wb resume` re-enforces them — otherwise
+/// Stored on the checkpoint so a later `wb resume` re-enforces them; otherwise
 /// a workbook edited between pause and resume would run its untrusted/tampered
 /// blocks unchecked.
 #[derive(Serialize, Deserialize, Default, Clone, Debug, PartialEq, Eq)]
@@ -166,6 +174,7 @@ impl Checkpoint {
             params: BTreeMap::new(),
             callback_seq: 0,
             security: None,
+            sandbox_no_network: false,
         }
     }
 
@@ -619,6 +628,42 @@ mod tests {
         // add_result stored code_hash + heading on the SavedResult.
         assert_eq!(ckpt.results[0].heading.as_deref(), Some("Heading"));
         assert_eq!(ckpt.results[0].code_hash, Some(hash_code("code")));
+    }
+
+    #[test]
+    fn test_sandbox_no_network_round_trips_through_save_load() {
+        let id = unique_id("test_ckpt_sandbox_no_network");
+        let mut ckpt = Checkpoint::new("sandboxed.md", 2);
+        assert!(
+            !ckpt.sandbox_no_network,
+            "default should be false (network allowed)"
+        );
+        ckpt.sandbox_no_network = true;
+        save(&id, &ckpt).expect("save");
+        let loaded = load(&id).expect("load").expect("present");
+        assert!(
+            loaded.sandbox_no_network,
+            "no-network choice must survive pause/resume"
+        );
+        delete(&id).expect("cleanup");
+    }
+
+    #[test]
+    fn test_legacy_checkpoint_without_sandbox_field_defaults_false() {
+        // A checkpoint written before `sandbox_no_network` shipped must still
+        // parse (serde default), defaulting to network-allowed.
+        let legacy = r#"{
+            "version": 1,
+            "workbook": "deploy.md",
+            "status": "paused",
+            "next_block": 1,
+            "total_blocks": 3,
+            "started_at": "2026-01-01T00:00:00Z",
+            "updated_at": "2026-01-01T00:00:00Z",
+            "results": []
+        }"#;
+        let ckpt: Checkpoint = serde_json::from_str(legacy).expect("parse legacy");
+        assert!(!ckpt.sandbox_no_network);
     }
 
     #[test]

