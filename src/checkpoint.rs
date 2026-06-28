@@ -61,6 +61,43 @@ pub struct Checkpoint {
     /// callbacks by sequence even when it spans multiple processes.
     #[serde(default)]
     pub callback_seq: u64,
+    // --- security gate requirements (persisted at run start) ---
+    /// Integrity/security requirements captured when the run first started, so
+    /// `wb resume` can re-apply the SAME gates against the (possibly edited)
+    /// workbook before executing any not-yet-run blocks. `None` for legacy
+    /// checkpoints and runs that set no requirements.
+    #[serde(default)]
+    pub security: Option<SecurityRequirements>,
+}
+
+/// The trust / signature / lockfile gates that were in force when a run started.
+/// Stored on the checkpoint so a later `wb resume` re-enforces them — otherwise
+/// a workbook edited between pause and resume would run its untrusted/tampered
+/// blocks unchecked.
+#[derive(Serialize, Deserialize, Default, Clone, Debug, PartialEq, Eq)]
+pub struct SecurityRequirements {
+    /// `--require-trust` (or `$WB_REQUIRE_TRUST=1`, or a remote-fetched run).
+    #[serde(default)]
+    pub require_trust: bool,
+    /// `--verify-sig`.
+    #[serde(default)]
+    pub verify_sig: bool,
+    /// Pinned signer public key (hex) for `--verify-sig`.
+    #[serde(default)]
+    pub verify_pubkey: Option<String>,
+    /// `--locked`.
+    #[serde(default)]
+    pub locked: bool,
+    /// Explicit `--lockfile` path, if one was given.
+    #[serde(default)]
+    pub lockfile: Option<String>,
+}
+
+impl SecurityRequirements {
+    /// True when at least one gate is active (i.e. resume must re-check).
+    pub fn any(&self) -> bool {
+        self.require_trust || self.verify_sig || self.locked
+    }
 }
 
 #[derive(Serialize, Deserialize, PartialEq, Clone, Copy, Debug)]
@@ -128,6 +165,7 @@ impl Checkpoint {
             param_hash: None,
             params: BTreeMap::new(),
             callback_seq: 0,
+            security: None,
         }
     }
 
@@ -613,5 +651,34 @@ mod tests {
         assert!(ckpt.next_step_id.is_none());
         assert_eq!(ckpt.results.len(), 1);
         assert!(ckpt.results[0].step_id.is_none());
+        // The new `security` field must default to None for legacy checkpoints
+        // so an upgrade doesn't strand in-flight runs.
+        assert!(ckpt.security.is_none());
+    }
+
+    #[test]
+    fn test_security_requirements_round_trip_through_save_load() {
+        let id = unique_id("test_ckpt_security");
+        let mut ckpt = Checkpoint::new("deploy.md", 3);
+        ckpt.security = Some(SecurityRequirements {
+            require_trust: true,
+            verify_sig: true,
+            verify_pubkey: Some("deadbeef".to_string()),
+            locked: true,
+            lockfile: Some("custom.lock".to_string()),
+        });
+        save(&id, &ckpt).expect("save");
+        let loaded = load(&id).expect("load").expect("present");
+        let sec = loaded.security.expect("security persisted");
+        assert!(sec.require_trust && sec.verify_sig && sec.locked);
+        assert!(sec.any());
+        assert_eq!(sec.verify_pubkey.as_deref(), Some("deadbeef"));
+        assert_eq!(sec.lockfile.as_deref(), Some("custom.lock"));
+        delete(&id).expect("cleanup");
+    }
+
+    #[test]
+    fn test_security_requirements_default_is_inactive() {
+        assert!(!SecurityRequirements::default().any());
     }
 }

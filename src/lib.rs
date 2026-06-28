@@ -1398,6 +1398,95 @@ fn fetch_remote(url: &str) -> Result<std::path::PathBuf, String> {
     Ok(dest)
 }
 
+/// Run the integrity/security gates (trust → verify-sig → locked) against a
+/// single in-memory copy of the workbook. Taking the already-read bytes (rather
+/// than re-reading per gate) closes the TOCTOU window: the bytes verified here
+/// are exactly the bytes `run_single` executes. Shared by `wb run` (first run)
+/// and `wb resume` (re-enforcement against the possibly-edited workbook).
+///
+/// Returns `Err(WbExit)` on the first failing gate; the caller should return it
+/// without running anything.
+fn enforce_security_gates(
+    file: &str,
+    content: &str,
+    sec: &checkpoint::SecurityRequirements,
+    quiet: bool,
+) -> Result<(), WbExit> {
+    // Trust-on-first-use (#37): compare the in-memory content's hash against the
+    // trust store directly, instead of `TrustStore::status()` which re-reads the
+    // file (which would reopen the TOCTOU we're closing).
+    if sec.require_trust {
+        let store = trust::TrustStore::load();
+        let key = trust::canonical_key(file);
+        // `checkpoint::hash_code` is sha256-hex over the bytes — same scheme the
+        // trust store uses (`trust::hash_file`), so hashes are comparable.
+        let current = checkpoint::hash_code(content);
+        let status = match store.entries.get(&key) {
+            None => trust::TrustStatus::Untrusted,
+            Some(saved) if *saved == current => trust::TrustStatus::Trusted,
+            Some(_) => trust::TrustStatus::Changed,
+        };
+        if status != trust::TrustStatus::Trusted {
+            eprintln!(
+                "error: refusing to run {} — workbook is {}. Review it, then run `wb trust add {}`.",
+                file,
+                status.label(),
+                file
+            );
+            return Err(WbExit::Usage(format!(
+                "untrusted workbook ({})",
+                status.label()
+            )));
+        }
+    }
+
+    // Signature gate (#37): verify against the same buffer.
+    if sec.verify_sig {
+        let sp = signing::sig_path(file, None);
+        match signing::load_sig(&sp)
+            .and_then(|sig| signing::verify(&sig, content.as_bytes(), sec.verify_pubkey.as_deref()))
+        {
+            Ok(()) => {
+                if !quiet {
+                    eprintln!("wb: signature OK for {}", file);
+                }
+            }
+            Err(e) => {
+                eprintln!(
+                    "error: refusing to run {} — signature check failed: {e}. Sign it with `wb sign {}`.",
+                    file, file
+                );
+                return Err(WbExit::Usage("signature verification failed".to_string()));
+            }
+        }
+    }
+
+    // Reproducibility lockfile gate (#47): drift-check the same buffer.
+    if sec.locked {
+        let lp = lockfile::lock_path(file, sec.lockfile.as_deref());
+        match lockfile::load(&lp) {
+            Ok(lock) => {
+                let workbook = parse_and_resolve(content, file);
+                let steps = workbook.build_steps();
+                let exec = lockfile::exec_attrs(&workbook);
+                if let Err(drift) = lockfile::verify(&lock, &steps, &exec) {
+                    eprintln!(
+                        "error: --locked: {drift}. If the change is intended, re-run `wb lock {}`.",
+                        file
+                    );
+                    return Err(WbExit::Usage("workbook drifted from lockfile".to_string()));
+                }
+            }
+            Err(e) => {
+                eprintln!("error: --locked: {e}. Run `wb lock {}` first.", file);
+                return Err(WbExit::Usage("missing or invalid lockfile".to_string()));
+            }
+        }
+    }
+
+    Ok(())
+}
+
 fn cmd_run(mut args: RunArgs) -> WbExit {
     // Remote ref (#40): fetch gh:/https: workbooks to a local cache. Remote
     // workbooks are ALWAYS trust-gated (TOFU) and never auto-executed.
@@ -1454,41 +1543,71 @@ fn cmd_run_inner(args: RunArgs, remote_forced_trust: bool) -> WbExit {
     };
 
     let p = Path::new(&args.file);
+    let is_dir = p.is_dir();
 
-    // Trust-on-first-use gate (#37): refuse to run an untrusted/changed
-    // workbook when --require-trust (or $WB_REQUIRE_TRUST=1) is set.
     let require_trust = args.require_trust
         || remote_forced_trust
         || std::env::var("WB_REQUIRE_TRUST").ok().as_deref() == Some("1");
-    if require_trust {
-        if p.is_dir() {
+
+    // The integrity gates don't support folder runs; reject early (per-flag
+    // messages preserved) before touching any file.
+    if is_dir {
+        if require_trust {
             eprintln!("error: --require-trust is not supported for folder runs yet; run files individually");
             return WbExit::Usage("require-trust unsupported for folders".to_string());
         }
-        match trust::TrustStore::load().status(&args.file) {
-            trust::TrustStatus::Trusted => {}
-            status => {
-                eprintln!(
-                    "error: refusing to run {} — workbook is {}. Review it, then run `wb trust add {}`.",
-                    args.file,
-                    status.label(),
-                    args.file
-                );
-                return WbExit::Usage(format!("untrusted workbook ({})", status.label()));
+        if args.verify_sig {
+            eprintln!("error: --verify-sig is not supported for folder runs yet");
+            return WbExit::Usage("verify-sig unsupported for folders".to_string());
+        }
+        if args.locked {
+            eprintln!("error: --locked is not supported for folder runs yet");
+            return WbExit::Usage("locked unsupported for folders".to_string());
+        }
+    }
+
+    // TOCTOU fix: read the workbook ONCE and run every integrity gate against
+    // this single buffer, then hand the same bytes to run_single so the bytes
+    // verified are the bytes executed. (Folder runs read per-file later.)
+    let file_content: Option<String> = if is_dir {
+        None
+    } else {
+        match std::fs::read_to_string(&args.file) {
+            Ok(c) => Some(c),
+            Err(e) => {
+                eprintln!("error: {}: {}", args.file, e);
+                return WbExit::Io(e.to_string());
             }
+        }
+    };
+
+    // Capture the security requirements so a later `wb resume` can re-enforce
+    // the SAME gates against the (possibly edited) workbook.
+    let security = checkpoint::SecurityRequirements {
+        require_trust,
+        verify_sig: args.verify_sig,
+        verify_pubkey: args.pubkey.clone(),
+        locked: args.locked,
+        lockfile: args.lockfile.clone(),
+    };
+
+    // Trust / verify-sig / locked gates against the single buffer.
+    if let Some(content) = file_content.as_deref() {
+        if let Err(exit) = enforce_security_gates(&args.file, content, &security, args.quiet) {
+            return exit;
         }
     }
 
     // Runtime allowlist (#37): an enforceable policy — refuse before any block
     // runs if the workbook uses a language not on the allowlist.
-    if !args.allow_runtime.is_empty() && !p.is_dir() {
-        if let Ok(content) = std::fs::read_to_string(&args.file) {
+    if !args.allow_runtime.is_empty() {
+        if let Some(content) = file_content.as_deref() {
             let allowed: std::collections::HashSet<String> = args
                 .allow_runtime
                 .iter()
                 .map(|s| s.to_lowercase())
                 .collect();
-            let offenders: Vec<String> = parse_and_resolve(&content, &args.file)
+            let offenders: Vec<String> = parse_and_resolve(content, &args.file)
                 .build_steps()
                 .iter()
                 .map(|s| s.language.to_lowercase())
@@ -1506,70 +1625,7 @@ fn cmd_run_inner(args: RunArgs, remote_forced_trust: bool) -> WbExit {
         }
     }
 
-    // Signature gate (#37): refuse to run unless the workbook carries a valid
-    // ed25519 signature (and matches --pubkey when pinned).
-    if args.verify_sig {
-        if p.is_dir() {
-            eprintln!("error: --verify-sig is not supported for folder runs yet");
-            return WbExit::Usage("verify-sig unsupported for folders".to_string());
-        }
-        let content = match std::fs::read(&args.file) {
-            Ok(c) => c,
-            Err(e) => {
-                eprintln!("error: {}: {}", args.file, e);
-                return WbExit::Io(e.to_string());
-            }
-        };
-        let sp = signing::sig_path(&args.file, None);
-        match signing::load_sig(&sp)
-            .and_then(|sig| signing::verify(&sig, &content, args.pubkey.as_deref()))
-        {
-            Ok(()) => {
-                if !args.quiet {
-                    eprintln!("wb: signature OK for {}", args.file);
-                }
-            }
-            Err(e) => {
-                eprintln!(
-                    "error: refusing to run {} — signature check failed: {e}. Sign it with `wb sign {}`.",
-                    args.file, args.file
-                );
-                return WbExit::Usage("signature verification failed".to_string());
-            }
-        }
-    }
-
-    // Reproducibility lockfile gate (#47): refuse to run if the workbook's
-    // input identity drifted from its lockfile.
-    if args.locked {
-        if p.is_dir() {
-            eprintln!("error: --locked is not supported for folder runs yet");
-            return WbExit::Usage("locked unsupported for folders".to_string());
-        }
-        let lp = lockfile::lock_path(&args.file, args.lockfile.as_deref());
-        match (std::fs::read_to_string(&args.file), lockfile::load(&lp)) {
-            (Ok(content), Ok(lock)) => {
-                let steps = parse_and_resolve(&content, &args.file).build_steps();
-                if let Err(drift) = lockfile::verify(&lock, &steps) {
-                    eprintln!(
-                        "error: --locked: {drift}. If the change is intended, re-run `wb lock {}`.",
-                        args.file
-                    );
-                    return WbExit::Usage("workbook drifted from lockfile".to_string());
-                }
-            }
-            (_, Err(e)) => {
-                eprintln!("error: --locked: {e}. Run `wb lock {}` first.", args.file);
-                return WbExit::Usage("missing or invalid lockfile".to_string());
-            }
-            (Err(e), _) => {
-                eprintln!("error: {}: {}", args.file, e);
-                return WbExit::Io(e.to_string());
-            }
-        }
-    }
-
-    if p.is_dir() {
+    if is_dir {
         run_folder(
             &args.file,
             args.output,
@@ -1592,6 +1648,8 @@ fn cmd_run_inner(args: RunArgs, remote_forced_trust: bool) -> WbExit {
     } else {
         run_single(RunConfig {
             file: args.file,
+            content: file_content,
+            security,
             output_path: args.output,
             output_format,
             stdout_output,
@@ -2018,8 +2076,10 @@ fn cmd_lock(args: LockArgs) -> WbExit {
             return WbExit::Io(e.to_string());
         }
     };
-    let steps = parse_and_resolve(&content, &args.file).build_steps();
-    let lock = lockfile::build(&args.file, &steps);
+    let workbook = parse_and_resolve(&content, &args.file);
+    let steps = workbook.build_steps();
+    let exec = lockfile::exec_attrs(&workbook);
+    let lock = lockfile::build(&args.file, &steps, &exec);
     let path = lockfile::lock_path(&args.file, args.lockfile.as_deref());
     match lockfile::save(&path, &lock) {
         Ok(_) => {
@@ -3654,6 +3714,14 @@ fn run_single_collect(
 /// touching every call site.
 struct RunConfig {
     file: String,
+    /// Pre-read workbook bytes. When `Some`, `run_single` executes exactly these
+    /// bytes instead of re-reading `file` — closing the TOCTOU window between the
+    /// integrity gates and execution. `None` for callers that didn't pre-read
+    /// (run_single falls back to reading `file`).
+    content: Option<String>,
+    /// Integrity/security requirements in force for this run, persisted into the
+    /// checkpoint so `wb resume` can re-enforce them. Default = no gates.
+    security: checkpoint::SecurityRequirements,
     output_path: Option<String>,
     output_format: Option<OutputFormat>,
     stdout_output: bool,
@@ -4748,12 +4816,18 @@ fn run_single(cfg: RunConfig) {
     // the final RunSummary so every artifact/event of this run shares a key.
     let run_id = artifacts::resolve_run_id(&std::collections::HashMap::new());
 
-    let content = match std::fs::read_to_string(&cfg.file) {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("error: {}: {}", cfg.file, e);
-            std::process::exit(1);
-        }
+    // Prefer the pre-read buffer (TOCTOU fix): when a caller already read +
+    // gate-checked the workbook, execute exactly those bytes. Fall back to
+    // reading `file` for callers that didn't pre-read.
+    let content = match &cfg.content {
+        Some(c) => c.clone(),
+        None => match std::fs::read_to_string(&cfg.file) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("error: {}: {}", cfg.file, e);
+                std::process::exit(1);
+            }
+        },
     };
 
     let workbook = parse_and_resolve(&content, &cfg.file);
@@ -4817,6 +4891,9 @@ fn run_single(cfg: RunConfig) {
     // bare locals instead of `cfg.field` everywhere.
     let RunConfig {
         file,
+        // Already consumed above into `content`.
+        content: _,
+        security,
         output_path,
         output_format,
         stdout_output,
@@ -4931,6 +5008,12 @@ fn run_single(cfg: RunConfig) {
         // change is detected on the next run.
         c.param_hash = param_hash.clone();
         c.params = resolved_params.values.clone();
+        // Stamp the security requirements at run start only. On resume the
+        // checkpoint already carries the original gates (cfg.security is the
+        // resume command's default), so we must not clobber them.
+        if c.security.is_none() {
+            c.security = Some(security.clone());
+        }
     }
     let mut run_outputs = ckpt.as_ref().map(|c| c.outputs.clone()).unwrap_or_default();
 
@@ -7295,6 +7378,30 @@ fn cmd_resume_cmd(cli: ResumeArgs) -> WbExit {
         std::process::exit(exit_codes::EXIT_WORKBOOK_INVALID);
     }
 
+    // Re-enforce the integrity gates that were in force when this run first
+    // started. A workbook edited between pause and resume could otherwise run
+    // its not-yet-executed (untrusted/tampered/drifted) blocks unchecked. Read
+    // the workbook once and reuse the buffer for both the gate check and the
+    // re-entry into run_single (closing the resume-side TOCTOU too).
+    let resume_security = ckpt.security.clone().unwrap_or_default();
+    let resume_content: Option<String> = if resume_security.any() {
+        let content = match std::fs::read_to_string(&ckpt.workbook) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("error: {}: {}", ckpt.workbook, e);
+                std::process::exit(1);
+            }
+        };
+        if let Err(exit) =
+            enforce_security_gates(&ckpt.workbook, &content, &resume_security, cli.quiet)
+        {
+            return exit;
+        }
+        Some(content)
+    } else {
+        None
+    };
+
     let desc = match pending::load(id) {
         Ok(Some(d)) => d,
         Ok(None) => {
@@ -7457,6 +7564,9 @@ fn cmd_resume_cmd(cli: ResumeArgs) -> WbExit {
 
         run_single(RunConfig {
             file: workbook_file.clone(),
+            // Execute the exact bytes the resume-side gates verified.
+            content: resume_content,
+            security: resume_security,
             output_path: cli.output,
             output_format,
             stdout_output,
@@ -7718,6 +7828,9 @@ fn cmd_resume_cmd(cli: ResumeArgs) -> WbExit {
 
     run_single(RunConfig {
         file: workbook_file.clone(),
+        // Execute the exact bytes the resume-side gates verified.
+        content: resume_content,
+        security: resume_security,
         output_path: cli.output,
         output_format,
         stdout_output,

@@ -32,6 +32,47 @@ pub struct Lockfile {
     pub steps: Vec<LockedStep>,
 }
 
+/// Execution-relevant fence attributes that change *whether* or *when* a step
+/// runs, independent of its language + body. Folded into the per-step hash so a
+/// `{no-run}`→live edit (or a `{when=}`/`{skip_if=}` change) is detected as
+/// drift by `--locked`. Without this, flipping an inert documentation block into
+/// executed code (or re-gating a live block) slips past the lockfile because the
+/// language + body bytes are unchanged.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StepExecAttrs {
+    /// `{no-run}`: block is parsed/rendered but never executed.
+    pub skip_execution: bool,
+    /// `{when=EXPR}`: runtime-conditional execution.
+    pub when: Option<String>,
+    /// `{skip_if=EXPR}`: inverse of `when`.
+    pub skip_if: Option<String>,
+}
+
+/// Extract the execution-relevant attrs for each resolved step, in the same
+/// order as `Workbook::build_steps()` (Code + Browser sections, includes
+/// expanded). The returned vec is index-aligned with that step list, so it can
+/// be passed alongside it to [`build`]/[`verify`].
+pub fn exec_attrs(workbook: &crate::parser::Workbook) -> Vec<StepExecAttrs> {
+    use crate::parser::Section;
+    let mut out = Vec::new();
+    for section in &workbook.sections {
+        match section {
+            Section::Code(b) => out.push(StepExecAttrs {
+                skip_execution: b.skip_execution,
+                when: b.when.clone(),
+                skip_if: b.skip_if.clone(),
+            }),
+            Section::Browser(spec) => out.push(StepExecAttrs {
+                skip_execution: spec.skip_execution,
+                when: spec.when.clone(),
+                skip_if: spec.skip_if.clone(),
+            }),
+            _ => {}
+        }
+    }
+    out
+}
+
 /// Default lockfile path for a workbook: `<file>.lock`.
 pub fn lock_path(file: &str, explicit: Option<&str>) -> PathBuf {
     match explicit {
@@ -40,25 +81,38 @@ pub fn lock_path(file: &str, explicit: Option<&str>) -> PathBuf {
     }
 }
 
-fn step_hash(step: &Step) -> String {
+fn step_hash(step: &Step, exec: &StepExecAttrs) -> String {
     let mut hasher = Sha256::new();
     hasher.update(step.language.as_bytes());
     hasher.update([0u8]);
     hasher.update(step.body.as_bytes());
+    hasher.update([0u8]);
+    // Fold in the execution-relevant fence attrs so a `{no-run}`→live edit or a
+    // `{when=}`/`{skip_if=}` change is caught even when language + body are
+    // byte-identical (see `StepExecAttrs`).
+    hasher.update([exec.skip_execution as u8]);
+    hasher.update([0u8]);
+    hasher.update(exec.when.as_deref().unwrap_or("").as_bytes());
+    hasher.update([0u8]);
+    hasher.update(exec.skip_if.as_deref().unwrap_or("").as_bytes());
     format!("{:x}", hasher.finalize())
 }
 
 /// Build a lockfile snapshot from a workbook's resolved (post-include) steps.
-pub fn build(file: &str, steps: &[Step]) -> Lockfile {
+/// `exec` is the index-aligned execution-attr list from [`exec_attrs`]; a short
+/// or empty slice falls back to defaults for the missing tail.
+pub fn build(file: &str, steps: &[Step], exec: &[StepExecAttrs]) -> Lockfile {
+    let default = StepExecAttrs::default();
     Lockfile {
         version: 1,
         workbook: file.to_string(),
         steps: steps
             .iter()
-            .map(|s| LockedStep {
+            .enumerate()
+            .map(|(i, s)| LockedStep {
                 step_id: s.id.as_str().to_string(),
                 language: s.language.clone(),
-                sha256: step_hash(s),
+                sha256: step_hash(s, exec.get(i).unwrap_or(&default)),
             })
             .collect(),
     }
@@ -77,8 +131,8 @@ pub fn save(path: &Path, lock: &Lockfile) -> Result<(), String> {
 
 /// Verify the current steps against a lockfile. Returns a human-readable drift
 /// description on mismatch, or `Ok(())` if the inputs are identical.
-pub fn verify(locked: &Lockfile, current: &[Step]) -> Result<(), String> {
-    let current = build(&locked.workbook, current);
+pub fn verify(locked: &Lockfile, current: &[Step], exec: &[StepExecAttrs]) -> Result<(), String> {
+    let current = build(&locked.workbook, current, exec);
     if current.steps.len() != locked.steps.len() {
         return Err(format!(
             "step count changed: locked {} vs current {}",
@@ -107,19 +161,63 @@ mod tests {
         parser::parse(md).build_steps()
     }
 
+    fn execs(md: &str) -> Vec<StepExecAttrs> {
+        exec_attrs(&parser::parse(md))
+    }
+
+    fn build_md(file: &str, md: &str) -> Lockfile {
+        build(file, &steps(md), &execs(md))
+    }
+
+    fn verify_md(lock: &Lockfile, md: &str) -> Result<(), String> {
+        verify(lock, &steps(md), &execs(md))
+    }
+
     #[test]
     fn lock_matches_unchanged_and_detects_edits() {
         let md = "---\nruntime: bash\n---\n```bash\necho a\n```\n```bash\necho b\n```\n";
-        let lock = build("w.md", &steps(md));
+        let lock = build_md("w.md", md);
         assert_eq!(lock.steps.len(), 2);
         // Unchanged → ok.
-        assert!(verify(&lock, &steps(md)).is_ok());
+        assert!(verify_md(&lock, md).is_ok());
         // Edit a block → drift.
         let edited = "---\nruntime: bash\n---\n```bash\necho a\n```\n```bash\necho CHANGED\n```\n";
-        assert!(verify(&lock, &steps(edited)).is_err());
+        assert!(verify_md(&lock, edited).is_err());
         // Remove a block → count drift.
         let fewer = "---\nruntime: bash\n---\n```bash\necho a\n```\n";
-        assert!(verify(&lock, &steps(fewer)).is_err());
+        assert!(verify_md(&lock, fewer).is_err());
+    }
+
+    #[test]
+    fn toggling_no_run_changes_hash_and_is_detected_as_drift() {
+        // A `{no-run}` block is inert documentation; removing the flag turns it
+        // into executed code. Language + body are byte-identical, so the only
+        // signal is the folded-in exec attr.
+        let inert = "---\nruntime: bash\n---\n```bash {no-run}\nrm -rf /\n```\n";
+        let live = "---\nruntime: bash\n---\n```bash\nrm -rf /\n```\n";
+
+        let inert_lock = build_md("w.md", inert);
+        let live_lock = build_md("w.md", live);
+        // The per-step hash must differ between inert and live.
+        assert_ne!(inert_lock.steps[0].sha256, live_lock.steps[0].sha256);
+
+        // A lockfile written against the inert block must reject the live one.
+        assert!(verify_md(&inert_lock, inert).is_ok());
+        assert!(
+            verify_md(&inert_lock, live).is_err(),
+            "{{no-run}}→live edit must be detected as drift"
+        );
+    }
+
+    #[test]
+    fn toggling_when_or_skip_if_is_detected_as_drift() {
+        let base = "---\nruntime: bash\n---\n```bash\necho hi\n```\n";
+        let gated = "---\nruntime: bash\n---\n```bash {when=$DEPLOY}\necho hi\n```\n";
+        let skip = "---\nruntime: bash\n---\n```bash {skip_if=$DRY}\necho hi\n```\n";
+        let lock = build_md("w.md", base);
+        assert!(verify_md(&lock, base).is_ok());
+        assert!(verify_md(&lock, gated).is_err(), "adding when= is drift");
+        assert!(verify_md(&lock, skip).is_err(), "adding skip_if= is drift");
     }
 
     #[test]
@@ -137,12 +235,12 @@ mod tests {
     #[test]
     fn save_then_load_roundtrip_on_disk() {
         let md = "---\nruntime: bash\n---\n```bash\necho a\n```\n";
-        let lock = build("w.md", &steps(md));
+        let lock = build_md("w.md", md);
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("w.md.lock");
         save(&path, &lock).unwrap();
         let loaded = load(&path).unwrap();
-        assert!(verify(&loaded, &steps(md)).is_ok());
+        assert!(verify_md(&loaded, md).is_ok());
     }
 
     #[test]
@@ -164,8 +262,8 @@ mod tests {
         // (and sha) drift branch.
         let bash = "---\nruntime: bash\n---\n```bash\nprint(1)\n```\n";
         let py = "---\nruntime: bash\n---\n```python\nprint(1)\n```\n";
-        let lock = build("w.md", &steps(bash));
-        assert!(verify(&lock, &steps(py)).is_err());
+        let lock = build_md("w.md", bash);
+        assert!(verify_md(&lock, py).is_err());
     }
 
     #[test]
