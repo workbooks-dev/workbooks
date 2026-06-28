@@ -1052,9 +1052,7 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind ephemeral");
         let port = listener.local_addr().unwrap().port();
         let handle = std::thread::spawn(move || {
-            listener
-                .set_nonblocking(false)
-                .ok();
+            listener.set_nonblocking(false).ok();
             let (mut stream, _addr) = match listener.accept() {
                 Ok(s) => s,
                 Err(_) => return String::new(),
@@ -1111,8 +1109,7 @@ mod tests {
         let req = handle.join().expect("server thread");
         assert!(!req.is_empty(), "expected a callback POST to be captured");
         let body = req.split("\r\n\r\n").nth(1).unwrap_or("");
-        let payload: serde_json::Value =
-            serde_json::from_str(body).expect("callback body is JSON");
+        let payload: serde_json::Value = serde_json::from_str(body).expect("callback body is JSON");
         assert_eq!(payload["event"], "checkpoint.failed");
         assert_eq!(
             payload["progress"]["completed"], 3,

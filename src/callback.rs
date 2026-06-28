@@ -2116,7 +2116,16 @@ mod tests {
             stderr_partial: false,
         };
         cb.checkpoint_failed(
-            &result, 0, 1, "big.md", "ckpt-trunc", None, 1, &[], None, None,
+            &result,
+            0,
+            1,
+            "big.md",
+            "ckpt-trunc",
+            None,
+            1,
+            &[],
+            None,
+            None,
         );
         let req = handle.join().expect("server thread");
         let payload: serde_json::Value =

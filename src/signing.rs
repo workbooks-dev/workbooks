@@ -219,7 +219,10 @@ mod tests {
         keygen(&key).unwrap();
 
         let key_mode = std::fs::metadata(&key).unwrap().permissions().mode() & 0o777;
-        assert_eq!(key_mode, 0o600, "private key must be 0600, got {key_mode:o}");
+        assert_eq!(
+            key_mode, 0o600,
+            "private key must be 0600, got {key_mode:o}"
+        );
 
         let dir_mode = std::fs::metadata(&keys_dir).unwrap().permissions().mode() & 0o777;
         assert_eq!(dir_mode, 0o700, "keys dir must be 0700, got {dir_mode:o}");
