@@ -16,6 +16,8 @@ permissions:
 jobs:
   check:
     runs-on: ubuntu-latest
+    # scripts/check.sh runs rustfmt, clippy, the full locked test suite, and a release build.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
@@ -25,3 +27,4 @@ jobs:
         with:
           shared-key: ci
       - run: scripts/check.sh
+        timeout-minutes: 25
