@@ -16,7 +16,8 @@ pub struct PendingDescriptor {
     pub checkpoint: String,
     pub checkpoint_id: String,
     pub workbook: String,
-    /// 1-indexed code-block position this wait follows (for humans).
+    /// 0-based index of the next code block to run when resumed (equivalently,
+    /// the count of blocks completed before this pause).
     pub next_block: usize,
     /// Stable step id of the step that `next_block` points at (i.e. the step
     /// that will run when this pending descriptor is resumed). Persisted so
@@ -428,7 +429,7 @@ pub fn reap_expired() -> Vec<ReapedEntry> {
                         events_path: None,
                     };
                     let total = total_blocks.unwrap_or(desc_now.next_block);
-                    let completed = desc_now.next_block.saturating_sub(1);
+                    let completed = desc_now.next_block;
                     let result = crate::executor::BlockResult {
                         block_index: desc_now.next_block,
                         language: desc_now.kind.clone().unwrap_or_else(|| "wait".to_string()),
@@ -1040,6 +1041,83 @@ mod tests {
         );
         let loaded_ckpt = checkpoint::load(&id).expect("load ckpt").expect("ckpt");
         assert_eq!(loaded_ckpt.status, checkpoint::CheckpointStatus::Failed);
+
+        let _ = checkpoint::delete(&id);
+    }
+
+    /// One-shot HTTP capture server, mirrors the helper in callback.rs.
+    fn spawn_one_shot_capture() -> (u16, std::thread::JoinHandle<String>) {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind ephemeral");
+        let port = listener.local_addr().unwrap().port();
+        let handle = std::thread::spawn(move || {
+            listener
+                .set_nonblocking(false)
+                .ok();
+            let (mut stream, _addr) = match listener.accept() {
+                Ok(s) => s,
+                Err(_) => return String::new(),
+            };
+            stream
+                .set_read_timeout(Some(std::time::Duration::from_secs(3)))
+                .ok();
+            let mut data: Vec<u8> = Vec::new();
+            let mut tmp = [0u8; 4096];
+            loop {
+                match stream.read(&mut tmp) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        data.extend_from_slice(&tmp[..n]);
+                        if String::from_utf8_lossy(&data).contains("\r\n\r\n") {
+                            // Good enough: headers + (small) body received.
+                            std::thread::sleep(std::time::Duration::from_millis(20));
+                            // Drain any remaining buffered body bytes.
+                            if let Ok(n2) = stream.read(&mut tmp) {
+                                data.extend_from_slice(&tmp[..n2]);
+                            }
+                            break;
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+            let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n");
+            let _ = stream.shutdown(std::net::Shutdown::Both);
+            String::from_utf8_lossy(&data).to_string()
+        });
+        (port, handle)
+    }
+
+    #[test]
+    fn test_reap_callback_completed_equals_next_block() {
+        // Regression for the reaper off-by-one: the timeout checkpoint.failed
+        // callback must report `completed == next_block` (the count of blocks
+        // finished before the pause), not next_block - 1.
+        let id = unique_id("test_reap_cb_completed");
+        let (port, handle) = spawn_one_shot_capture();
+
+        // Checkpoint in_progress so the reaper transitions it (and thus fires).
+        let ckpt = checkpoint::Checkpoint::new("deploy.md", 5);
+        checkpoint::save(&id, &ckpt).expect("save ckpt");
+
+        let mut desc = expired_desc(&id, "deploy.md", Some("abort"));
+        desc.next_block = 3; // 3 blocks completed before this pause
+        desc.callback_url = Some(format!("http://127.0.0.1:{}/hook", port));
+        save(&id, &desc).expect("save");
+
+        let _ = reap_expired();
+
+        let req = handle.join().expect("server thread");
+        assert!(!req.is_empty(), "expected a callback POST to be captured");
+        let body = req.split("\r\n\r\n").nth(1).unwrap_or("");
+        let payload: serde_json::Value =
+            serde_json::from_str(body).expect("callback body is JSON");
+        assert_eq!(payload["event"], "checkpoint.failed");
+        assert_eq!(
+            payload["progress"]["completed"], 3,
+            "completed must equal next_block (3), not next_block-1"
+        );
 
         let _ = checkpoint::delete(&id);
     }

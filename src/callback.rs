@@ -526,7 +526,7 @@ impl CallbackConfig {
                 "heading": heading,
                 "line_number": line_number,
                 "exit_code": result.exit_code,
-                "stderr": &result.stderr,
+                "stderr": truncate_for_callback(&result.stderr),
                 "stdout_partial": result.stdout_partial,
                 "stderr_partial": result.stderr_partial,
                 "error_type": result.error_type,
@@ -2088,6 +2088,50 @@ mod tests {
         // The signature must equal sha256= over the exact bytes we received.
         let expected = format!("sha256={}", sign(body.as_bytes(), b"super-secret"));
         assert_eq!(sig, expected, "HMAC must cover the verbatim request body");
+    }
+
+    #[test]
+    fn test_checkpoint_failed_truncates_oversized_stderr() {
+        // Regression: checkpoint.failed previously sent raw, unbounded stderr.
+        // It must go through truncate_for_callback like every other output.
+        let (port, handle) = spawn_one_shot_capture();
+        let cb = CallbackConfig {
+            url: format!("http://127.0.0.1:{}/hook", port),
+            secret: None,
+            stream_key: "wb:events".to_string(),
+            run_id: "run-trunc".to_string(),
+            seq: AtomicU64::new(0),
+            events_path: None,
+        };
+        let big = "x".repeat(MAX_OUTPUT_BYTES + 5_000);
+        let result = BlockResult {
+            block_index: 1,
+            language: "bash".to_string(),
+            stdout: "".to_string(),
+            stderr: big.clone(),
+            exit_code: 1,
+            duration: std::time::Duration::from_millis(1),
+            error_type: Some("nonzero_exit".to_string()),
+            stdout_partial: false,
+            stderr_partial: false,
+        };
+        cb.checkpoint_failed(
+            &result, 0, 1, "big.md", "ckpt-trunc", None, 1, &[], None, None,
+        );
+        let req = handle.join().expect("server thread");
+        let payload: serde_json::Value =
+            serde_json::from_str(split_body(&req)).expect("body is JSON");
+        let stderr = payload["failed_block"]["stderr"].as_str().unwrap();
+        assert!(
+            stderr.len() < big.len(),
+            "stderr must be truncated, got {} bytes",
+            stderr.len()
+        );
+        assert!(
+            stderr.contains("[truncated 5000 bytes]"),
+            "truncation marker missing: tail was {:?}",
+            &stderr[stderr.len().saturating_sub(40)..]
+        );
     }
 
     #[test]

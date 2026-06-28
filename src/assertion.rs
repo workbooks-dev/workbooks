@@ -246,7 +246,7 @@ pub fn evaluate(
         Assertion::Equals { stream, value } => {
             let hay = pick(*stream);
             (
-                hay.trim() == value.as_str(),
+                hay.trim() == value.trim(),
                 format!("{} does not equal '{value}'", stream.label()),
             )
         }
@@ -358,6 +358,16 @@ mod tests {
         };
         assert!(evaluate("", &eq, 0, "done\n", "").ok);
         assert!(!evaluate("", &eq, 0, "done now", "").ok);
+
+        // The expected value is also trimmed, so a padded value still matches
+        // a (trimmed) output. Regression for the one-sided-trim bug where
+        // `stdout equals "  done  "` could never match.
+        let eq_padded = Assertion::Equals {
+            stream: Stream::Stdout,
+            value: "  done  ".to_string(),
+        };
+        assert!(evaluate("", &eq_padded, 0, "done", "").ok);
+        assert!(evaluate("", &eq_padded, 0, "  done\n", "").ok);
     }
 
     #[test]

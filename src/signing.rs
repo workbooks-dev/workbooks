@@ -69,21 +69,56 @@ pub fn keygen(prefix: &Path) -> Result<String, String> {
 
     if let Some(parent) = prefix.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("keys dir: {e}"))?;
+        restrict_dir_permissions(parent)?;
     }
-    std::fs::write(prefix, to_hex(&seed)).map_err(|e| format!("write key: {e}"))?;
-    restrict_permissions(prefix);
+    write_private_key(prefix, to_hex(&seed).as_bytes())?;
     let pub_path = PathBuf::from(format!("{}.pub", prefix.display()));
     std::fs::write(&pub_path, &pub_hex).map_err(|e| format!("write pubkey: {e}"))?;
     Ok(pub_hex)
 }
 
+/// Write the private key file. On unix the file is created atomically with mode
+/// 0600 (`create_new` + `mode`), so there is never a world-readable window — and
+/// a permission failure is surfaced, not swallowed. Refuses to clobber an
+/// existing key file.
 #[cfg(unix)]
-fn restrict_permissions(path: &Path) {
-    use std::os::unix::fs::PermissionsExt;
-    let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+fn write_private_key(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    // Remove any stale key file first so create_new can establish a fresh 0600
+    // file rather than inheriting a pre-existing (possibly lax) mode. Only a
+    // regular file is removed — a directory at this path is left for create_new
+    // to reject.
+    if path.is_file() {
+        std::fs::remove_file(path).map_err(|e| format!("remove stale key: {e}"))?;
+    }
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)
+        .map_err(|e| format!("create key: {e}"))?;
+    f.write_all(bytes).map_err(|e| format!("write key: {e}"))?;
+    Ok(())
 }
+
 #[cfg(not(unix))]
-fn restrict_permissions(_path: &Path) {}
+fn write_private_key(path: &Path, bytes: &[u8]) -> Result<(), String> {
+    std::fs::write(path, bytes).map_err(|e| format!("write key: {e}"))
+}
+
+/// Restrict the keys directory to owner-only (0700) on unix; surface failures.
+#[cfg(unix)]
+fn restrict_dir_permissions(dir: &Path) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
+        .map_err(|e| format!("restrict keys dir: {e}"))
+}
+
+#[cfg(not(unix))]
+fn restrict_dir_permissions(_dir: &Path) -> Result<(), String> {
+    Ok(())
+}
 
 /// Sign `content` with the private key at `key_path`, returning the signature
 /// file. The signed message is the raw content bytes; `sha256` is recorded for
@@ -174,6 +209,40 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn keygen_writes_private_key_mode_0600_and_dir_0700() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let keys_dir = dir.path().join("keys");
+        let key = keys_dir.join("wb_signing_key");
+        keygen(&key).unwrap();
+
+        let key_mode = std::fs::metadata(&key).unwrap().permissions().mode() & 0o777;
+        assert_eq!(key_mode, 0o600, "private key must be 0600, got {key_mode:o}");
+
+        let dir_mode = std::fs::metadata(&keys_dir).unwrap().permissions().mode() & 0o777;
+        assert_eq!(dir_mode, 0o700, "keys dir must be 0700, got {dir_mode:o}");
+
+        // Pubkey is fine to be readable; just confirm it was written.
+        assert!(keys_dir.join("wb_signing_key.pub").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn keygen_replaces_stale_key_with_fresh_0600() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let key = dir.path().join("k");
+        // Pre-existing world-readable file at the key path.
+        std::fs::write(&key, b"old").unwrap();
+        std::fs::set_permissions(&key, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        keygen(&key).unwrap();
+        let mode = std::fs::metadata(&key).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "regenerated key must be 0600, got {mode:o}");
+    }
+
     #[test]
     fn hex_roundtrip() {
         assert_eq!(from_hex(&to_hex(&[0, 255, 16])).unwrap(), vec![0, 255, 16]);
@@ -241,9 +310,13 @@ mod tests {
     #[test]
     fn keygen_with_parentless_prefix_skips_create_dir() {
         // A prefix with no parent ("/") takes the `if let Some(parent)` false
-        // arm (line 66), skipping create_dir_all; the write to root then fails.
+        // arm, skipping create_dir_all; creating the key file at root then
+        // fails (root is a directory, so create_new can't make a file there).
         let err = keygen(Path::new("/")).unwrap_err();
-        assert!(err.contains("write key"), "got: {err}");
+        assert!(
+            err.contains("create key") || err.contains("write key"),
+            "got: {err}"
+        );
     }
 
     #[test]
