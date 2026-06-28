@@ -555,8 +555,11 @@ struct RunArgs {
     #[arg(long = "lockfile", value_name = "PATH")]
     lockfile: Option<String>,
     /// On a block failure, POST the (redacted) failure to this endpoint and
-    /// apply the returned `{"action":"rerun"|"skip"|"abort"}` — self-healing
-    /// runs (#42). `patch` (code injection) is intentionally not supported.
+    /// apply the returned action — self-healing runs (#42). Actions:
+    /// `rerun`/`skip`/`abort`, plus `patch` which runs an endpoint-supplied
+    /// replacement command in place of the failed block (logged, bounded by
+    /// --repair-max). `patch` is endpoint-supplied code execution: only use a
+    /// trusted endpoint, and prefer https. Unknown/unreachable → abort.
     #[arg(long = "repair", value_name = "URL")]
     repair: Option<String>,
     /// Max repair reruns per failed block (default 3) — bounds repair loops.
@@ -2673,6 +2676,7 @@ fn test_one_file(file: &str, args: &TestArgs) -> FileReport {
         args.env_file_relative,
         cli_default_timeout,
         resolved.values.into_iter().collect(),
+        resolved.secret_values.clone(),
     );
 
     let (assertions, passed, failed) = walk_expects(&workbook, &summary, args.bail);
@@ -2835,6 +2839,7 @@ fn verify_one_file(file: &str, args: &TestArgs) -> FileReport {
         args.env_file_relative,
         cli_default_timeout,
         resolved.values.into_iter().collect(),
+        resolved.secret_values.clone(),
     );
 
     // Every failed block is a verify failure (docs-as-tests: code must run).
@@ -3092,6 +3097,7 @@ fn run_folder(
             env_file_relative,
             cli_default_block_timeout,
             std::collections::HashMap::new(),
+            Vec::new(),
         );
 
         let line = format!(
@@ -3183,6 +3189,7 @@ fn run_single_collect(
     env_file_relative: bool,
     cli_default_block_timeout: Option<Duration>,
     extra_env: std::collections::HashMap<String, String>,
+    secret_env: Vec<String>,
 ) -> output::RunSummary {
     // Resolve the trace-correlation id once so every subsequent artifact,
     // callback, and early-return RunSummary carries the same value.
@@ -3412,6 +3419,10 @@ fn run_single_collect(
         .filter(|v| !v.is_empty())
         .cloned()
         .collect();
+    // Secret-param values are masked even though they aren't named in `redact`
+    // (mirrors the `wb run` path in run_single).
+    ctx.redact_values
+        .extend(secret_env.into_iter().filter(|v| !v.is_empty()));
 
     // Run setup commands
     if !no_setup {
@@ -4722,6 +4733,16 @@ fn write_run_output(
     }
 }
 
+/// Snapshot the callback sequence high-water mark into the checkpoint before a
+/// save. Resume seeds the counter from this value (see the `set_seq` call near
+/// the top of `run_single`), so `X-WB-Sequence` and idempotency keys stay
+/// monotonic across pause/resume and crash/resume — not just the pause path.
+fn persist_callback_seq(cb: &Option<callback::CallbackConfig>, c: &mut checkpoint::Checkpoint) {
+    if let Some(cb) = cb {
+        c.callback_seq = cb.seq_value();
+    }
+}
+
 fn run_single(cfg: RunConfig) {
     // Resolve the trace-correlation id once; flows into CallbackConfig and
     // the final RunSummary so every artifact/event of this run shares a key.
@@ -5618,6 +5639,7 @@ fn run_single(cfg: RunConfig) {
                 // Don't checkpoint the failed block — re-run it on resume
                 if let (Some(ref mut c), Some(ref ckpt_id)) = (&mut ckpt, &checkpoint_id) {
                     c.mark_failed();
+                    persist_callback_seq(&cb, c);
                     let _ = checkpoint::save(ckpt_id, c);
                 }
                 results.push(result);
@@ -5641,6 +5663,7 @@ fn run_single(cfg: RunConfig) {
                     step_id,
                 );
                 c.next_step_id = steps.get(c.next_block).map(|s| s.id.0.clone());
+                persist_callback_seq(&cb, c);
                 if let Err(e) = checkpoint::save(ckpt_id, c) {
                     log_warn!("warning: checkpoint: {}", e);
                 }
@@ -5986,6 +6009,7 @@ fn run_single(cfg: RunConfig) {
 
                 if let (Some(ref mut c), Some(ref ckpt_id)) = (&mut ckpt, &checkpoint_id) {
                     c.mark_failed();
+                    persist_callback_seq(&cb, c);
                     let _ = checkpoint::save(ckpt_id, c);
                 }
                 results.push(result);
@@ -6001,6 +6025,7 @@ fn run_single(cfg: RunConfig) {
                     step_id,
                 );
                 c.next_step_id = steps.get(c.next_block).map(|s| s.id.0.clone());
+                persist_callback_seq(&cb, c);
                 if let Err(e) = checkpoint::save(ckpt_id, c) {
                     log_warn!("warning: checkpoint: {}", e);
                 }
@@ -7423,6 +7448,12 @@ fn cmd_resume_cmd(cli: ResumeArgs) -> WbExit {
                     .map(|(k, v)| (k.to_string(), v.to_string()))
             })
             .collect();
+
+        // Release the resume lock so run_single can take it; state is already
+        // persisted (checkpoint::save above). Without this the browser-slice
+        // resume self-deadlocks on its own checkpoint flock and exits
+        // EXIT_CHECKPOINT_BUSY (the wait branch below drops it for the same reason).
+        drop(resume_lock);
 
         run_single(RunConfig {
             file: workbook_file.clone(),

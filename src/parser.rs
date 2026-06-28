@@ -846,8 +846,17 @@ fn parse_info_string(info: &str) -> InfoString {
 ///   - `!<expr>`       → boolean NOT of any of the above
 ///
 /// No shell, no arithmetic, no Jinja. If the expression is malformed, a warning is
-/// logged and `false` is returned — fail-safe: a broken conditional does not run.
+/// logged and `false` is returned. Prefer `should_skip_block` at runtime: it uses
+/// the checked variant so a malformed expression fail-safe *skips* the block (for
+/// both `when=` and `skip_if=`) rather than silently running it.
 pub fn evaluate_condition(expr: &str, env: &HashMap<String, String>) -> bool {
+    eval_condition_checked(expr, env).unwrap_or(false)
+}
+
+/// Like [`evaluate_condition`] but returns `None` when the expression is malformed
+/// (doesn't start with `$` or `!$`), so callers can pick a fail-safe direction. A
+/// well-formed expression returns `Some(bool)`.
+fn eval_condition_checked(expr: &str, env: &HashMap<String, String>) -> Option<bool> {
     let expr = expr.trim();
     let (negate, expr) = match expr.strip_prefix('!') {
         Some(rest) => (true, rest.trim()),
@@ -865,17 +874,13 @@ pub fn evaluate_condition(expr: &str, env: &HashMap<String, String>) -> bool {
         }
         None => {
             eprintln!(
-                "wb: invalid when/skip_if expression '{}' — must start with '$' (or '!$'). Treating as false.",
+                "wb: invalid when/skip_if expression '{}' — must start with '$' (or '!$'). Skipping block fail-safe.",
                 expr
             );
-            false
+            return None;
         }
     };
-    if negate {
-        !result
-    } else {
-        result
-    }
+    Some(if negate { !result } else { result })
 }
 
 fn is_truthy(v: Option<&String>) -> bool {
@@ -917,13 +922,17 @@ pub fn should_skip_block(
     env: &HashMap<String, String>,
 ) -> Option<String> {
     if let Some(expr) = when {
-        if !evaluate_condition(expr, env) {
-            return Some(format!("when={} → false", expr));
+        match eval_condition_checked(expr, env) {
+            Some(true) => {} // condition met → run
+            Some(false) => return Some(format!("when={} → false", expr)),
+            None => return Some(format!("when={} → malformed (skipped fail-safe)", expr)),
         }
     }
     if let Some(expr) = skip_if {
-        if evaluate_condition(expr, env) {
-            return Some(format!("skip_if={} → true", expr));
+        match eval_condition_checked(expr, env) {
+            Some(true) => return Some(format!("skip_if={} → true", expr)),
+            Some(false) => {} // condition not met → run
+            None => return Some(format!("skip_if={} → malformed (skipped fail-safe)", expr)),
         }
     }
     None
@@ -2209,6 +2218,22 @@ verbs:
         assert!(reason.is_some());
         assert!(reason.unwrap().starts_with("skip_if="));
         assert!(should_skip_block(None, Some("$MISSING"), &env).is_none());
+    }
+
+    #[test]
+    fn test_should_skip_block_malformed_is_fail_safe_skip() {
+        // A malformed expression must fail-safe to *skip* the block for both
+        // knobs — a typo'd `skip_if=DRY_RUN` (missing `$`) must NOT run a guarded
+        // block. (`evaluate_condition` alone returns false, which only fail-safes
+        // `when=`; `should_skip_block` is the fail-safe path.)
+        let env = env_map(&[("DRY_RUN", "1")]);
+        let r = should_skip_block(None, Some("DRY_RUN"), &env);
+        assert!(r.is_some(), "malformed skip_if should skip, not run");
+        assert!(r.unwrap().contains("malformed"));
+
+        let r = should_skip_block(Some("DEPLOY"), None, &env);
+        assert!(r.is_some(), "malformed when should skip");
+        assert!(r.unwrap().contains("malformed"));
     }
 
     #[test]

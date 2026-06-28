@@ -815,11 +815,12 @@ impl Session {
         let quiet = self.ctx.quiet;
         let code = substitute_vars(&block.code, &self.ctx.vars);
         let timeout = self.ctx.block_timeout;
+        let redact = self.ctx.redact_values.clone();
         let (ok, out) = {
             let process = self.processes.get_mut(&lang).unwrap();
             match send_code(process, &lang, &code) {
                 Ok(()) => {
-                    let collected = collect_output(process, quiet, timeout);
+                    let collected = collect_output(process, quiet, timeout, &redact);
                     (true, collected)
                 }
                 Err(e) => (
@@ -1153,13 +1154,14 @@ fn collect_output(
     process: &PersistentProcess,
     quiet: bool,
     timeout: Option<Duration>,
+    redact: &[String],
 ) -> CollectedOutput {
     // Read stdout first, then stderr. Safe because the child writes
     // stdout sentinel before stderr sentinel. If stderr fills during
     // stdout reading, the child blocks AFTER writing stdout sentinel.
     // Once we drain stderr, the child unblocks and writes stderr sentinel.
     let (stdout, stdout_code, stdout_timed_out) =
-        collect_until_sentinel(&process.stdout_rx, quiet, false, timeout);
+        collect_until_sentinel(&process.stdout_rx, quiet, false, timeout, redact);
     // If stdout timed out, there's no point waiting the full timeout again
     // for the stderr sentinel — the child is already considered dead. Fall
     // through with a near-zero window so we drain anything already buffered.
@@ -1171,7 +1173,7 @@ fn collect_output(
         timeout
     };
     let (stderr, stderr_code, stderr_timed_out) =
-        collect_until_sentinel(&process.stderr_rx, quiet, true, stderr_timeout);
+        collect_until_sentinel(&process.stderr_rx, quiet, true, stderr_timeout, redact);
 
     let exit_code = stdout_code.or(stderr_code).unwrap_or(0);
     CollectedOutput {
@@ -1193,6 +1195,7 @@ fn collect_until_sentinel(
     quiet: bool,
     is_stderr: bool,
     timeout: Option<Duration>,
+    redact: &[String],
 ) -> (String, Option<i32>, bool) {
     let mut lines = Vec::new();
     let exit_code;
@@ -1213,10 +1216,14 @@ fn collect_until_sentinel(
                     break;
                 }
                 if !quiet && !crate::step_outputs::is_output_capture_line(&line) {
+                    // Redact secrets in the live terminal stream too — the final
+                    // BlockResult is redacted, but this per-line echo would
+                    // otherwise leak secret values to the console.
+                    let shown = redact_output(&line, redact);
                     if is_stderr {
-                        crate::output::print_stderr_dim(&line);
+                        crate::output::print_stderr_dim(&shown);
                     } else {
-                        println!("{}", line);
+                        println!("{}", shown);
                     }
                 }
                 lines.push(line);
@@ -1317,13 +1324,17 @@ pub fn execute_block_oneshot(
             // Read stdout and stderr concurrently to avoid deadlock when
             // the child fills the OS pipe buffer on one stream.
             let quiet = ctx.quiet;
+            // Redact secrets in the live stream too (the BlockResult is redacted
+            // separately below). Each reader thread gets its own copy.
+            let redact_out = ctx.redact_values.clone();
+            let redact_err = ctx.redact_values.clone();
             let stdout_thread = child.stdout.take().map(|out| {
                 thread::spawn(move || {
                     let reader = BufReader::new(out);
                     let mut buf = String::new();
                     for line in reader.lines().map_while(Result::ok) {
                         if !quiet && !crate::step_outputs::is_output_capture_line(&line) {
-                            println!("{}", line);
+                            println!("{}", redact_output(&line, &redact_out));
                         }
                         buf.push_str(&line);
                         buf.push('\n');
@@ -1337,7 +1348,7 @@ pub fn execute_block_oneshot(
                     let mut buf = String::new();
                     for line in reader.lines().map_while(Result::ok) {
                         if !quiet && !crate::step_outputs::is_output_capture_line(&line) {
-                            crate::output::print_stderr_dim(&line);
+                            crate::output::print_stderr_dim(&redact_output(&line, &redact_err));
                         }
                         buf.push_str(&line);
                         buf.push('\n');

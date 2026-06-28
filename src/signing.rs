@@ -35,6 +35,12 @@ fn to_hex(bytes: &[u8]) -> String {
 }
 
 fn from_hex(s: &str) -> Result<Vec<u8>, String> {
+    // Byte-index slicing below assumes one byte per char; a non-ASCII char would
+    // panic on a non-char-boundary. Reject up front (sig fields are attacker-
+    // supplied JSON).
+    if !s.is_ascii() {
+        return Err("non-ascii hex".to_string());
+    }
     if !s.len().is_multiple_of(2) {
         return Err("odd-length hex".to_string());
     }

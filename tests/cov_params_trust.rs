@@ -350,6 +350,31 @@ fn params_secret_value_redacted_in_output() {
     );
 }
 
+#[test]
+fn params_secret_value_redacted_in_test_run() {
+    // Regression: `wb test`/`wb verify` went through run_single_collect, which
+    // built redact_values from named keys only and dropped secret-param values,
+    // so a `secret: true` param leaked into the live block output that `wb run`
+    // correctly masked.
+    let home = tempdir().unwrap();
+    let dir = tempdir().unwrap();
+    let wbf = write(
+        &dir,
+        "sec_test.md",
+        "---\nruntime: bash\nparams:\n  apikey:\n    type: string\n    secret: true\n    default: SUPERSECRET123\n---\n\n```bash\necho \"key is $apikey\"\n```\n\n```expect\nexit 0\n```\n",
+    );
+    let o = wb(home.path())
+        .args(["test", wbf.to_str().unwrap()])
+        .output()
+        .unwrap();
+    let combined = format!("{}{}", out(&o), err(&o));
+    assert!(
+        !combined.contains("SUPERSECRET123"),
+        "raw secret leaked into `wb test` output:\n{}",
+        combined
+    );
+}
+
 // ---------------------------------------------------------------------------
 // PARAMS — checkpoint param identity
 // ---------------------------------------------------------------------------
