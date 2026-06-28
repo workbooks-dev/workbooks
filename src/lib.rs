@@ -303,6 +303,33 @@ fn cache_skip_decision() -> SkipDecision {
     }
 }
 
+/// Bug guard for `--cache` + `{reads=}` (#46): true if some block *after*
+/// `section_idx` declares a `{reads=}` artifact input that isn't yet present in
+/// `artifacts_dir`. When true, the block at `section_idx` must not be
+/// cache-skipped — skipping it could deny a downstream consumer an input that
+/// this block (its producer) would materialize, leaving the consumer to hash or
+/// read a missing file. wb has no `{writes=}` graph to pinpoint the exact
+/// producer, so this conservatively force-runs any block that precedes an
+/// as-yet-unproduced declared input; once the input exists, later blocks become
+/// cache-skippable again.
+fn downstream_reads_input_missing(
+    sections: &[parser::Section],
+    section_idx: usize,
+    artifacts_dir: &std::path::Path,
+) -> bool {
+    sections
+        .get(section_idx + 1..)
+        .unwrap_or(&[])
+        .iter()
+        .filter_map(|s| match s {
+            parser::Section::Code(b) => b.attrs.kv.get("reads"),
+            _ => None,
+        })
+        .flat_map(|reads| reads.split([',', ' ']).map(str::trim))
+        .filter(|name| !name.is_empty())
+        .any(|name| !artifacts_dir.join(name).exists())
+}
+
 /// Skip decision produced when an operator `goto_step` jumps the cursor past
 /// an executable step. Same `step.skipped` shape as the other skip kinds.
 fn goto_skip_decision() -> SkipDecision {
@@ -5065,9 +5092,14 @@ fn run_single(cfg: RunConfig) {
     let mut cache_store = cache_id.as_ref().map(|id| cache::CacheStore::load(id));
     let cache_now = chrono::Utc::now().to_rfc3339();
     // Env/secret identity for the cache key (#18) — wb-managed env minus the
-    // run-specific WB_* internals. Snapshotted before the loop so WB_OUT_*
-    // exports during the run don't bust it (they're WB_*-prefixed anyway).
+    // run-specific WB_* internals. Snapshotted before the loop. The values of
+    // WB_OUT_* a block actually references are folded in per-block via
+    // cache::referenced_outputs_hash instead, so an upstream output change
+    // re-keys its downstream consumer (the other WB_* internals stay excluded).
     let cache_env_hash = cache::env_identity(session.env());
+    // One-time note when the {reads=} guard (#46) suppresses a cache skip so a
+    // producer runs and materializes a downstream consumer's input.
+    let mut cache_reads_guard_noted = false;
 
     if !quiet {
         let title = workbook.frontmatter.title.as_deref().unwrap_or(file);
@@ -5430,11 +5462,38 @@ fn run_single(cfg: RunConfig) {
                     &parser::resolved_env(session.env()),
                 )
             };
+            // Cache key for this block (#18). The outputs hash folds in the
+            // upstream step outputs ($WB_OUT_*) the block references, read from
+            // the *live* session env (which carries prior steps' exports), so a
+            // changed upstream output re-keys this consumer instead of letting
+            // it be a stale cache hit. Reused for the skip check and the
+            // post-run record so both agree on the key for this block.
+            let cache_outputs_hash = cache::referenced_outputs_hash(
+                &[
+                    block.code.as_str(),
+                    block.when.as_deref().unwrap_or(""),
+                    block.skip_if.as_deref().unwrap_or(""),
+                ],
+                session.env(),
+            );
+            // {reads=} guard (#46): a cache-skipped producer never writes its
+            // output, so don't skip a block whose output a later {reads=}
+            // consumer still needs but doesn't have yet — running it is how the
+            // input gets materialized.
+            let cache_blocked_by_reads = cache_store.is_some()
+                && !block.no_cache
+                && downstream_reads_input_missing(&workbook.sections, section_idx, artifacts.dir());
+            if cache_blocked_by_reads && !cache_reads_guard_noted {
+                log_warn!(
+                    "note: --cache skip suppressed so a later {{reads=}} input gets produced"
+                );
+                cache_reads_guard_noted = true;
+            }
             // Cache skip (#18): if nothing else skipped this block and `--cache`
             // has a successful entry for its source+params, skip it.
             let live_skip = live_skip.or_else(|| {
                 let store = cache_store.as_ref()?;
-                if block.no_cache {
+                if block.no_cache || cache_blocked_by_reads {
                     return None;
                 }
                 let key = cache::cache_key(
@@ -5446,6 +5505,7 @@ fn run_single(cfg: RunConfig) {
                         block.attrs.kv.get("reads").map(String::as_str),
                         artifacts.dir(),
                     ),
+                    &cache_outputs_hash,
                 );
                 store.is_cached_success(&key).then(cache_skip_decision)
             });
@@ -5610,6 +5670,7 @@ fn run_single(cfg: RunConfig) {
                             block.attrs.kv.get("reads").map(String::as_str),
                             artifacts.dir(),
                         ),
+                        &cache_outputs_hash,
                     );
                     store.record(key, result.success(), result.exit_code, &cache_now);
                 }

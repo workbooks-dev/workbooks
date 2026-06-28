@@ -502,6 +502,133 @@ fn no_cache_flag_forces_full_run() {
 }
 
 // ---------------------------------------------------------------------------
+// --cache correctness: upstream step outputs ($WB_OUT_*) in the key (bug 1)
+// ---------------------------------------------------------------------------
+
+/// A consumer that references an upstream step's captured output must re-run
+/// when that output changes — otherwise it's a stale cache hit. Block `a` emits
+/// `output: target=…`; block `b` references `$WB_OUT_target` in its body.
+/// Editing `a` to emit a new value must bust `b`'s cache entry too, even though
+/// `b`'s own source is byte-identical. (Note: persistent bash sessions don't
+/// inject `$WB_OUT_*` into an already-running shell, so we assert that `b`
+/// re-executes — via its BMARK and the absence of a cache skip — rather than on
+/// the expanded value.)
+#[test]
+fn cache_reruns_downstream_when_upstream_output_changes() {
+    let wb_prod = "\
+```bash {#a}
+echo \"output: target=prod\"
+```
+
+```bash {#b}
+echo \"BMARK $WB_OUT_target\"
+```
+";
+    let f = fixture("wb.md", wb_prod);
+
+    let first = f.run(&["--cache", "outc"]);
+    assert_eq!(first.status.code(), Some(0), "stderr:\n{}", stderr(&first));
+    assert!(
+        stdout(&first).contains("BMARK"),
+        "first run should execute b:\n{}",
+        stdout(&first)
+    );
+
+    // Edit only block `a`'s emitted output. Block `b`'s source is unchanged.
+    let wb_dev = "\
+```bash {#a}
+echo \"output: target=dev\"
+```
+
+```bash {#b}
+echo \"BMARK $WB_OUT_target\"
+```
+";
+    std::fs::write(&f.path, wb_dev).unwrap();
+
+    let second = f.run(&["--cache", "outc"]);
+    assert_eq!(
+        second.status.code(),
+        Some(0),
+        "stderr:\n{}",
+        stderr(&second)
+    );
+    // `a` changed, so it re-runs and re-exports target=dev; `b` references that
+    // output, so its cache key must change and it must re-execute.
+    assert!(
+        stdout(&second).contains("BMARK"),
+        "downstream consumer was a stale cache hit (b did not re-run):\n{}",
+        stdout(&second)
+    );
+    // With the bug, `b` would be cache-skipped (its WB_OUT_* ref is excluded
+    // from the key); the skip prints this marker. Neither block should skip.
+    assert!(
+        !stderr(&second).contains("cached success"),
+        "no block should be a cache hit on the second run:\n{}",
+        stderr(&second)
+    );
+}
+
+// ---------------------------------------------------------------------------
+// --cache correctness: {reads=} input from a cache-skipped producer (bug 2)
+// ---------------------------------------------------------------------------
+
+/// A producer writes an artifact a later `{reads=}` consumer depends on. On a
+/// warm re-run the producer's source is unchanged, so a naive cache would skip
+/// it — but then its output never gets written and the consumer reads a missing
+/// file. The `{reads=}` guard must keep the producer running so the consumer's
+/// input is materialized. The consumer is `{no-cache}` so it always runs and
+/// surfaces the file contents.
+#[test]
+fn cache_keeps_producer_running_for_downstream_reads() {
+    let wb = "\
+```bash {#producer}
+echo PRODUCED > \"$WB_ARTIFACTS_DIR/data.txt\"
+echo PRODMARK
+```
+
+```bash {#consumer no-cache reads=data.txt}
+cat \"$WB_ARTIFACTS_DIR/data.txt\"
+```
+";
+    let f = fixture("wb.md", wb);
+
+    let first = f.run(&["--cache", "readsc"]);
+    assert_eq!(first.status.code(), Some(0), "stderr:\n{}", stderr(&first));
+    assert!(
+        stdout(&first).contains("PRODUCED"),
+        "first run should read the produced file:\n{}",
+        stdout(&first)
+    );
+
+    // Warm re-run: artifacts dir is fresh, so the producer must run again to
+    // materialize data.txt rather than being cache-skipped.
+    let second = f.run(&["--cache", "readsc"]);
+    assert_eq!(
+        second.status.code(),
+        Some(0),
+        "warm run failed (consumer read a missing input?):\nstdout:\n{}\nstderr:\n{}",
+        stdout(&second),
+        stderr(&second)
+    );
+    assert!(
+        stdout(&second).contains("PRODMARK"),
+        "producer was cache-skipped, so its {{reads=}} output was missing:\n{}",
+        stdout(&second)
+    );
+    assert!(
+        stdout(&second).contains("PRODUCED"),
+        "consumer could not read the produced file on the warm run:\n{}",
+        stdout(&second)
+    );
+    assert!(
+        combined(&second).contains("skip suppressed"),
+        "expected the {{reads=}} guard note:\n{}",
+        combined(&second)
+    );
+}
+
+// ---------------------------------------------------------------------------
 // --changed (git-gated)
 // ---------------------------------------------------------------------------
 

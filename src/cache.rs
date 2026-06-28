@@ -12,13 +12,18 @@
 //! stdout/outputs are not reproduced, so the cache is for idempotent pipelines
 //! where skipping an unchanged step is safe.
 //!
-//! Cache key = sha256(language + body + param_hash + env_hash + inputs_hash):
-//! `env_hash` is the env/secret identity (wb-managed env minus `WB_*`), and
+//! Cache key = sha256(language + body + param_hash + env_hash + inputs_hash +
+//! outputs_hash):
+//! `env_hash` is the env/secret identity (wb-managed env minus `WB_*`),
 //! `inputs_hash` is the content of the artifact inputs a block declares with
 //! `{reads=foo.csv,bar.json}` (#46) — so a block re-runs when an upstream
-//! artifact it reads changes (the inputs/outputs dependency edge). Included
-//! files are already reflected in the block body. Runtime versions remain a
-//! follow-up; change the cache id or pass `--no-cache` when one changes.
+//! artifact it reads changes (the inputs/outputs dependency edge) — and
+//! `outputs_hash` folds in the values of the upstream step outputs
+//! (`$WB_OUT_<name>`) a block actually references, so a downstream consumer
+//! re-runs when an upstream step's captured output changes (without it the
+//! consumer is a stale cache hit). Included files are already reflected in the
+//! block body. Runtime versions remain a follow-up; change the cache id or pass
+//! `--no-cache` when one changes.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -102,17 +107,20 @@ impl CacheStore {
 }
 
 /// Compute the cache key for a block:
-/// sha256(language\0body\0param_hash\0env_hash\0inputs_hash), 16 hex. `env_hash`
-/// folds in the env/secret identity (#18); `inputs_hash` folds in the content of
-/// the artifact inputs the block declares with `{reads=…}` (#46), so a block
-/// re-runs when an upstream artifact it depends on changes — the inputs/outputs
-/// dependency edge.
+/// sha256(language\0body\0param_hash\0env_hash\0inputs_hash\0outputs_hash), 16
+/// hex. `env_hash` folds in the env/secret identity (#18); `inputs_hash` folds
+/// in the content of the artifact inputs the block declares with `{reads=…}`
+/// (#46), so a block re-runs when an upstream artifact it depends on changes;
+/// `outputs_hash` folds in the upstream step outputs (`$WB_OUT_<name>`) the
+/// block references, so a downstream consumer re-runs when an upstream step's
+/// captured output changes — both edges of the inputs/outputs dependency graph.
 pub fn cache_key(
     language: &str,
     body: &str,
     param_hash: Option<&str>,
     env_hash: &str,
     inputs_hash: &str,
+    outputs_hash: &str,
 ) -> String {
     let mut hasher = Sha256::new();
     hasher.update(language.as_bytes());
@@ -124,8 +132,76 @@ pub fn cache_key(
     hasher.update(env_hash.as_bytes());
     hasher.update([0u8]);
     hasher.update(inputs_hash.as_bytes());
+    hasher.update([0u8]);
+    hasher.update(outputs_hash.as_bytes());
     let digest = hasher.finalize();
     digest.iter().take(8).map(|b| format!("{b:02x}")).collect()
+}
+
+/// Digest of the upstream step-output values (`$WB_OUT_<name>`) a block actually
+/// references in `texts` (its body + `when` + `skip_if`). Folding these into the
+/// cache key fixes stale skips of downstream consumers: when an upstream block
+/// changes the value it emits (`output: target=…`), a block that runs
+/// `$WB_OUT_target` re-keys and re-runs instead of being silently cache-skipped.
+///
+/// For each referenced name, the current `WB_OUT_<name>` value from `env` is
+/// folded in (a missing one as an `<absent>` marker). A block that references no
+/// step output gets a fixed `"noout"` digest, so the common case (and any
+/// previously cached entry for a non-referencing block) is unaffected.
+pub fn referenced_outputs_hash(texts: &[&str], env: &HashMap<String, String>) -> String {
+    let mut names = collect_output_refs(texts);
+    if names.is_empty() {
+        return "noout".to_string();
+    }
+    names.sort_unstable();
+    names.dedup();
+    let mut hasher = Sha256::new();
+    for name in names {
+        let env_key = format!("{}{}", crate::step_outputs::OUTPUT_ENV_PREFIX, name);
+        hasher.update(name.as_bytes());
+        hasher.update(b"=");
+        match env.get(&env_key) {
+            Some(v) => hasher.update(v.as_bytes()),
+            None => hasher.update(b"<absent>"),
+        }
+        hasher.update(b"\n");
+    }
+    let digest = hasher.finalize();
+    digest.iter().take(8).map(|b| format!("{b:02x}")).collect()
+}
+
+/// Scan `texts` for `$WB_OUT_<name>` / `${WB_OUT_<name>}` references and return
+/// the `<name>` parts. Operates on bytes; the prefix, braces, `$`, and the
+/// identifier chars are all ASCII, so byte slicing back into `str` is safe.
+fn collect_output_refs(texts: &[&str]) -> Vec<String> {
+    const PREFIX: &[u8] = b"WB_OUT_";
+    let mut out = Vec::new();
+    for text in texts {
+        let b = text.as_bytes();
+        let mut i = 0;
+        while i < b.len() {
+            if b[i] != b'$' {
+                i += 1;
+                continue;
+            }
+            let mut j = i + 1;
+            if b.get(j) == Some(&b'{') {
+                j += 1;
+            }
+            if b[j..].starts_with(PREFIX) {
+                let name_start = j + PREFIX.len();
+                let mut k = name_start;
+                while k < b.len() && (b[k] == b'_' || b[k].is_ascii_alphanumeric()) {
+                    k += 1;
+                }
+                if k > name_start {
+                    out.push(text[name_start..k].to_string());
+                }
+            }
+            i = j;
+        }
+    }
+    out
 }
 
 /// Digest the content of a block's declared artifact inputs (#46). `reads` is
@@ -184,16 +260,63 @@ mod tests {
     use super::*;
 
     #[test]
-    fn key_changes_with_body_params_and_env() {
-        let a = cache_key("bash", "echo 1", None, "e0", "i0");
-        let b = cache_key("bash", "echo 2", None, "e0", "i0");
-        let c = cache_key("bash", "echo 1", Some("ff00"), "e0", "i0");
-        let d = cache_key("bash", "echo 1", None, "e1", "i0"); // env changed
+    fn key_changes_with_body_params_env_inputs_and_outputs() {
+        let a = cache_key("bash", "echo 1", None, "e0", "i0", "o0");
+        let b = cache_key("bash", "echo 2", None, "e0", "i0", "o0");
+        let c = cache_key("bash", "echo 1", Some("ff00"), "e0", "i0", "o0");
+        let d = cache_key("bash", "echo 1", None, "e1", "i0", "o0"); // env changed
+        let e = cache_key("bash", "echo 1", None, "e0", "i1", "o0"); // inputs changed
+        let f = cache_key("bash", "echo 1", None, "e0", "i0", "o1"); // outputs changed
         assert_ne!(a, b);
         assert_ne!(a, c);
         assert_ne!(a, d);
-        assert_eq!(a, cache_key("bash", "echo 1", None, "e0", "i0"));
+        assert_ne!(a, e);
+        assert_ne!(a, f);
+        assert_eq!(a, cache_key("bash", "echo 1", None, "e0", "i0", "o0"));
         assert_eq!(a.len(), 16);
+    }
+
+    #[test]
+    fn referenced_outputs_hash_tracks_referenced_values() {
+        // A block that references no $WB_OUT_* gets the fixed "noout" digest,
+        // independent of env — so non-consumers keep their existing cache key.
+        let mut env = HashMap::new();
+        env.insert("WB_OUT_target".to_string(), "prod".to_string());
+        assert_eq!(referenced_outputs_hash(&["echo hi"], &env), "noout");
+
+        // A consumer that references $WB_OUT_target keys on its current value.
+        let prod = referenced_outputs_hash(&["deploy $WB_OUT_target"], &env);
+        assert_ne!(prod, "noout");
+        // Same reference via ${...} braces resolves the same name.
+        assert_eq!(
+            referenced_outputs_hash(&["deploy ${WB_OUT_target}"], &env),
+            prod
+        );
+        // Changing the upstream output's value re-keys the consumer.
+        env.insert("WB_OUT_target".to_string(), "dev".to_string());
+        assert_ne!(
+            referenced_outputs_hash(&["deploy $WB_OUT_target"], &env),
+            prod
+        );
+        // An unreferenced output value does not affect a consumer's key.
+        let mut env2 = env.clone();
+        env2.insert("WB_OUT_other".to_string(), "x".to_string());
+        assert_eq!(
+            referenced_outputs_hash(&["deploy $WB_OUT_target"], &env),
+            referenced_outputs_hash(&["deploy $WB_OUT_target"], &env2)
+        );
+        // A reference whose value is absent is stable but distinct from present.
+        let absent = referenced_outputs_hash(&["use $WB_OUT_missing"], &env);
+        assert_ne!(absent, "noout");
+    }
+
+    #[test]
+    fn collect_output_refs_finds_names_in_body_and_conditions() {
+        let refs = collect_output_refs(&["a $WB_OUT_one b", "${WB_OUT_two}", "$WB_OUT_one"]);
+        assert!(refs.contains(&"one".to_string()));
+        assert!(refs.contains(&"two".to_string()));
+        // A bare `$WB_OUT_` with no name part yields nothing; `$OTHER` is ignored.
+        assert!(collect_output_refs(&["$WB_OUT_ $OTHER"]).is_empty());
     }
 
     #[test]
@@ -229,12 +352,12 @@ mod tests {
     #[test]
     fn store_records_and_reads_success() {
         let mut s = CacheStore::default();
-        let k = cache_key("bash", "echo hi", None, "e0", "i0");
+        let k = cache_key("bash", "echo hi", None, "e0", "i0", "o0");
         assert!(!s.is_cached_success(&k));
         s.record(k.clone(), true, 0, "2026-06-26T00:00:00Z");
         assert!(s.is_cached_success(&k));
         // A failed entry is not a cache hit.
-        let k2 = cache_key("bash", "false", None, "e0", "i0");
+        let k2 = cache_key("bash", "false", None, "e0", "i0", "o0");
         s.record(k2.clone(), false, 1, "2026-06-26T00:00:00Z");
         assert!(!s.is_cached_success(&k2));
     }
@@ -264,7 +387,7 @@ mod tests {
     #[test]
     fn roundtrip_serialization() {
         let mut s = CacheStore::default();
-        s.record(cache_key("bash", "x", None, "e0", "i0"), true, 0, "t");
+        s.record(cache_key("bash", "x", None, "e0", "i0", "o0"), true, 0, "t");
         let json = serde_json::to_string(&s).unwrap();
         let back: CacheStore = serde_json::from_str(&json).unwrap();
         assert_eq!(back.entries.len(), 1);
@@ -280,7 +403,7 @@ mod tests {
             .unwrap()
             .as_nanos();
         let id = format!("wb-cache-save-test-{}-{}", std::process::id(), n);
-        let key = cache_key("bash", "echo hi", None, "e0", "i0");
+        let key = cache_key("bash", "echo hi", None, "e0", "i0", "o0");
         let mut store = CacheStore::default();
         store.record(key.clone(), true, 0, "t");
         store.save(&id).expect("save should succeed");
