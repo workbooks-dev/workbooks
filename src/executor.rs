@@ -61,6 +61,21 @@ impl BlockResult {
             }
         }
     }
+
+    /// Mask every secret value in `stdout`/`stderr`. Idempotent — re-running
+    /// over already-redacted text finds no secret and is a no-op. This is the
+    /// single choke point that guarantees no `BlockResult` leaves the executor
+    /// with an unredacted secret, regardless of which `execute_*` path built it
+    /// (the `http` error branches, for one, build stderr from raw curl/parse
+    /// text). Every downstream sink — callbacks, `--events`, `--repair`,
+    /// checkpoints — consumes these two fields, so redacting here covers them.
+    pub fn redact(&mut self, values: &[String]) {
+        if values.is_empty() {
+            return;
+        }
+        self.stdout = redact_output(&self.stdout, values);
+        self.stderr = redact_output(&self.stderr, values);
+    }
 }
 
 /// Categorize a non-zero exit into a stable error-type token.
@@ -513,7 +528,13 @@ impl Session {
         args.push(req.url.clone());
 
         if !self.ctx.quiet {
-            println!("→ {} {}", req.method, req.url);
+            // The resolved URL can carry an interpolated secret (e.g. ?token=…);
+            // mask it before echoing the request line to the console.
+            println!(
+                "→ {} {}",
+                req.method,
+                redact_output(&req.url, &self.ctx.redact_values)
+            );
         }
 
         let output = match Command::new("curl").args(&args).output() {
@@ -755,12 +776,17 @@ impl Session {
         // Native `http` runtime: REST calls via curl (no language subprocess).
         if block.language.eq_ignore_ascii_case("http") {
             let mut r = self.execute_http(block, index);
+            // The http handler's error branches build stderr from raw parse/curl
+            // text (a secret interpolated into the request can survive there);
+            // redact at the boundary so the invariant holds for every branch.
+            r.redact(&self.ctx.redact_values);
             r.auto_classify();
             return r;
         }
         // Native `sql` runtime: queries via the sqlite3/psql CLIs.
         if block.language.eq_ignore_ascii_case("sql") {
             let mut r = self.execute_sql(block, index);
+            r.redact(&self.ctx.redact_values);
             r.auto_classify();
             return r;
         }

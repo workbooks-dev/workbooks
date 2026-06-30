@@ -26,7 +26,15 @@ plaintext-http warning. See TODO.md "Security hardening (post-roadmap)".
 /goal Adversarial security + correctness review of wb's untrusted-input boundaries that the v0.17.x sweep did not focus on: remote fetch (gh:/https: → ~/.wb/remote/<hash>.md — URL/scheme validation, SSRF, redirect handling, curl argv injection, hash-collision/path-traversal in the cache filename, and that the TOFU trust gate cannot be bypassed on a fetched file), ed25519 signing (src/signing.rs — sig-file parse robustness, pubkey pinning, content-binding completeness, key-file perms on the verify path), and the MCP server (src/mcp.rs — argv injection into current_exe, path traversal / overwrite in author_workbook, and robustness to malformed JSON-RPC input). Triage findings in tiers (critical/high → fix now; low → batch), fix the confirmed ones with regression tests, run scripts/check.sh green, update CLAUDE.md + TODO.md, and cut a release. Do not introduce new runtime dependencies.
 ```
 
-### 2. Secret-redaction completeness audit across every output sink
+### 2. Secret-redaction completeness audit across every output sink — ✅ DONE (v0.17.5)
+
+Shipped: provider-resolved secrets (doppler/yard/dotenv/command/prompt) auto-join
+the redaction set (length-guarded, ≥ 4 chars); a single `BlockResult::redact`
+choke point at the executor http/sql boundary closes the http error-stderr +
+resolved-URL leaks (transitively fixing the callback + `--events` sinks); artifact
+`manifest.json` `label`/`description` redacted at the `sync()` choke. Audited-clean:
+`run.complete`, `--repair`, `--dry-run`, `sql`, `watch --serve /state`. See TODO.md
+"Security hardening (post-roadmap)".
 
 ```
 /goal Audit secret + `secret:` param redaction for completeness across EVERY output sink, not just terminal rendering: the --events JSONL stream, wb watch --serve /state web payload, the artifacts manifest.json, callback payloads (step.complete/checkpoint.failed/run.complete, including failed_block.stderr), the --repair endpoint POST body, the --dry-run resolved-command plan, and the http/sql runtime output. Build (or extend) a single redaction choke point so a value marked secret cannot escape any path, add a test per sink that asserts a planted secret never appears, fix the leaks found, run scripts/check.sh green, update CLAUDE.md + TODO.md, and cut a release. Zero new dependencies.

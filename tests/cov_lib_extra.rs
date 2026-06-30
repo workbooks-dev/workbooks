@@ -370,9 +370,17 @@ fn secrets_command_provider_injects() {
         .output()
         .unwrap();
     assert_eq!(code(&o), 0, "stderr:\n{}", err(&o));
+    // Provider secrets now auto-redact: injection still happens (the `***` only
+    // appears when a non-empty value was substituted into the echo), but the
+    // raw value is masked in output.
     assert!(
-        out(&o).contains("SECRETVAL=from-command"),
-        "got:\n{}",
+        out(&o).contains("SECRETVAL=***"),
+        "secret should be injected and redacted:\n{}",
+        out(&o)
+    );
+    assert!(
+        !out(&o).contains("from-command"),
+        "raw provider secret must not appear in output:\n{}",
         out(&o)
     );
 }
@@ -396,9 +404,15 @@ fn secrets_cmd_alias_injects() {
         .output()
         .unwrap();
     assert_eq!(code(&o), 0, "stderr:\n{}", err(&o));
+    // Provider secrets auto-redact; the `***` proves injection + masking.
     assert!(
-        out(&o).contains("SECRETVAL=via-printf"),
-        "got:\n{}",
+        out(&o).contains("SECRETVAL=***"),
+        "secret should be injected and redacted:\n{}",
+        out(&o)
+    );
+    assert!(
+        !out(&o).contains("via-printf"),
+        "raw provider secret must not appear in output:\n{}",
         out(&o)
     );
 }
@@ -423,9 +437,15 @@ fn secrets_dotenv_explicit_path_injects() {
         .output()
         .unwrap();
     assert_eq!(code(&o), 0, "stderr:\n{}", err(&o));
+    // Provider secrets auto-redact; the `***` proves injection + masking.
     assert!(
-        out(&o).contains("SECRETVAL=from-dotenv"),
-        "got:\n{}",
+        out(&o).contains("SECRETVAL=***"),
+        "secret should be injected and redacted:\n{}",
+        out(&o)
+    );
+    assert!(
+        !out(&o).contains("from-dotenv"),
+        "raw provider secret must not appear in output:\n{}",
         out(&o)
     );
 }
@@ -445,9 +465,15 @@ fn secrets_dotenv_default_dotfile_in_cwd() {
         .output()
         .unwrap();
     assert_eq!(code(&o), 0, "stderr:\n{}", err(&o));
+    // Provider secrets auto-redact; the `***` proves injection + masking.
     assert!(
-        out(&o).contains("SECRETVAL=from-default-dotenv"),
-        "got:\n{}",
+        out(&o).contains("SECRETVAL=***"),
+        "secret should be injected and redacted:\n{}",
+        out(&o)
+    );
+    assert!(
+        !out(&o).contains("from-default-dotenv"),
+        "raw provider secret must not appear in output:\n{}",
         out(&o)
     );
 }

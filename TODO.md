@@ -83,7 +83,28 @@ Tiered sweep across untrusted-input surfaces (see `HARDENING_GOALS.md`).
   `--proto-redir =https,http` (blocks redirect-to-`file://`/SSRF) + plaintext-http
   warning. Regression tests in `src/checkpoint.rs`, `src/signing.rs`,
   `tests/mcp_e2e.rs`, `tests/cov_params_trust.rs`.
-- [ ] Secret-redaction completeness audit across every output sink (HARDENING_GOALS #2).
+- [x] Secret-redaction completeness audit across every output sink (HARDENING_GOALS
+  #2). A three-way audit (callbacks/repair, events/watch, manifest/dry-run/http-sql)
+  found the redaction set itself incomplete and three sinks leaking. Fixed:
+  (1) **provider-resolved secrets** (doppler/yard/dotenv/command/prompt) now
+  auto-join the redaction set — previously masked only if their key was *also*
+  named in `redact:` — length-guarded (`SECRET_REDACT_MIN_LEN = 4`) so a trivial
+  value like `1`/`true` can't mask unrelated text; (2) the **http** runtime's
+  error branches built `stderr` from raw parse/curl text and printed the resolved
+  URL unredacted — now redacted at a single `BlockResult::redact` choke point
+  applied at the executor's http/sql dispatch boundary (restores the "every
+  BlockResult is redacted" invariant, which transitively covers the
+  `step.complete`/`checkpoint.failed` callbacks and the `--events` sink), plus the
+  console request line is masked; (3) artifact **`manifest.json` `label`/`description`**
+  (cell-supplied via `.meta.json`) were written/uploaded/emitted verbatim — now
+  redacted in `Artifacts::sync`, the single point feeding the manifest, its upload,
+  and the `step.artifact_saved` event. Audited-clean (no change): `run.complete`,
+  `--repair` POST (re-redacts), `--dry-run` (prints program name only, never the
+  interpolated body), `sql` (output redacted; DSN never emitted), and `watch
+  --serve /state` (serves only metadata, never stdout/stderr/outputs/env).
+  Regression tests in `tests/cov_run_errors.rs` (provider auto-redact + length
+  guard, http-error stderr via callback, manifest label) and updated
+  `tests/cov_lib_extra.rs` provider tests.
 - [ ] Local-server (`wb watch --serve`) + parser robustness hardening (HARDENING_GOALS #3).
 
 ## Runbook-library features (formerly `features-request.md` F1–F7)

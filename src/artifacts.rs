@@ -151,6 +151,11 @@ pub struct Artifacts {
     /// Files we've already uploaded, keyed by (path, mtime-as-nanos).
     /// Rewriting a file produces a new mtime and triggers a re-upload.
     seen: HashMap<PathBuf, u128>,
+    /// Secret values to mask in artifact metadata (`label`/`description`) before
+    /// it lands in `manifest.json`, the upload, or a `step.artifact_saved`
+    /// event. Set via [`Artifacts::set_redact`] once the session's redaction
+    /// list is resolved; empty until then.
+    redact: Vec<String>,
 }
 
 impl Artifacts {
@@ -189,6 +194,7 @@ impl Artifacts {
                 upload_url: upload_url(env),
                 upload_secret: upload_secret(env),
                 seen: HashMap::new(),
+                redact: Vec::new(),
             };
         }
 
@@ -200,7 +206,15 @@ impl Artifacts {
             upload_url: upload_url(env),
             upload_secret: upload_secret(env),
             seen: HashMap::new(),
+            redact: Vec::new(),
         }
+    }
+
+    /// Install the session's secret-redaction list so artifact metadata
+    /// (`label`/`description`) is masked before it leaves the box. Called once,
+    /// right after `init`, when the run's `redact_values` is resolved.
+    pub fn set_redact(&mut self, redact: Vec<String>) {
+        self.redact = redact;
     }
 
     /// Read-only access to the resolved artifacts directory. Callers that
@@ -303,6 +317,11 @@ impl Artifacts {
             let bytes = fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
             let content_type = guess_content_type(&filename);
             let (label, description) = read_sidecar(&path);
+            // Author/cell-supplied metadata can interpolate a secret; mask it
+            // here, the single point feeding both `record()` (manifest.json,
+            // which is itself uploaded) and the `step.artifact_saved` event.
+            let label = label.map(|l| crate::executor::redact_output(&l, &self.redact));
+            let description = description.map(|d| crate::executor::redact_output(&d, &self.redact));
 
             out.push(ArtifactRecord {
                 path: path.clone(),

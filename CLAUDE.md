@@ -875,6 +875,33 @@ Configured in frontmatter or overridden via CLI flags:
 - **dotenv/file** — read from .env file
 - **prompt** — interactive terminal prompt
 
+### Redaction
+
+Secret values are masked (`***`) everywhere wb output can leave the box —
+rendered/`-o`/`--json`/`--md` output, `step.complete`/`checkpoint.failed`/
+`run.complete` callbacks, the `--events` JSONL stream, the `--repair` POST,
+`step.artifact_saved` events, and the `manifest.json` (`label`/`description`).
+The redaction set is built from three sources:
+
+- **frontmatter `redact:` keys / `--redact NAME`** — the named env var's value.
+- **`secret: true` params** — the resolved value (any length).
+- **secret-provider output** — values resolved by a `secrets:` provider
+  (doppler/yard/dotenv/command/prompt) are secrets by definition and auto-join
+  the redaction set; you do **not** have to also name them in `redact:`. These
+  are **length-guarded**: a provider value shorter than 4 chars (e.g. `1`/`true`/
+  `on`) is *not* auto-redacted, so a trivial secret can't mask unrelated
+  substrings throughout the output. Use an explicit `redact:` entry to force
+  masking of a short value.
+
+Redaction is exact-substring replacement at a single choke point
+(`executor::redact_output`); every `BlockResult` leaving the executor is
+redacted (the http/sql runtimes redact at the dispatch boundary via
+`BlockResult::redact`). Audited-clean sinks that carry no secret-bearing field:
+`--dry-run` (prints the runtime program, never the interpolated command body)
+and `wb watch --serve /state` (serves run metadata only — never stdout/stderr/
+outputs/env). The `sql` connection string (with an inline password) is never
+written to a wb output field.
+
 ## Development
 
 ```bash

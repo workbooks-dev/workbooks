@@ -38,6 +38,13 @@ use std::time::{Duration, Instant};
 /// not feel sluggish, long enough to let a transient HTTP/API blip clear.
 const RETRY_DELAY: Duration = Duration::from_millis(500);
 
+/// Minimum length for a provider-resolved secret value to be auto-added to the
+/// redaction set. Guards against over-redacting trivially short values (e.g. a
+/// secret whose value is `1`/`true`/`on`) that would otherwise mask unrelated
+/// substrings throughout the output. Explicit `redact:` keys and `secret:`
+/// params are never length-gated — only the auto-redaction of provider output.
+const SECRET_REDACT_MIN_LEN: usize = 4;
+
 /// Parse workbook content and expand any ```include``` fences. Exits with
 /// `EXIT_WORKBOOK_INVALID` on any include resolution failure (missing target,
 /// cycle, unreadable file). Every codepath that consumes a workbook for
@@ -3497,8 +3504,10 @@ fn run_single_collect(
         secrets_cmd,
     );
 
+    let mut provider_secret_values: Vec<String> = Vec::new();
     if let Some(ref config) = secrets_config {
         if let Ok(env) = secrets::resolve_secrets(config) {
+            provider_secret_values.extend(env.values().cloned());
             ctx.env.extend(env);
         }
     }
@@ -3558,6 +3567,15 @@ fn run_single_collect(
     // (mirrors the `wb run` path in run_single).
     ctx.redact_values
         .extend(secret_env.into_iter().filter(|v| !v.is_empty()));
+    // Provider-resolved secrets are masked too (length-guarded), mirroring the
+    // `wb run` path so `wb test` redacts identically.
+    ctx.redact_values.extend(
+        provider_secret_values
+            .into_iter()
+            .filter(|v| v.len() >= SECRET_REDACT_MIN_LEN),
+    );
+    ctx.redact_values.sort();
+    ctx.redact_values.dedup();
 
     // Run setup commands
     if !no_setup {
@@ -3591,6 +3609,7 @@ fn run_single_collect(
     // completes, `artifacts.sync()` picks up new files and uploads them when
     // WB_ARTIFACTS_UPLOAD_URL + WB_RECORDING_UPLOAD_SECRET are set.
     let mut artifacts = artifacts::Artifacts::init(&mut ctx.env);
+    artifacts.set_redact(ctx.redact_values.clone());
     let mut run_outputs = step_outputs::RawOutputsByStep::new();
     let outputs_path = step_outputs::init_outputs_path(&mut ctx.env, artifacts.dir(), &run_outputs);
 
@@ -4174,9 +4193,15 @@ fn build_execution_context(
         cfg.secrets_cmd.clone(),
     );
 
+    let mut provider_secret_values: Vec<String> = Vec::new();
     if let Some(ref config) = secrets_config {
         match secrets::resolve_secrets(config) {
-            Ok(env) => ctx.env.extend(env),
+            Ok(env) => {
+                // Provider-resolved values are secrets by definition; collect
+                // them for auto-redaction (length-guarded below).
+                provider_secret_values.extend(env.values().cloned());
+                ctx.env.extend(env);
+            }
             Err(e) => {
                 eprintln!("error: secrets: {}", e);
                 std::process::exit(1);
@@ -4233,6 +4258,17 @@ fn build_execution_context(
             .filter(|v| !v.is_empty())
             .cloned(),
     );
+    // Provider-resolved secrets (doppler/yard/dotenv/command/prompt) are secrets
+    // by definition, so mask them too — without requiring the operator to also
+    // name each key under `redact:`. Length-guarded (>= SECRET_REDACT_MIN_LEN)
+    // so a trivially short value like "1"/"true"/"on" can't mask unrelated text.
+    ctx.redact_values.extend(
+        provider_secret_values
+            .into_iter()
+            .filter(|v| v.len() >= SECRET_REDACT_MIN_LEN),
+    );
+    ctx.redact_values.sort();
+    ctx.redact_values.dedup();
 
     // Run setup commands
     if !cfg.no_setup {
@@ -5128,6 +5164,7 @@ fn run_single(cfg: RunConfig) {
     // Artifacts: same semantics as the non-checkpoint path — create/read the
     // dir, inject WB_ARTIFACTS_DIR, upload new files after each cell.
     let mut artifacts = artifacts::Artifacts::init(&mut ctx.env);
+    artifacts.set_redact(ctx.redact_values.clone());
     let outputs_path = step_outputs::init_outputs_path(&mut ctx.env, artifacts.dir(), &run_outputs);
 
     let start = Instant::now();

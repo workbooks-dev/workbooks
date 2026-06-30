@@ -906,6 +906,137 @@ fn secret_param_redacted_in_rendered_output() {
     );
 }
 
+/// A secret pulled from a `secrets:` provider is masked in output even when its
+/// key is NOT named in `redact:` — provider values are secrets by definition
+/// and auto-join the redaction set (length-guarded).
+#[test]
+fn provider_secret_auto_redacted_without_redact_flag() {
+    let h = home();
+    let dir = home();
+    let wbf = write_wb(
+        dir.path(),
+        "prov.md",
+        "---\nruntime: bash\nsecrets:\n  provider: command\n  command: \"echo PROVSECRET=abcd1234secret\"\n---\n```bash\necho \"val=$PROVSECRET\"\n```\n",
+    );
+    let o = wb(h.path())
+        .args(["run", wbf.to_str().unwrap(), "-q", "--json"])
+        .output()
+        .unwrap();
+    assert_eq!(code(&o), 0, "run should pass:\n{}", both(&o));
+    assert!(
+        !out(&o).contains("abcd1234secret"),
+        "provider secret must be auto-redacted even without --redact:\n{}",
+        out(&o)
+    );
+}
+
+/// The length guard keeps a trivially short provider value (< 4 chars) out of
+/// the redaction set, so it can't mask unrelated substrings in the output.
+#[test]
+fn short_provider_secret_not_over_redacted() {
+    let h = home();
+    let dir = home();
+    let wbf = write_wb(
+        dir.path(),
+        "short.md",
+        "---\nruntime: bash\nsecrets:\n  provider: command\n  command: \"echo TINY=ok\"\n---\n```bash\necho \"status=ok done\"\n```\n",
+    );
+    let o = wb(h.path())
+        .args(["run", wbf.to_str().unwrap(), "-q", "--json"])
+        .output()
+        .unwrap();
+    assert_eq!(code(&o), 0, "run should pass:\n{}", both(&o));
+    let s = json_stdout(&o).to_string();
+    assert!(
+        s.contains("status=ok done"),
+        "a value below the length guard must not mask unrelated text:\n{s}"
+    );
+}
+
+/// A secret interpolated into an `http` block survives into the block's error
+/// `stderr` (the handler builds it from raw parse text). It must be redacted
+/// before reaching the callback / `--events` / `--json` sinks.
+#[test]
+fn http_error_stderr_redacted_in_callback() {
+    let h = home();
+    let dir = home();
+    // Header missing its colon → a parse error that echoes the substituted
+    // header line verbatim, including the interpolated token.
+    let wbf = write_wb(
+        dir.path(),
+        "httperr.md",
+        "---\nruntime: bash\nenv:\n  TOKEN: supersecrettoken99\n---\n```http\nGET http://example.invalid/\nAuthorization Bearer $TOKEN\n```\n",
+    );
+    // 1 http block (fails at parse) → step.complete + run.complete = 2.
+    let (url, rx) = start_callback_sink(2);
+    let o = wb(h.path())
+        .args([
+            "run",
+            wbf.to_str().unwrap(),
+            "-q",
+            "--redact",
+            "TOKEN",
+            "--callback",
+            &url,
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        !both(&o).contains("supersecrettoken99"),
+        "secret must not appear in run output:\n{}",
+        both(&o)
+    );
+    let reqs = drain_requests(&rx, 2);
+    let step = reqs
+        .iter()
+        .find(|r| r.event() == "step.complete")
+        .expect("a step.complete callback");
+    let stderr = step.body["block"]["stderr"].as_str().unwrap_or("");
+    assert!(
+        stderr.contains("***"),
+        "the http parse-error path should have fired and been redacted:\n{stderr}"
+    );
+    for r in &reqs {
+        let body = r.body.to_string();
+        assert!(
+            !body.contains("supersecrettoken99"),
+            "secret leaked into {} callback payload:\n{body}",
+            r.event()
+        );
+    }
+}
+
+/// A secret interpolated into an artifact's `.meta.json` label must be masked
+/// in the persisted `manifest.json` (which is itself uploadable) — the sync
+/// site that feeds both the manifest and the `step.artifact_saved` event.
+#[test]
+fn artifact_manifest_label_redacted() {
+    let h = home();
+    let dir = home();
+    let artdir = home();
+    let wbf = write_wb(
+        dir.path(),
+        "art.md",
+        "---\nruntime: bash\nenv:\n  APIKEY: zzmanifestsecretzz\n---\n```bash\nprintf data > \"$WB_ARTIFACTS_DIR/out.txt\"\nprintf '{\"label\":\"k=%s\"}' \"$APIKEY\" > \"$WB_ARTIFACTS_DIR/out.txt.meta.json\"\n```\n",
+    );
+    let o = wb(h.path())
+        .env("WB_ARTIFACTS_DIR", artdir.path())
+        .args(["run", wbf.to_str().unwrap(), "-q", "--redact", "APIKEY"])
+        .output()
+        .unwrap();
+    assert_eq!(code(&o), 0, "run should pass:\n{}", both(&o));
+    let manifest = std::fs::read_to_string(artdir.path().join("manifest.json"))
+        .expect("manifest.json should exist");
+    assert!(
+        !manifest.contains("zzmanifestsecretzz"),
+        "secret leaked into manifest.json label:\n{manifest}"
+    );
+    assert!(
+        manifest.contains("***"),
+        "the redacted label should be present in the manifest:\n{manifest}"
+    );
+}
+
 // ===========================================================================
 // include splice numbering + frame finish events
 // ===========================================================================
