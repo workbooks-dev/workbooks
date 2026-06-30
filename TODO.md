@@ -69,6 +69,23 @@ Suggested product sequencing after the 2026-04-29 multi-agent battle test:
 - [x] HTTP callback ordering guarantees (follow-up to #12). HTTP callbacks carry a monotonic `X-WB-Sequence` header (fixed across retries) plus an idempotency key over `(event, run_id, sequence)`, so receivers can totally-order and dedup a run's events. Events are emitted synchronously in sequence order. Wave 5 closed the last gap: the sequence high-water mark is persisted in the checkpoint (`callback_seq`) and re-seeded on resume, so `X-WB-Sequence` stays monotonic across pause/resume instead of restarting at 0 in the new process.
 - [x] `reap_expired` should acquire the per-ckpt file lock before mutating — currently uses a sibling reap lock that serializes reapers against each other but not against a live `wb run` (follow-up to #17 / surfaced during #24). Shipped as Phase 3 of the #29 work: reaper now `try_lock_for`s the checkpoint path inside `with_pending_lock`, skips the descriptor (non-blocking) on contention, and releases before firing callbacks so HTTP doesn't hold disk locks.
 
+## Security hardening (post-roadmap)
+
+Tiered sweep across untrusted-input surfaces (see `HARDENING_GOALS.md`).
+
+- [x] Remote-fetch + signing + MCP boundary review (HARDENING_GOALS #1). Fixed:
+  checkpoint/run-id path traversal (`checkpoint::validate_id`, enforced at run /
+  resume / cancel / watch / MCP entry points and as a save/load/delete backstop);
+  MCP argv option-injection (positional paths passed after `--`, run_id validated);
+  `author_workbook` arbitrary-write (now `.md`-only, no `..`, optional `WB_MCP_ROOT`
+  jail); JSON-RPC 16 MiB message cap; `--verify-sig` without `--pubkey` now warns
+  it is integrity-only (no authorship); remote `curl` pinned to `--proto`/
+  `--proto-redir =https,http` (blocks redirect-to-`file://`/SSRF) + plaintext-http
+  warning. Regression tests in `src/checkpoint.rs`, `src/signing.rs`,
+  `tests/mcp_e2e.rs`, `tests/cov_params_trust.rs`.
+- [ ] Secret-redaction completeness audit across every output sink (HARDENING_GOALS #2).
+- [ ] Local-server (`wb watch --serve`) + parser robustness hardening (HARDENING_GOALS #3).
+
 ## Runbook-library features (formerly `features-request.md` F1–F7)
 
 These were the longer-form Xatabase run-page specs. F1–F6 shipped across v0.11–v0.14; F7 is the one open item and its spec stays in `features-request.md`.

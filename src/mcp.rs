@@ -35,7 +35,7 @@
 //!   error category.
 
 use std::collections::BTreeMap;
-use std::io::{BufRead, Write};
+use std::io::{BufRead, Read, Write};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde_json::{json, Value};
@@ -57,15 +57,31 @@ pub fn run() -> WbExit {
     let mut line = String::new();
     let mut handle = stdin.lock();
 
+    // Cap a single JSON-RPC message so a client that never sends a newline can't
+    // drive `read_line` to buffer unbounded bytes into memory.
+    const MAX_MESSAGE_BYTES: u64 = 16 * 1024 * 1024;
+
     loop {
         line.clear();
-        match handle.read_line(&mut line) {
-            Ok(0) => break, // EOF — client closed the pipe.
-            Ok(_) => {}
-            Err(e) => {
-                crate::log_warn!("mcp: stdin read error: {}", e);
-                break;
+        {
+            let mut limited = (&mut handle).take(MAX_MESSAGE_BYTES);
+            match limited.read_line(&mut line) {
+                Ok(0) => break, // EOF — client closed the pipe.
+                Ok(_) => {}
+                Err(e) => {
+                    crate::log_warn!("mcp: stdin read error: {}", e);
+                    break;
+                }
             }
+        }
+        // Hit the cap without a line terminator → an oversized/garbage message.
+        // Report it and stop; resyncing mid-stream isn't worth the complexity.
+        if line.len() as u64 >= MAX_MESSAGE_BYTES && !line.ends_with('\n') {
+            write_message(
+                &mut out,
+                &error_response(Value::Null, -32600, "message exceeds 16 MiB limit"),
+            );
+            break;
         }
         let trimmed = line.trim();
         if trimmed.is_empty() {
@@ -306,6 +322,53 @@ fn tool_err(message: &str) -> Value {
 
 // ── Individual tools ────────────────────────────────────────────────────────
 
+/// Guard `author_workbook` writes. The MCP client is only semi-trusted (a
+/// prompt-injected agent could be steered into clobbering `~/.bashrc`,
+/// `~/.ssh/authorized_keys`, or the wb trust store), so bound the blast radius:
+///
+/// 1. Reject `..` path components — the literal traversal vector.
+/// 2. Require a `.md` / `.markdown` extension — this tool only writes workbooks,
+///    so an agent can't be coerced into overwriting shell configs, key files,
+///    `.sig` signatures, or `~/.wb/trust.json`.
+/// 3. Optional jail: when `WB_MCP_ROOT` is set, the target must resolve inside it.
+fn validate_author_path(path: &str) -> Result<(), String> {
+    use std::path::{Component, Path, PathBuf};
+    let p = Path::new(path);
+    if p.components().any(|c| matches!(c, Component::ParentDir)) {
+        return Err(format!("path {path:?} must not contain '..' components"));
+    }
+    let ext_ok = p
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.eq_ignore_ascii_case("md") || e.eq_ignore_ascii_case("markdown"))
+        .unwrap_or(false);
+    if !ext_ok {
+        return Err(format!(
+            "author_workbook only writes workbooks: path {path:?} must end in .md or .markdown"
+        ));
+    }
+    if let Some(root) = std::env::var_os("WB_MCP_ROOT") {
+        let root_c = PathBuf::from(&root)
+            .canonicalize()
+            .map_err(|e| format!("WB_MCP_ROOT {root:?}: {e}"))?;
+        // No `..` above, so absolutizing against cwd is a faithful normalization.
+        let abs = if p.is_absolute() {
+            p.to_path_buf()
+        } else {
+            std::env::current_dir()
+                .map_err(|e| format!("cwd: {e}"))?
+                .join(p)
+        };
+        if !abs.starts_with(&root_c) {
+            return Err(format!(
+                "path {path:?} escapes WB_MCP_ROOT ({})",
+                root_c.display()
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn tool_author(args: &Value) -> Result<Value, String> {
     let path = str_arg(args, "path").ok_or("missing required arg: path")?;
     let content = str_arg(args, "content").ok_or("missing required arg: content")?;
@@ -313,6 +376,8 @@ fn tool_author(args: &Value) -> Result<Value, String> {
         .get("overwrite")
         .and_then(Value::as_bool)
         .unwrap_or(false);
+
+    validate_author_path(&path)?;
 
     let p = std::path::Path::new(&path);
     if p.exists() && !overwrite {
@@ -332,11 +397,13 @@ fn tool_author(args: &Value) -> Result<Value, String> {
 fn tool_run(args: &Value) -> Result<Value, String> {
     let file = str_arg(args, "file").ok_or("missing required arg: file")?;
     let run_id = str_arg(args, "run_id").unwrap_or_else(gen_run_id);
+    // An attacker-controlled run_id becomes a checkpoint filename + argv token;
+    // reject path traversal / argv injection before spawning anything.
+    checkpoint::validate_id(&run_id).map_err(|e| e.to_string())?;
     let bail = args.get("bail").and_then(Value::as_bool).unwrap_or(true);
 
     let mut argv: Vec<String> = vec![
         "run".into(),
-        file,
         "--json".into(),
         "-q".into(),
         "--checkpoint".into(),
@@ -353,6 +420,10 @@ fn tool_run(args: &Value) -> Result<Value, String> {
         argv.push("--set".into());
         argv.push(format!("{k}={v}"));
     }
+    // `--` stops option parsing so a `file` like `--sandbox` can't be smuggled
+    // in as a flag to the re-invoked `wb` (argv injection into current_exe).
+    argv.push("--".into());
+    argv.push(file);
 
     let out = spawn_wb(&argv, None)?;
     Ok(run_result(&run_id, &out))
@@ -360,6 +431,7 @@ fn tool_run(args: &Value) -> Result<Value, String> {
 
 fn tool_resume(args: &Value) -> Result<Value, String> {
     let run_id = str_arg(args, "run_id").ok_or("missing required arg: run_id")?;
+    checkpoint::validate_id(&run_id).map_err(|e| e.to_string())?;
 
     let mut argv: Vec<String> = vec![
         "resume".into(),
@@ -406,7 +478,10 @@ fn tool_resume(args: &Value) -> Result<Value, String> {
 
 fn tool_inspect(args: &Value) -> Result<Value, String> {
     let file = str_arg(args, "file").ok_or("missing required arg: file")?;
-    let out = spawn_wb(&["inspect".into(), file, "--json".into()], None)?;
+    let out = spawn_wb(
+        &["inspect".into(), "--json".into(), "--".into(), file],
+        None,
+    )?;
     if out.code != 0 && out.stdout.trim().is_empty() {
         return Err(format!(
             "inspect failed (exit {}): {}",
@@ -420,10 +495,12 @@ fn tool_inspect(args: &Value) -> Result<Value, String> {
 fn tool_validate(args: &Value) -> Result<Value, String> {
     let file = str_arg(args, "file").ok_or("missing required arg: file")?;
     let strict = args.get("strict").and_then(Value::as_bool).unwrap_or(false);
-    let mut argv: Vec<String> = vec!["validate".into(), file, "--format".into(), "json".into()];
+    let mut argv: Vec<String> = vec!["validate".into(), "--format".into(), "json".into()];
     if strict {
         argv.push("--strict".into());
     }
+    argv.push("--".into());
+    argv.push(file);
     let out = spawn_wb(&argv, None)?;
     Ok(json!({
         "exit_code": out.code,

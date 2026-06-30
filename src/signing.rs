@@ -333,6 +333,83 @@ mod tests {
     }
 
     #[test]
+    fn verify_is_bound_to_content_not_the_sha256_field() {
+        // The `sha256` field is diagnostic only — verification must use the
+        // ed25519 signature over the actual content, never trust the recorded
+        // digest. Corrupting `sha256` alone must not change the verdict, and
+        // tampering content must fail even if `sha256` is left "matching".
+        let dir = tempfile::tempdir().unwrap();
+        let key = dir.path().join("k");
+        let pubhex = keygen(&key).unwrap();
+        let content = b"real-content";
+        let mut sig = sign(&key, content).unwrap();
+
+        // Lie about the digest: real signature still verifies against real bytes.
+        sig.sha256 = "00".repeat(32);
+        assert!(
+            verify(&sig, content, Some(&pubhex)).is_ok(),
+            "verify must ignore the sha256 diagnostic field"
+        );
+
+        // Tampered content fails even though the (stale) digest is untouched.
+        let mut sig2 = sign(&key, content).unwrap();
+        assert!(verify(&sig2, b"evil-content", Some(&pubhex)).is_err());
+        // …and forging the digest to match the evil content doesn't help.
+        sig2.sha256 = to_hex(&Sha256::digest(b"evil-content"));
+        assert!(verify(&sig2, b"evil-content", Some(&pubhex)).is_err());
+    }
+
+    #[test]
+    fn verify_without_pinned_pubkey_accepts_any_valid_signer() {
+        // Documents the integrity-only mode that `wb run`/`wb verify-sig` warn
+        // about: with no expected pubkey, a sig made by an ATTACKER's key over
+        // attacker content "verifies". Pinning --pubkey is what authenticates.
+        let dir = tempfile::tempdir().unwrap();
+        let attacker = dir.path().join("attacker");
+        let pub_attacker = keygen(&attacker).unwrap();
+        let content = b"attacker-authored workbook";
+        let sig = sign(&attacker, content).unwrap();
+
+        // No pin → passes (integrity only).
+        assert!(verify(&sig, content, None).is_ok());
+        // Pinned to a DIFFERENT key → rejected (authenticity enforced).
+        let other = dir.path().join("other");
+        let pub_other = keygen(&other).unwrap();
+        assert_ne!(pub_attacker, pub_other);
+        let err = verify(&sig, content, Some(&pub_other)).unwrap_err();
+        assert!(err.contains("different key"), "got: {err}");
+    }
+
+    #[test]
+    fn verify_rejects_malformed_sig_fields() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = dir.path().join("k");
+        let pubhex = keygen(&key).unwrap();
+        let content = b"x";
+        let base = sign(&key, content).unwrap();
+
+        // Odd-length hex pubkey.
+        let mut s = base.clone();
+        s.pubkey = "abc".to_string();
+        assert!(verify(&s, content, None).is_err());
+
+        // Non-hex signature.
+        let mut s = base.clone();
+        s.signature = "zz".repeat(64);
+        assert!(verify(&s, content, None).is_err());
+
+        // Right-shaped hex but wrong length (16 bytes, not 32) pubkey.
+        let mut s = base.clone();
+        s.pubkey = "ab".repeat(16);
+        assert!(verify(&s, content, Some(&pubhex)).is_err() || verify(&s, content, None).is_err());
+
+        // Empty fields.
+        let mut s = base.clone();
+        s.signature = String::new();
+        assert!(verify(&s, content, None).is_err());
+    }
+
+    #[test]
     fn save_then_load_sig_roundtrip() {
         let dir = tempfile::tempdir().unwrap();
         let key = dir.path().join("k");

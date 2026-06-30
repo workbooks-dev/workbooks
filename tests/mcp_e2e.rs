@@ -82,6 +82,24 @@ impl McpClient {
         );
         result["structuredContent"].clone()
     }
+
+    /// tools/call returning the raw `result` object (so a test can assert on
+    /// `isError` and the human-readable text).
+    fn call_tool_raw(&mut self, name: &str, arguments: Value) -> Value {
+        self.request(
+            "tools/call",
+            json!({ "name": name, "arguments": arguments }),
+        )["result"]
+            .clone()
+    }
+}
+
+/// The text payload of a tool result (the first `content[].text`).
+fn result_text(result: &Value) -> String {
+    result["content"][0]["text"]
+        .as_str()
+        .unwrap_or("")
+        .to_string()
 }
 
 impl Drop for McpClient {
@@ -209,5 +227,112 @@ echo "resumed-with: $token"
     assert!(
         all_stdout.contains("resumed-with: s3cr3t"),
         "bound value did not flow into resumed block: {all_stdout}"
+    );
+}
+
+// ── Adversarial: untrusted-input boundaries of the MCP server ───────────────
+// The MCP client is only semi-trusted (a prompt-injected agent drives it), so
+// `run_id`, `file`, and `path` are attacker-controlled. These pin the hardening
+// against checkpoint-dir traversal, argv injection into the re-spawned `wb`, and
+// arbitrary-file writes via author_workbook.
+
+fn start_with_tmp() -> (tempfile::TempDir, McpClient) {
+    let tmp = tempfile::tempdir().unwrap();
+    let ckpt_dir = tmp.path().join("checkpoints");
+    std::fs::create_dir_all(&ckpt_dir).unwrap();
+    let mut mcp = McpClient::start(&ckpt_dir);
+    mcp.request(
+        "initialize",
+        json!({ "protocolVersion": "2025-06-18", "capabilities": {} }),
+    );
+    (tmp, mcp)
+}
+
+#[test]
+fn mcp_author_rejects_non_markdown_path() {
+    let (tmp, mut mcp) = start_with_tmp();
+    let evil = tmp.path().join("PWNED.sh");
+    let result = mcp.call_tool_raw(
+        "author_workbook",
+        json!({ "path": evil.to_str().unwrap(), "content": "x" }),
+    );
+    assert_eq!(
+        result["isError"], true,
+        "non-.md write must be refused: {result}"
+    );
+    assert!(
+        result_text(&result).contains(".md"),
+        "error should mention the .md requirement: {}",
+        result_text(&result)
+    );
+    assert!(!evil.exists(), "the file must not have been written");
+}
+
+#[test]
+fn mcp_author_rejects_parent_traversal() {
+    let (tmp, mut mcp) = start_with_tmp();
+    let nested = tmp.path().join("sub");
+    std::fs::create_dir_all(&nested).unwrap();
+    // A relative path containing `..` is rejected outright (before extension).
+    let result = mcp.call_tool_raw(
+        "author_workbook",
+        json!({ "path": "sub/../../escape.md", "content": "x" }),
+    );
+    assert_eq!(
+        result["isError"], true,
+        "`..` traversal must be refused: {result}"
+    );
+    assert!(result_text(&result).contains(".."));
+}
+
+#[test]
+fn mcp_run_rejects_traversing_run_id() {
+    let (tmp, mut mcp) = start_with_tmp();
+    let wb = tmp.path().join("ok.md");
+    std::fs::write(&wb, "# t\n\n```bash\necho hi\n```\n").unwrap();
+    for bad in ["../../etc/x", "/tmp/abs", "sub/dir", "-flag"] {
+        let result = mcp.call_tool_raw(
+            "run_workbook",
+            json!({ "file": wb.to_str().unwrap(), "run_id": bad }),
+        );
+        assert_eq!(
+            result["isError"], true,
+            "run_id {bad:?} must be rejected: {result}"
+        );
+        assert!(result_text(&result).contains("invalid checkpoint id"));
+    }
+    // No `.json` leaked outside the checkpoint dir.
+    assert!(!std::path::Path::new("/tmp/abs.json").exists());
+    assert!(!tmp.path().join("etc/x.json").exists());
+}
+
+#[test]
+fn mcp_resume_rejects_traversing_run_id() {
+    let (_tmp, mut mcp) = start_with_tmp();
+    let result = mcp.call_tool_raw(
+        "resume_workbook",
+        json!({ "run_id": "../../pwn", "value": "v" }),
+    );
+    assert_eq!(
+        result["isError"], true,
+        "resume traversal must be refused: {result}"
+    );
+    assert!(result_text(&result).contains("invalid checkpoint id"));
+}
+
+#[test]
+fn mcp_run_does_not_treat_dash_file_as_a_flag() {
+    // argv injection: a `file` like "--sandbox" must reach `wb run` as a
+    // positional path (and fail "No such file"), never be parsed as the flag.
+    let (_tmp, mut mcp) = start_with_tmp();
+    let run = mcp.call_tool(
+        "run_workbook",
+        json!({ "file": "--sandbox", "run_id": "dash-file-run" }),
+    );
+    assert_eq!(run["status"], "failed", "run result: {run}");
+    let stderr = run["stderr"].as_str().unwrap_or("");
+    assert!(
+        stderr.contains("--sandbox") && stderr.to_lowercase().contains("no such file"),
+        "dash-prefixed file should be a path error, got stderr: {stderr}"
     );
 }

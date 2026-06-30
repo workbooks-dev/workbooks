@@ -346,11 +346,46 @@ fn default_checkpoint_dir() -> PathBuf {
         .clone()
 }
 
+/// Reject checkpoint / run ids that could escape the checkpoint dir or smuggle
+/// argv. An id becomes a `<dir>/<id>.json` filename *and* is forwarded verbatim
+/// as a `--checkpoint` / `resume` argv token (notably by the MCP server, whose
+/// `run_id` is attacker-controlled), so it must be a plain slug: `[A-Za-z0-9._-]`,
+/// no leading `-`, no `..`, no path separators. Without this, a `run_id` of
+/// `../../../../etc/cron.d/x` or `/tmp/x` writes a `.json` outside the store.
+pub fn validate_id(id: &str) -> WbResult<()> {
+    let bad = |why: &str| Err(WbError::Io(format!("invalid checkpoint id {id:?}: {why}")));
+    if id.is_empty() {
+        return bad("must not be empty");
+    }
+    if id.len() > 200 {
+        return bad("too long (max 200 chars)");
+    }
+    if id == "." || id == ".." {
+        return bad("reserved name");
+    }
+    if id.starts_with('-') {
+        return bad("must not start with '-'");
+    }
+    if id.contains("..") {
+        return bad("must not contain '..'");
+    }
+    if let Some(c) = id
+        .chars()
+        .find(|c| !(c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.')))
+    {
+        return bad(&format!(
+            "illegal character {c:?} (allowed: A-Z a-z 0-9 . _ -)"
+        ));
+    }
+    Ok(())
+}
+
 pub fn checkpoint_path(id: &str) -> PathBuf {
     checkpoint_dir().join(format!("{}.json", id))
 }
 
 pub fn delete(id: &str) -> WbResult<()> {
+    validate_id(id)?;
     let path = checkpoint_path(id);
     if path.exists() {
         std::fs::remove_file(&path)
@@ -360,6 +395,7 @@ pub fn delete(id: &str) -> WbResult<()> {
 }
 
 pub fn save(id: &str, checkpoint: &Checkpoint) -> WbResult<()> {
+    validate_id(id)?;
     let dir = checkpoint_dir();
     std::fs::create_dir_all(&dir)
         .map_err(|e| WbError::Io(format!("create checkpoint dir: {}", e)))?;
@@ -372,6 +408,7 @@ pub fn save(id: &str, checkpoint: &Checkpoint) -> WbResult<()> {
 }
 
 pub fn load(id: &str) -> WbResult<Option<Checkpoint>> {
+    validate_id(id)?;
     let path = checkpoint_path(id);
     if !path.exists() {
         return Ok(None);
@@ -725,5 +762,55 @@ mod tests {
     #[test]
     fn test_security_requirements_default_is_inactive() {
         assert!(!SecurityRequirements::default().any());
+    }
+
+    #[test]
+    fn validate_id_accepts_plain_slugs() {
+        for ok in [
+            "deploy-1",
+            "mcp-12345-67890-0",
+            "pipe",
+            "run.2026",
+            "A_b-C.9",
+        ] {
+            assert!(validate_id(ok).is_ok(), "{ok:?} should be accepted");
+        }
+    }
+
+    #[test]
+    fn validate_id_rejects_traversal_and_separators() {
+        // These are the exploit strings: an id that escapes the checkpoint dir
+        // when used as `<dir>/<id>.json`, or that injects argv.
+        for bad in [
+            "",            // empty
+            ".",           // reserved
+            "..",          // reserved
+            "../escape",   // parent traversal
+            "a/../b",      // embedded traversal
+            "/tmp/abs",    // absolute (separator)
+            "sub/dir",     // path separator
+            "back\\slash", // windows separator
+            "-leading",    // argv flag injection
+            "has space",   // illegal char
+            "semi;colon",  // illegal char
+            "新",          // non-ascii
+        ] {
+            assert!(
+                validate_id(bad).is_err(),
+                "{bad:?} should be rejected as an unsafe checkpoint id"
+            );
+        }
+        // Over-long ids are rejected too.
+        assert!(validate_id(&"x".repeat(201)).is_err());
+    }
+
+    #[test]
+    fn save_load_delete_reject_unsafe_id() {
+        // The module-internal backstop: even if a caller forgot the entry-point
+        // check, the path-building primitives refuse to touch a traversing id.
+        let ck = Checkpoint::new("wb.md", 1);
+        assert!(save("../pwn", &ck).is_err());
+        assert!(load("../pwn").is_err());
+        assert!(delete("../pwn").is_err());
     }
 }

@@ -965,3 +965,112 @@ fn run_locked_refuses_when_lockfile_missing() {
         .unwrap();
     assert_ne!(code(&o), 0, "should refuse with no lockfile");
 }
+
+// ---------------------------------------------------------------------------
+// SECURITY BOUNDARIES — checkpoint-id traversal + signature pinning warnings
+// ---------------------------------------------------------------------------
+
+#[test]
+fn run_rejects_path_traversing_checkpoint_id() {
+    // A `--checkpoint` id is used as `<dir>/<id>.json`; a `..` id must be
+    // refused before any file is written so it can't escape the store.
+    let home = tempdir().unwrap();
+    let dir = tempdir().unwrap();
+    let wbf = write(&dir, "w.md", SIGN_WB);
+    let escaped = home.path().join("ESCAPED.json");
+    let o = wb(home.path())
+        .args([
+            "run",
+            wbf.to_str().unwrap(),
+            "-q",
+            "--checkpoint",
+            "../ESCAPED",
+        ])
+        .output()
+        .unwrap();
+    assert_ne!(code(&o), 0, "traversing checkpoint id must be rejected");
+    assert!(
+        err(&o).contains("invalid checkpoint id"),
+        "stderr: {}",
+        err(&o)
+    );
+    assert!(!escaped.exists(), "checkpoint escaped the store dir");
+}
+
+#[test]
+fn verify_sig_without_pubkey_warns_integrity_only() {
+    let home = tempdir().unwrap();
+    let dir = tempdir().unwrap();
+    keygen_pubkey(home.path());
+    let wbf = write(&dir, "w.md", SIGN_WB);
+    assert_eq!(
+        code(
+            &wb(home.path())
+                .args(["sign", wbf.to_str().unwrap()])
+                .output()
+                .unwrap()
+        ),
+        0
+    );
+    // verify-sig with no --pubkey: passes, but warns it isn't authenticating.
+    let o = wb(home.path())
+        .args(["verify-sig", wbf.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert_eq!(code(&o), 0, "stderr: {}", err(&o));
+    assert!(
+        err(&o).contains("not authorship") || err(&o).contains("integrity only"),
+        "missing the no-pin warning: {}",
+        err(&o)
+    );
+
+    // With the correct --pubkey pinned, the warning is gone.
+    let pubkey = keygen_pubkey(home.path()); // regenerates; sign again with it
+                                             // Re-sign so the on-disk key matches the freshly printed pubkey.
+    assert_eq!(
+        code(
+            &wb(home.path())
+                .args(["sign", wbf.to_str().unwrap()])
+                .output()
+                .unwrap()
+        ),
+        0
+    );
+    let o = wb(home.path())
+        .args(["verify-sig", wbf.to_str().unwrap(), "--pubkey", &pubkey])
+        .output()
+        .unwrap();
+    assert_eq!(code(&o), 0, "stderr: {}", err(&o));
+    assert!(
+        !err(&o).contains("integrity only"),
+        "pinned verify should not warn: {}",
+        err(&o)
+    );
+}
+
+#[test]
+fn run_verify_sig_without_pubkey_warns() {
+    let home = tempdir().unwrap();
+    let dir = tempdir().unwrap();
+    keygen_pubkey(home.path());
+    let wbf = write(&dir, "w.md", SIGN_WB);
+    assert_eq!(
+        code(
+            &wb(home.path())
+                .args(["sign", wbf.to_str().unwrap()])
+                .output()
+                .unwrap()
+        ),
+        0
+    );
+    let o = wb(home.path())
+        .args(["run", wbf.to_str().unwrap(), "-q", "--verify-sig"])
+        .output()
+        .unwrap();
+    assert_eq!(code(&o), 0, "stderr: {}", err(&o));
+    assert!(
+        err(&o).contains("integrity only"),
+        "run --verify-sig without --pubkey should warn: {}",
+        err(&o)
+    );
+}

@@ -1410,8 +1410,21 @@ fn fetch_remote(url: &str) -> Result<std::path::PathBuf, String> {
         .join("remote");
     std::fs::create_dir_all(&dir).map_err(|e| format!("remote cache: {e}"))?;
     let dest = dir.join(format!("{key}.md"));
+    // Restrict the transfer (and any redirect curl follows via -L) to http/https.
+    // Without --proto-redir a 30x from an otherwise-trusted host could send curl
+    // to file://, scp://, gopher://, dict://… — a local-file / SSRF read written
+    // straight into the workbook cache. Pin the allowed protocols explicitly.
     let out = std::process::Command::new("curl")
-        .args(["-fsSL", "--max-time", "30", "-o"])
+        .args([
+            "-fsSL",
+            "--proto",
+            "=https,http",
+            "--proto-redir",
+            "=https,http",
+            "--max-time",
+            "30",
+            "-o",
+        ])
         .arg(&dest)
         .arg(url)
         .output()
@@ -1469,6 +1482,16 @@ fn enforce_security_gates(
 
     // Signature gate (#37): verify against the same buffer.
     if sec.verify_sig {
+        // Without a pinned --pubkey this only proves the workbook is unchanged
+        // since *some* key signed it — an attacker who can rewrite the file can
+        // also drop a matching `.sig` signed with their own key and it "verifies".
+        // Pinning the author's key is what makes the gate meaningful; warn loudly.
+        if sec.verify_pubkey.is_none() {
+            eprintln!(
+                "warning: --verify-sig without --pubkey checks integrity only, not authorship — \
+                 anyone who can rewrite {file} can re-sign it. Pin the signer with --pubkey <hex>."
+            );
+        }
         let sp = signing::sig_path(file, None);
         match signing::load_sig(&sp)
             .and_then(|sig| signing::verify(&sig, content.as_bytes(), sec.verify_pubkey.as_deref()))
@@ -1519,6 +1542,12 @@ fn cmd_run(mut args: RunArgs) -> WbExit {
     // workbooks are ALWAYS trust-gated (TOFU) and never auto-executed.
     let mut remote_forced_trust = false;
     if let Some(url) = resolve_remote_url(&args.file) {
+        if url.starts_with("http://") {
+            eprintln!(
+                "warning: fetching {url} over plaintext http — content is exposed to network \
+                 tampering. Prefer https; wb still trust-gates the result before running."
+            );
+        }
         match fetch_remote(&url) {
             Ok(path) => {
                 eprintln!("wb: fetched {url}\n    → {}", path.display());
@@ -1575,6 +1604,15 @@ fn cmd_run_inner(args: RunArgs, remote_forced_trust: bool) -> WbExit {
     let require_trust = args.require_trust
         || remote_forced_trust
         || std::env::var("WB_REQUIRE_TRUST").ok().as_deref() == Some("1");
+
+    // Reject a path-traversing `--checkpoint` id before any lock/checkpoint file
+    // is touched (the MCP server forwards an attacker-controlled `run_id` here).
+    if let Some(id) = args.checkpoint.as_deref() {
+        if let Err(e) = checkpoint::validate_id(id) {
+            eprintln!("error: {e}");
+            return WbExit::Usage(e.to_string());
+        }
+    }
 
     // The integrity gates don't support folder runs; reject early (per-flag
     // messages preserved) before touching any file.
@@ -2199,6 +2237,12 @@ fn cmd_verify_sig(args: VerifySigArgs) -> WbExit {
             return WbExit::Io(e.to_string());
         }
     };
+    if args.pubkey.is_none() {
+        eprintln!(
+            "warning: no --pubkey given — verifying integrity only, not authorship. \
+             A signature made by any key will pass; pin the signer with --pubkey <hex>."
+        );
+    }
     let sp = signing::sig_path(&args.file, args.sig.as_deref());
     let result = signing::load_sig(&sp)
         .and_then(|sig| signing::verify(&sig, &content, args.pubkey.as_deref()));
@@ -2394,6 +2438,10 @@ tick();setInterval(tick,1000);
 }
 
 fn cmd_watch(args: WatchArgs) -> WbExit {
+    if let Err(e) = checkpoint::validate_id(&args.id) {
+        eprintln!("error: {e}");
+        return WbExit::Usage(e.to_string());
+    }
     if args.serve {
         return watch_serve(&args.id, args.port);
     }
@@ -7340,6 +7388,10 @@ fn cmd_pending_impl(json_out: bool, no_reap: bool) {
 }
 
 fn cmd_cancel(id: &str, json: bool) -> WbExit {
+    if let Err(e) = checkpoint::validate_id(id) {
+        eprintln!("error: {e}");
+        return WbExit::Usage(e.to_string());
+    }
     let had_desc = pending::descriptor_path(id).exists();
     let had_ckpt = checkpoint::checkpoint_path(id).exists();
     if !had_desc && !had_ckpt {
@@ -7415,6 +7467,12 @@ fn cmd_resume_cmd(cli: ResumeArgs) -> WbExit {
             }
         };
     let id = id.as_str();
+
+    // Reject a path-traversing id before we build a lock-file path from it.
+    if let Err(e) = checkpoint::validate_id(id) {
+        eprintln!("error: {e}");
+        return WbExit::Usage(e.to_string());
+    }
 
     // Hold the same advisory lock `wb run` uses, so a concurrent run of the
     // same id fails fast instead of racing on checkpoint state. Released

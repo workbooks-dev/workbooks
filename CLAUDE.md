@@ -766,6 +766,10 @@ long-lived server. Zero new dependencies (`serde_json` only). Implemented in
 **Tools** (`tools/list`):
 
 - `author_workbook {path, content, overwrite?}` — write a `.md` workbook to disk.
+  Confined to authoring workbooks: the path must end in `.md`/`.markdown` and may
+  not contain `..` components, so a coerced client can't clobber shell configs,
+  `~/.ssh`, `.sig` files, or the trust store. Set `WB_MCP_ROOT` to additionally
+  jail every write under one directory.
 - `run_workbook {file, run_id?, vars?, dir?, bail?}` — execute. Returns `run_id`
   (= checkpoint id) and a task `status`. `bail` defaults true.
 - `resume_workbook {run_id, value? | signal? | action?, rerun_step?, goto_step?}` —
@@ -794,6 +798,38 @@ long-lived server. Zero new dependencies (`serde_json` only). Implemented in
 
 The full author→run→pause→resume→read lifecycle is covered end-to-end by
 `tests/mcp_e2e.rs`, which drives the JSON-RPC server exactly as a client would.
+
+## Untrusted-input boundaries
+
+The trust gate, signing, remote fetch, and MCP server all take input from
+outside the operator's direct control, so each enforces its own checks. What to
+rely on (and what not to):
+
+- **Checkpoint / run ids are slugs.** A `--checkpoint <id>` (CLI) or `run_id`
+  (MCP `run_workbook`/`resume_workbook`) becomes a `~/.wb/checkpoints/<id>.json`
+  filename, so ids are restricted to `[A-Za-z0-9._-]` with no leading `-` and no
+  `..` (`checkpoint::validate_id`). A traversing id is rejected before any
+  lock/checkpoint file is touched, so an MCP client can't write a `.json` outside
+  the store.
+- **MCP never shell-injects, and never option-injects.** `wb mcp` re-invokes the
+  `wb` binary (`current_exe`) with an argv vector (no shell), and the positional
+  workbook path is passed after a `--` separator so a `file` like `--sandbox`
+  reaches `wb run` as a path, not a flag. JSON-RPC messages are capped at 16 MiB
+  so a newline-less client can't exhaust memory.
+- **Signatures: pin the key or you only get integrity.** `wb verify-sig` /
+  `wb run --verify-sig` **without** `--pubkey` confirm only that the workbook is
+  unchanged since *some* key signed it — an attacker who can rewrite the file can
+  re-sign it with their own key and it "verifies". Both paths warn loudly when no
+  key is pinned. Verification is bound to the content bytes (the `sha256` field in
+  the `.sig` is diagnostic only, never trusted). Private keys are written `0600`
+  in a `0700` dir.
+- **Remote fetch is trust-gated and protocol-restricted.** `wb run gh:…` /
+  `wb run https://…` download to `~/.wb/remote/<sha-of-url>.md` and are **always**
+  TOFU-gated before running (a fetched file is `untrusted` on first sight, and any
+  later content change shows as `changed`). The `curl` transfer pins
+  `--proto`/`--proto-redir` to `https,http`, so a redirect can't bounce curl to
+  `file://`/`gopher://`/`scp://` and write a local-file read into the cache.
+  Plaintext `http://` refs warn about tampering exposure.
 
 ## Sandbox execution
 
